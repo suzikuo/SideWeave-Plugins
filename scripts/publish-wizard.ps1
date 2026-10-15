@@ -74,7 +74,7 @@ function Select-PluginChoices([object[]]$Items) {
     }
     do {
         $choice = (Read-Required "选择插件/皮肤编号（如 1,3；输入 all 全选）").ToLowerInvariant()
-        if ($choice -eq "all") { return ,$Items }
+        if ($choice -eq "all") { return $Items }
         $tokens = @($choice -split "[,;\s]+" | Where-Object { $_ })
         $numbers = @()
         $valid = $tokens.Count -gt 0
@@ -89,7 +89,7 @@ function Select-PluginChoices([object[]]$Items) {
         if ($valid) {
             $selected = @()
             foreach ($number in $numbers) { $selected += $Items[$number - 1] }
-            return ,$selected
+            return $selected
         }
         Write-Host "输入无效。请用逗号分隔有效编号，或输入 all。" -ForegroundColor Yellow
     } while ($true)
@@ -686,27 +686,37 @@ else {
 }
 
 $builtPackages = @()
-foreach ($plugin in $selectedPlugins) {
-    $pluginId = [string]$plugin.id
-    $pluginVersion = if ($Version) { $Version } else { [string]$plugin.version }
-    if (-not $SkipBuild) {
-        Write-Host ""
-        Write-Host "开始构建并签名 $($plugin.kind)/$pluginId v$pluginVersion..." -ForegroundColor Cyan
-        $buildArgs = @{
-            Id = $pluginId
-            Kind = [string]$plugin.kind
-            Version = $pluginVersion
-            SigningKeyPath = $SigningKeyPath
-            MarketplacePath = $MarketplacePath
-            MinisignExe = $MinisignExe
-            OutputPath = $OutputRoot
+$signingKeyPassword = $null
+if (-not $SkipBuild) {
+    $signingKeyPassword = Read-Host -Prompt "输入本次所选全部插件/皮肤共用的 publisher 私钥密码（密钥无密码时直接回车）" -AsSecureString
+}
+try {
+    foreach ($plugin in $selectedPlugins) {
+        $pluginId = [string]$plugin.id
+        $pluginVersion = if ($Version) { $Version } else { [string]$plugin.version }
+        if (-not $SkipBuild) {
+            Write-Host ""
+            Write-Host "开始构建并签名 $($plugin.kind)/$pluginId v$pluginVersion..." -ForegroundColor Cyan
+            $buildArgs = @{
+                Id = $pluginId
+                Kind = [string]$plugin.kind
+                Version = $pluginVersion
+                SigningKeyPath = $SigningKeyPath
+                SigningKeyPassword = $signingKeyPassword
+                MarketplacePath = $MarketplacePath
+                MinisignExe = $MinisignExe
+                OutputPath = $OutputRoot
+            }
+            & $ReleaseBuildScript @buildArgs
+            if ($LASTEXITCODE -ne 0) { throw "本地包构建或签名失败：$pluginId" }
         }
-        & $ReleaseBuildScript @buildArgs
-        if ($LASTEXITCODE -ne 0) { throw "本地包构建或签名失败：$pluginId" }
+        $kind = [string]$plugin.kind
+        $package = Get-PackageAssets -PluginId $pluginId -PluginVersion $pluginVersion -Kind $kind
+        $builtPackages += [PSCustomObject]@{ Id = $pluginId; Version = $pluginVersion; Kind = $kind; Package = $package }
     }
-    $kind = [string]$plugin.kind
-    $package = Get-PackageAssets -PluginId $pluginId -PluginVersion $pluginVersion -Kind $kind
-    $builtPackages += [PSCustomObject]@{ Id = $pluginId; Version = $pluginVersion; Kind = $kind; Package = $package }
+}
+finally {
+    if ($null -ne $signingKeyPassword) { $signingKeyPassword.Dispose() }
 }
 
 if ($LocalOnly) {

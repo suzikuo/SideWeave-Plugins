@@ -3,6 +3,7 @@ param(
     [ValidateSet("plugin", "skin")][string]$Kind = "plugin",
     [string]$Version = "",
     [string]$SigningKeyPath = "",
+    [System.Security.SecureString]$SigningKeyPassword = $null,
     [string]$MarketplacePath = "",
     [string]$MinisignExe = "",
     [string]$OutputPath = "dist/local-release"
@@ -69,13 +70,38 @@ if ([string]$keyHeader -notmatch '^untrusted comment:.*secret key') {
     throw "Publisher key is not a complete Minisign secret-key file."
 }
 
+function Invoke-Minisign([string[]]$Arguments) {
+    $passwordPointer = [IntPtr]::Zero
+    $plainPassword = $null
+    $previousOutputEncoding = $OutputEncoding
+    try {
+        $passwordPointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($SigningKeyPassword)
+        $plainPassword = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($passwordPointer)
+        $OutputEncoding = [Console]::InputEncoding
+        ($plainPassword + [Environment]::NewLine) | & $MinisignExe @Arguments
+        $script:MinisignExitCode = $LASTEXITCODE
+    }
+    finally {
+        $OutputEncoding = $previousOutputEncoding
+        $plainPassword = $null
+        if ($passwordPointer -ne [IntPtr]::Zero) {
+            [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($passwordPointer)
+        }
+    }
+}
+
 $tag = if ($Kind -eq "skin") { "skin-$Id-v$Version" } else { "plugin-$Id-v$Version" }
 $releaseRoot = Join-Path $OutputPath $tag
 New-Item -ItemType Directory -Path $releaseRoot -Force | Out-Null
 $derivedPublicKey = Join-Path $releaseRoot "publisher-derived.pub"
+$ownsSigningKeyPassword = $false
 try {
-    & $MinisignExe -R -s $SigningKeyPath -p $derivedPublicKey
-    if ($LASTEXITCODE -ne 0) { throw "Could not derive public key from the signing key." }
+    if ($null -eq $SigningKeyPassword) {
+        $SigningKeyPassword = Read-Host -Prompt "输入 publisher 私钥密码（密钥无密码时直接回车）" -AsSecureString
+        $ownsSigningKeyPassword = $true
+    }
+    Invoke-Minisign -Arguments @("-R", "-s", $SigningKeyPath, "-p", $derivedPublicKey)
+    if ($script:MinisignExitCode -ne 0) { throw "Could not derive public key from the signing key." }
     $derivedPayload = (Get-Content -LiteralPath $derivedPublicKey | Select-Object -Last 1).Trim()
     if ($derivedPayload -ne [string]$keyRecord.public_key) {
         throw "Signing key does not match sideweave/$($keyRecord.id) in publishers.json."
@@ -111,8 +137,8 @@ try {
     $signaturePath = "$archive.minisig"
     $checksumPath = "$archive.sha256"
     Remove-Item -LiteralPath $signaturePath, $checksumPath -Force -ErrorAction SilentlyContinue
-    & $MinisignExe -S -s $SigningKeyPath -m $archive -x $signaturePath
-    if ($LASTEXITCODE -ne 0) { throw "Minisign could not sign $([IO.Path]::GetFileName($archive))." }
+    Invoke-Minisign -Arguments @("-S", "-s", $SigningKeyPath, "-m", $archive, "-x", $signaturePath)
+    if ($script:MinisignExitCode -ne 0) { throw "Minisign could not sign $([IO.Path]::GetFileName($archive))." }
     $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
     $checksumText = "$hash  $([IO.Path]::GetFileName($archive))" + [Environment]::NewLine
     [IO.File]::WriteAllText($checksumPath, $checksumText, (New-Object Text.UTF8Encoding($false)))
@@ -124,4 +150,5 @@ try {
     Write-Host "  $checksumPath"
 } finally {
     Remove-Item -LiteralPath $derivedPublicKey -Force -ErrorAction SilentlyContinue
+    if ($ownsSigningKeyPassword -and $null -ne $SigningKeyPassword) { $SigningKeyPassword.Dispose() }
 }

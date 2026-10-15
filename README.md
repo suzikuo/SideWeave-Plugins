@@ -44,6 +44,8 @@ Run the full build, signing, GitHub Release, and Marketplace workflow:
 
 The interactive wizard lets you build locally or publish one or more official plugins or skins. Before upload it verifies the source is committed and pushed to the GitHub default branch. It builds ZIP packages, checks the active SideWeave signing key, writes and verifies Minisign and SHA256 assets, creates or updates `plugin-<id>-v<version>` or `skin-<id>-v<version>` Releases in `suzikuo/SideWeave-Plugins`, updates each Marketplace entry to contain only the current version, and commits and pushes `marketplace.json`. After the catalog update succeeds, it deletes older Releases and their Git tags for the items being published. It lists every old tag and asks for confirmation before publishing and pruning.
 
+The wizard asks for the publisher key password once per run and reuses it for every selected package. Leave it blank if the key has no password.
+
 The publisher key defaults to `../_private/sideweave-publisher.key`, Minisign defaults to `../_private/minisign/minisign.exe`, and the Marketplace checkout defaults to `../marketplace`. Override paths with `-SigningKeyPath`, `-MinisignExe`, and `-MarketplacePath` when needed.
 
 Common non-interactive forms:
