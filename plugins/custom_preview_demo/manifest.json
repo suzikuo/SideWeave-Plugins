@@ -1,0 +1,26 @@
+{
+  "manifestVersion": 1,
+  "apiVersion": 1,
+  "id": "custom_preview_demo",
+  "name": "自定义预览演示",
+  "icon": "icon.svg",
+  "version": "1.0.0",
+  "description": "测试插件独立悬浮预览页、主题同步与交互消息。",
+  "author": "SideWeave Demo",
+  "runtime": "web_sandbox",
+  "trust": "sandboxed",
+  "autoStart": false,
+  "permissions": [],
+  "ui": {
+    "entry": "index.html",
+    "kind": "html",
+    "assetRoot": ".",
+    "initialWidth": 560,
+    "initialHeight": 560
+  },
+  "hoverPreview": {
+    "width": 360,
+    "height": 220,
+    "entry": "preview.html"
+  }
+}

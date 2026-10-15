@@ -19,6 +19,7 @@
     "entry": "ui/index.html",
     "kind": "vue",
     "assetRoot": "ui",
+    "chrome": "plugin",
     "initialWidth": 580,
     "initialHeight": 760
   }

@@ -43,6 +43,7 @@ impl NotificationLabPlugin {
                     initial_height: Some(800),
                     min_width: Some(520),
                     min_height: Some(640),
+                    chrome: None,
                 }),
                 hover_preview: None,
                 auto_start: false,

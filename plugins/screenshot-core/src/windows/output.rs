@@ -19,9 +19,30 @@ use windows_sys::Win32::UI::Controls::Dialogs::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetSystemMetrics, KillTimer,
-    ShowWindow, SW_HIDE, SW_SHOW, WM_DESTROY, WM_KEYDOWN, WM_PAINT, WM_RBUTTONUP,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    IsWindowVisible, ShowWindow, SW_HIDE, SW_SHOW, WM_DESTROY, WM_KEYDOWN, WM_PAINT,
+    WM_RBUTTONUP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
+
+pub(super) fn hide_capture_windows(state: &UiState) {
+    let mut windows = vec![
+        state.overlay,
+        state.scroll_control,
+        state.scroll_tooltip,
+        state.scroll_preview,
+        state.scroll_tip,
+        state.scroll_border,
+        state.recording_toolbar,
+    ];
+    windows.extend(state.scroll_masks.iter().copied());
+
+    for window in windows {
+        if !window.is_null() && unsafe { IsWindowVisible(window) != 0 } {
+            unsafe {
+                ShowWindow(window, SW_HIDE);
+            }
+        }
+    }
+}
 
 pub(super) fn save_png_with_dialog(
     owner: HWND,
@@ -127,15 +148,16 @@ pub(super) fn finish_inner(
             Some((settings, width, height, pixels))
         });
         if let Some((settings, width, height, pixels)) = export {
+            hide_capture_windows(state);
             match save_png_with_dialog(state.hwnd, &settings, &pixels, width, height) {
                 Ok(Some(path)) => saved_path = Some(path),
                 Ok(None) => {
-                    super::invalidate(state);
+                    super::cancel(state);
                     return;
                 }
                 Err(error) => {
                     set_error(state, error);
-                    super::invalidate(state);
+                    super::cancel(state);
                     return;
                 }
             }

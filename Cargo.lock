@@ -1653,7 +1653,7 @@ dependencies = [
 
 [[package]]
 name = "sideweave_plugin-screenshot-core"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "arboard",
  "base64 0.22.1",

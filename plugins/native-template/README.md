@@ -10,4 +10,6 @@ Declare requested host API capabilities in manifest.json. For a native package s
 
 The UI is a separate Vite/Vue bundle under ui/. It must not import from the host src directory and should use relative asset URLs. The package builder compiles the UI and places the manifest, backend DLL, icon, and generated UI files into one ZIP.
 
+The manifest opts into a fully custom detail layout with `ui.chrome: "plugin"`. In this mode the host hides its plugin name and icon and gives the plugin UI the full content area. The host keeps its close and minimize controls. Omit this option or set it to `"host"` to show the standard plugin header.
+
 For web plugins, use the separate suzikuo/SideWeave-plugin-template repository. Repository roles, package rules, and release steps are documented in SideWeave/docs/PLUGIN_REPOSITORY.md.

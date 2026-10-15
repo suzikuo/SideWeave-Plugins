@@ -71,3 +71,7 @@ Rust plugin packages depend on `sideweave-plugin-api` for protocol types and `si
 ## Runtime and trust
 
 Web plugins use web_sandbox. Native plugins use dynamic_library or external_process, declare requires_trust: true, and list requested host capabilities in manifest.json. Capabilities gate host API calls; native code can still access the operating system directly. The host verifies signed Marketplace packages and asks users to trust a native publisher on first install.
+
+## Custom plugin detail pages
+
+Every plugin supplies its own detail UI through `ui.entry`; HTML, Vue, and React bundles can define the page content and styling. By default the host adds a plugin identity header. Set `ui.chrome` to `"plugin"` in `manifest.json` to hide that header and let the UI use the full detail content area. The host retains close and minimize controls. The Rust API equivalent is `PluginUiChrome::Plugin`.

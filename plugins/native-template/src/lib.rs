@@ -1,6 +1,6 @@
 use sideweave_plugin_api::{
     PluginError, PluginManifest, PluginRequest, PluginResponse, PluginRuntime, PluginTrust,
-    PluginUi, PluginUiKind, API_VERSION, MANIFEST_VERSION,
+    PluginUi, PluginUiChrome, PluginUiKind, API_VERSION, MANIFEST_VERSION,
 };
 use sideweave_plugin_sdk::{success_response, Plugin, PluginContext};
 use serde_json::json;
@@ -29,6 +29,7 @@ impl DemoPlugin {
                     entry: "ui/index.html".into(),
                     kind: Some(PluginUiKind::Html),
                     asset_root: "ui".into(),
+                    chrome: Some(PluginUiChrome::Plugin),
                     initial_width: Some(580),
                     initial_height: Some(760),
                     ..Default::default()

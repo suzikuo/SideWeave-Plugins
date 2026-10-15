@@ -1,4 +1,4 @@
-use super::output::{finish_inner, save_png_with_dialog};
+use super::output::{finish_inner, hide_capture_windows, save_png_with_dialog};
 use super::paint::{create_gdi_surface, create_pixel_surface, rgba_preview_bgra, GdiSurface};
 use super::scroll_ui::{
     destroy_scroll_border, destroy_scroll_masks, destroy_scroll_preview, destroy_scroll_tip,
@@ -852,18 +852,19 @@ pub(super) fn finish_editor(
             invalidate(state);
             return;
         };
+        hide_capture_windows(state);
         match save_png_with_dialog(state.hwnd, &settings, &pixels, width, height) {
             Ok(Some(path)) => {
                 finish_editor(state, false, copy_only, Some(path));
                 return;
             }
             Ok(None) => {
-                invalidate(state);
+                super::cancel(state);
                 return;
             }
             Err(error) => {
                 set_error(state, error);
-                invalidate(state);
+                super::cancel(state);
                 return;
             }
         }

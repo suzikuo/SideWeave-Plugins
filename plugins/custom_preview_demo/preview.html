@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>自定义悬浮预览</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --accent:#50e3c2; --surface:#111b29; --surface-subtle:#ffffff0d;
+      --text:#f2f6fb; --text-muted:#a2b0c1; --border:#ffffff20;
+      font-family:"Segoe UI","Microsoft YaHei",sans-serif;
+    }
+    * { box-sizing:border-box; }
+    html,body { width:100%; height:100%; margin:0; overflow:hidden; }
+    body { padding:7px; color:var(--text); background:transparent; }
+    .card {
+      position:relative; width:100%; height:100%; overflow:hidden; padding:14px;
+      border:1px solid var(--border); border-radius:12px;
+      background:
+        radial-gradient(ellipse at 92% 6%,color-mix(in srgb,var(--accent) 24%,transparent),transparent 42%),
+        linear-gradient(145deg,color-mix(in srgb,var(--surface) 96%,#22364a),var(--surface));
+      box-shadow:0 12px 32px #0005;
+    }
+    .top,.bottom,.status { display:flex; align-items:center; justify-content:space-between; }
+    .top { height:19px; color:var(--text-muted); font:700 9px Consolas,monospace; letter-spacing:.13em; }
+    .live { display:flex; align-items:center; gap:6px; color:var(--accent); letter-spacing:.08em; }
+    .dot { width:6px; height:6px; border-radius:50%; background:var(--accent); box-shadow:0 0 10px var(--accent); }
+    .main { display:flex; align-items:center; gap:13px; margin-top:9px; }
+    .orb {
+      display:grid; width:54px; height:54px; flex:0 0 54px; place-items:center;
+      border:1px solid color-mix(in srgb,var(--accent) 40%,transparent); border-radius:18px;
+      color:var(--accent); background:color-mix(in srgb,var(--accent) 13%,transparent);
+    }
+    .orb svg { width:26px; height:26px; }
+    h1 { margin:0 0 4px; font-size:16px; letter-spacing:-.03em; }
+    .subtitle { color:var(--text-muted); font-size:10px; }
+    .status { margin-top:11px; gap:8px; }
+    .time { color:var(--text); font:700 23px/1 Consolas,monospace; letter-spacing:-.05em; }
+    .rounds { color:var(--text-muted); font-size:9px; text-align:right; }
+    .rounds strong { display:block; margin-bottom:3px; color:var(--accent); font-size:12px; }
+    .bottom { gap:8px; margin-top:10px; }
+    button {
+      min-height:30px; padding:0 11px; border:1px solid var(--border); border-radius:9px;
+      color:var(--text); background:var(--surface-subtle);
+      font:600 10px/1.1 "Segoe UI","Microsoft YaHei",sans-serif; cursor:pointer;
+    }
+    button:hover { border-color:color-mix(in srgb,var(--accent) 70%,transparent); }
+    button.primary { flex:1; border-color:transparent; color:#071a18; background:var(--accent); }
+    button:active { transform:scale(.98); }
+    .hint { margin-top:7px; color:var(--text-muted); font-size:8px; opacity:.8; }
+    @media (prefers-reduced-motion:no-preference) {
+      .dot { animation:pulse 1.7s ease-in-out infinite; }
+      @keyframes pulse { 50% { opacity:.45; transform:scale(.82); } }
+    }
+  </style>
+</head>
+<body>
+  <section class="card">
+    <div class="top">
+      <span>FOCUS / SESSION 08</span>
+      <span class="live"><i class="dot"></i><span id="themeLabel">LIVE PREVIEW</span></span>
+    </div>
+    <div class="main">
+      <div class="orb" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 3v3m0 12v3M3 12h3m12 0h3M5.64 5.64l2.12 2.12m8.48 8.48 2.12 2.12m0-12.72-2.12 2.12m-8.48 8.48-2.12 2.12"/>
+          <circle cx="12" cy="12" r="5"/>
+        </svg>
+      </div>
+      <div><h1>专注模式</h1><div class="subtitle">把注意力留给正在做的事</div></div>
+    </div>
+    <div class="status">
+      <div class="time" id="timer">25:00</div>
+      <div class="rounds"><strong><span id="count">3</span> 轮</strong>今日专注</div>
+    </div>
+    <div class="bottom">
+      <button class="primary" id="complete">完成一轮　＋</button>
+      <button id="close">收起预览</button>
+    </div>
+    <div class="hint">按钮、状态和布局均由插件页面自行绘制</div>
+  </section>
+  <script>
+    let completed = 3;
+    const count = document.getElementById('count');
+    document.getElementById('complete').addEventListener('click', () => {
+      completed += 1;
+      count.textContent = String(completed);
+    });
+    document.getElementById('close').addEventListener('click', () => {
+      window.parent.postMessage({ __agileTiles: true, type: 'close-preview' }, '*');
+    });
+    window.addEventListener('message', (event) => {
+      if (event.source !== window.parent) return;
+      const message = event.data;
+      if (!message || message.__agileTiles !== true || message.type !== 'theme' || !message.theme) return;
+      for (const [name, value] of Object.entries(message.theme.variables || {})) {
+        if (name.startsWith('--') && typeof value === 'string') {
+          document.documentElement.style.setProperty(name, value);
+        }
+      }
+      document.getElementById('themeLabel').textContent =
+        message.theme.theme === 'light' ? 'LIGHT THEME' : 'LIVE PREVIEW';
+    });
+  </script>
+</body>
+</html>

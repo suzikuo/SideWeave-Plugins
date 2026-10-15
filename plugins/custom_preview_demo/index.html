@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>自定义预览演示</title>
+  <style>
+    :root { color-scheme: dark; font-family: "Segoe UI","Microsoft YaHei",sans-serif; --accent:#50e3c2; --text:#f4f7fb; --muted:#9aa8ba; }
+    * { box-sizing:border-box; }
+    body { margin:0; min-height:100vh; padding:30px; color:var(--text); background:radial-gradient(ellipse at 12% 0%,#223a43,transparent 42%),#10151f; }
+    main { max-width:680px; margin:auto; }
+    .tag { color:var(--accent); font:700 11px Consolas,monospace; letter-spacing:.15em; }
+    h1 { margin:10px 0 8px; font-size:26px; }
+    p { color:var(--muted); line-height:1.7; }
+    section { margin-top:24px; padding:20px; border:1px solid #ffffff1b; border-radius:18px; background:#171f2dee; }
+    li { margin:12px 0; color:var(--muted); line-height:1.55; }
+    code { color:var(--accent); font:12px Consolas,monospace; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="tag">PLUGIN PREVIEW PLAYGROUND</div>
+    <h1>自定义悬浮预览</h1>
+    <p>此插件使用独立 HTML 页面绘制悬浮卡片。卡片布局和交互由插件控制，不依赖宿主的通用预览模板。</p>
+    <section>
+      <div class="tag">如何测试</div>
+      <ol>
+        <li>回到侧边栏，悬停在“自定义预览演示”图标上。</li>
+        <li>点击卡片里的“完成一轮”，查看插件自己的交互状态。</li>
+        <li>点击“收起预览”，验证插件向宿主发送关闭消息。</li>
+      </ol>
+      <p>清单入口：<code>hoverPreview.entry = preview.html</code>。预览运行在受限 iframe 中，并接收宿主主题变量。</p>
+    </section>
+  </main>
+</body>
+</html>
