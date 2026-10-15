@@ -1,0 +1,25 @@
+{
+  "manifestVersion": 1,
+  "apiVersion": 1,
+  "id": "demo",
+  "name": "Demo Plugin",
+  "icon": "ui/icon.svg",
+  "version": "0.1.0",
+  "description": "A local SideWeave plugin.",
+  "author": "Your Name",
+  "type": "native",
+  "publisher": "your-publisher-id",
+  "key_id": "publisher-key-id",
+  "requires_trust": true,
+  "runtime": "dynamic_library",
+  "backend": "plugin.dll",
+  "autoStart": false,
+  "capabilities": [],
+  "ui": {
+    "entry": "ui/index.html",
+    "kind": "vue",
+    "assetRoot": "ui",
+    "initialWidth": 580,
+    "initialHeight": 760
+  }
+}

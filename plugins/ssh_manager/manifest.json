@@ -1,0 +1,38 @@
+{
+  "manifestVersion": 1,
+  "apiVersion": 1,
+  "id": "ssh_manager",
+  "name": "SSH",
+  "icon": "ui/icon.svg",
+  "version": "1.0.7",
+  "description": "SSH ????????????????????",
+  "author": "SideWeave",
+  "type": "native",
+  "publisher": "sideweave",
+  "key_id": "main-2026-rotation-1",
+  "requires_trust": true,
+  "runtime": "dynamic_library",
+  "backend": "plugin.dll",
+  "autoStart": false,
+  "capabilities": [
+    "storage",
+    "filesystem.read",
+    "filesystem.write",
+    "filesystem.external_read",
+    "system.file_picker",
+    "network.connect",
+    "process.spawn"
+  ],
+  "ui": {
+    "entry": "ui/index.html",
+    "kind": "vue",
+    "assetRoot": "ui",
+    "initialWidth": 760,
+    "initialHeight": 760
+  },
+  "hoverPreview": {
+    "width": 300,
+    "height": 280,
+    "dataMethod": "get_preview"
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "manifestVersion": 1,
+  "apiVersion": 1,
+  "id": "port_forward",
+  "name": "????",
+  "icon": "ui/icon.svg",
+  "version": "1.0.7",
+  "description": "?? TCP ?????????????",
+  "author": "SideWeave",
+  "type": "native",
+  "publisher": "sideweave",
+  "key_id": "main-2026-rotation-1",
+  "requires_trust": true,
+  "runtime": "dynamic_library",
+  "backend": "plugin.dll",
+  "autoStart": true,
+  "capabilities": [
+    "storage",
+    "network.listen",
+    "network.connect"
+  ],
+  "ui": {
+    "entry": "ui/index.html",
+    "kind": "vue",
+    "assetRoot": "ui",
+    "initialWidth": 720,
+    "initialHeight": 620
+  }
+}

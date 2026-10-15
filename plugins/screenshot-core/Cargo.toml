@@ -1,0 +1,46 @@
+[package]
+name = "agile-tiles-plugin-screenshot-core"
+version = "0.3.7"
+edition = "2021"
+description = "Native Windows screenshot core for Agile Tiles"
+
+[[bin]]
+name = "agile-tiles-screenshot-core"
+path = "src/main.rs"
+
+[dependencies]
+agile-tiles-plugin-ipc = { workspace = true }
+agile-tiles-plugin-sdk = { workspace = true }
+arboard = "3"
+base64 = "0.22"
+encoding_rs = "0.8"
+hex = "0.4"
+hmac = "0.12"
+gif = "0.14"
+image = { version = "0.25", default-features = false, features = ["png", "webp"] }
+quircs = "0.10"
+rxing = { version = "0.9", default-features = false, features = ["decoders", "qrcode", "encoding_rs"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_GdiPlus",
+    "Win32_System_LibraryLoader",
+    "Win32_System_SystemInformation",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_Storage_FileSystem",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Controls_Dialogs",
+    "Win32_UI_WindowsAndMessaging",
+] }
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+] }

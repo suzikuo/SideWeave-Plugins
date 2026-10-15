@@ -1,0 +1,223 @@
+/* 工具箱共享样式（tb- 前缀，随 ToolboxView 挂载时加载）
+ * 颜色 / 圆角 / 阴影全部引用 tokens.css 设计令牌，M3 风格紧凑尺寸。
+ */
+
+.tb-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* ---------- 面板 ---------- */
+.tb-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius, 12px);
+  background: color-mix(in srgb, var(--surface-subtle) 55%, transparent);
+}
+
+.tb-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.tb-head-text {
+  min-width: 0;
+  margin-right: 4px;
+}
+.tb-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+.tb-desc {
+  margin-top: 1px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+.tb-flex {
+  flex: 1;
+}
+
+/* ---------- 按钮 ---------- */
+.tb-btn {
+  padding: 5px 11px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-subtle);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.4;
+  transition: border-color 0.15s, background 0.15s;
+}
+.tb-btn:hover {
+  border-color: var(--border-strong);
+}
+.tb-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.tb-btn:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+.tb-btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.tb-btn.primary:hover {
+  filter: brightness(1.1);
+}
+.tb-btn.active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, var(--surface-subtle));
+  color: color-mix(in srgb, var(--accent) 55%, var(--text));
+  font-weight: 600;
+}
+.tb-btn.ghost {
+  background: transparent;
+}
+.tb-btn.sm {
+  padding: 3px 9px;
+  font-size: 11.5px;
+  border-radius: 7px;
+}
+
+/* ---------- 表单 ---------- */
+.tb-label {
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+.tb-label-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 18px;
+}
+
+.tb-input,
+.tb-textarea {
+  width: 100%;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface);
+  color: var(--text);
+  outline: none;
+  user-select: text;
+  transition: border-color 0.15s;
+}
+.tb-input:focus,
+.tb-textarea:focus {
+  border-color: var(--accent);
+}
+.tb-input::placeholder,
+.tb-textarea::placeholder {
+  color: color-mix(in srgb, var(--text-muted) 75%, transparent);
+}
+.tb-textarea {
+  min-height: 96px;
+  resize: vertical;
+  font-family: Consolas, 'Cascadia Mono', 'Courier New', monospace;
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+/* ---------- 输出（等宽 + 可选中） ---------- */
+.tb-out {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface);
+  color: var(--text);
+  font-family: Consolas, 'Cascadia Mono', 'Courier New', monospace;
+  font-size: 12.5px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
+  overflow-wrap: anywhere;
+  user-select: text;
+  overflow-y: auto;
+  max-height: 320px;
+}
+.tb-out.empty {
+  color: var(--text-muted);
+}
+.tb-out.error {
+  border-color: color-mix(in srgb, var(--danger) 50%, transparent);
+  color: var(--danger);
+}
+
+.tb-mono {
+  font-family: Consolas, 'Cascadia Mono', 'Courier New', monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- 状态行 ---------- */
+.tb-status {
+  font-size: 12px;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+.tb-status.ok {
+  color: var(--success);
+}
+.tb-status.err {
+  color: var(--danger);
+}
+
+/* ---------- 布局 ---------- */
+.tb-cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  align-items: start;
+}
+.tb-col {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* ---------- 键值输出行（时间戳 / 颜色等转换结果） ---------- */
+.tb-kv {
+  display: grid;
+  grid-template-columns: 46px 1fr auto;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface) 65%, transparent);
+}
+.tb-kv .k {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.tb-kv code {
+  min-width: 0;
+  font-size: 12px;
+  word-break: break-all;
+  user-select: text;
+}
+
+/* ---------- 正则高亮 ---------- */
+mark.tb-mark {
+  padding: 0 1px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--accent) 40%, transparent);
+  color: inherit;
+}
+
+/* ---------- 窄容器（详情卡最小约 560px）：双栏降级为单栏 ---------- */
+@media (max-width: 640px) {
+  .tb-cols {
+    grid-template-columns: 1fr;
+  }
+}

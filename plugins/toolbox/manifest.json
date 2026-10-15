@@ -1,0 +1,28 @@
+{
+  "manifestVersion": 1,
+  "apiVersion": 1,
+  "id": "toolbox",
+  "name": "???",
+  "icon": "ui/icon.svg",
+  "version": "1.0.3",
+  "description": "??????JSON/Base64/???/UUID/??",
+  "author": "SideWeave",
+  "type": "native",
+  "publisher": "sideweave",
+  "key_id": "main-2026-rotation-1",
+  "requires_trust": true,
+  "runtime": "dynamic_library",
+  "backend": "plugin.dll",
+  "autoStart": false,
+  "capabilities": [
+    "filesystem.read",
+    "system.file_picker"
+  ],
+  "ui": {
+    "entry": "ui/index.html",
+    "kind": "vue",
+    "assetRoot": "ui",
+    "initialWidth": 760,
+    "initialHeight": 720
+  }
+}

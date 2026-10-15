@@ -1,0 +1,27 @@
+{
+  "manifestVersion": 1,
+  "apiVersion": 1,
+  "id": "demo_music",
+  "name": "Music",
+  "icon": "icon.svg",
+  "version": "1.0.0",
+  "description": "音乐播放器演示（支持 Custom 悬浮预览与无感控制）",
+  "author": "Agile Tiles",
+  "runtime": "web_sandbox",
+  "trust": "sandboxed",
+  "permissions": [
+    "storage"
+  ],
+  "ui": {
+    "entry": "index.html",
+    "kind": "html",
+    "assetRoot": ".",
+    "initialWidth": 460,
+    "initialHeight": 620
+  },
+  "hoverPreview": {
+    "width": 320,
+    "height": 180,
+    "entry": "preview.html"
+  }
+}

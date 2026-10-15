@@ -1,0 +1,123 @@
+:root {
+  --accent: #4d80ff;
+  --bg: #141419;
+  --surface: #1c1d22;
+  --surface-subtle: #23242a;
+  --surface-container: #2d2e35;
+  --text: #e8e9ed;
+  --text-muted: #9a9ca6;
+  --border: #3a3b42;
+  --border-strong: #6a6c76;
+  --success: #56dbbc;
+  --danger: #ffb4ab;
+  --warning: #e5bd68;
+  --shadow: 0 14px 36px rgba(0, 0, 0, 0.3);
+  --radius: 8px;
+  --radius-lg: 12px;
+}
+
+:root[data-theme='light'] {
+  --accent: #3370ff;
+  --bg: #f2f3f7;
+  --surface: #ffffff;
+  --surface-subtle: #eef0f4;
+  --surface-container: #e8eaef;
+  --text: #1a1c1e;
+  --text-muted: #42474b;
+  --border: #c1c7cb;
+  --border-strong: #72777b;
+  --success: #006b5b;
+  --danger: #ba1a1a;
+  --warning: #805600;
+  --shadow: 0 10px 28px rgba(24, 28, 36, 0.1), 0 2px 8px rgba(24, 28, 36, 0.06);
+  color-scheme: light;
+}
+
+:root[data-skin='minecraft'][data-theme='dark'] {
+  --accent: #85c65c;
+  --bg: #151515;
+  --surface: #1e1e1e;
+  --surface-subtle: #262626;
+  --surface-container: #262626;
+  --text: #e0e0e0;
+  --text-muted: #9a9a9a;
+  --border: #3a3a3a;
+  --border-strong: #6e6e6e;
+  --radius: 0px;
+  --radius-lg: 0px;
+}
+
+:root[data-skin='minecraft'][data-theme='light'] {
+  --accent: #6aa84f;
+  --bg: #d8d8d8;
+  --surface: #c6c6c6;
+  --surface-subtle: #bdbdbd;
+  --surface-container: #b5b5b5;
+  --text: #3f3f3f;
+  --text-muted: #5f5f5f;
+  --border: #8b8b8b;
+  --border-strong: #555555;
+  --radius: 0px;
+  --radius-lg: 0px;
+  color-scheme: light;
+}
+
+* { box-sizing: border-box; }
+html, body, #app { height: 100%; }
+html, body { margin: 0; overflow: auto; overflow-x: hidden; }
+body {
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--font-ui, 'Segoe UI Variable', 'Segoe UI', 'Microsoft YaHei UI', system-ui, sans-serif);
+  font-size: 13px;
+}
+button, input, select, textarea { font: inherit; }
+button { cursor: pointer; }
+
+[data-skin='minecraft'] body,
+[data-skin='minecraft'] button,
+[data-skin='minecraft'] input,
+[data-skin='minecraft'] select,
+[data-skin='minecraft'] textarea {
+  font-family: 'Courier New', Consolas, 'SimHei', monospace !important;
+  letter-spacing: 0.5px;
+}
+
+[data-skin='minecraft'] .segmented,
+[data-skin='minecraft'] .card,
+[data-skin='minecraft'] .btn {
+  border-radius: 0 !important;
+  box-shadow: 3px 3px 0 rgba(0, 0, 0, 0.35);
+}
+
+html[data-agile-tiles-embedded] body {
+  padding: 16px 18px;
+  min-height: 100%;
+  height: auto;
+  overflow: visible;
+}
+
+html[data-agile-tiles-embedded] {
+  height: auto;
+  min-height: 100%;
+  overflow-y: auto;
+}
+
+html[data-agile-tiles-embedded] #app {
+  height: auto;
+  min-height: 100%;
+}
+
+::-webkit-scrollbar {
+  width: 2px;
+  height: 2px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 2px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}

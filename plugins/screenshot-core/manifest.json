@@ -1,0 +1,28 @@
+{
+  "manifestVersion": 1,
+  "apiVersion": 1,
+  "id": "screenshot",
+  "name": "快捷截图",
+  "icon": "ui/icon.svg",
+  "version": "0.3.7",
+  "description": "桌面截图与区域录制：滚动长截图、标注、OCR、贴图、动画 WebP 与 GIF 导出",
+  "author": "SideWeave",
+  "type": "native",
+  "publisher": "sideweave",
+  "key_id": "main-2026-rotation-1",
+  "requires_trust": true,
+  "runtime": "external_process",
+  "backend": "agile-tiles-screenshot-core.exe",
+  "autoStart": true,
+  "capabilities": ["filesystem.write", "shortcut.global", "clipboard", "network.connect", "storage"],
+  "ui": {
+    "entry": "ui/index.html",
+    "kind": "vue",
+    "assetRoot": "ui",
+    "initialWidth": 760,
+    "initialHeight": 1020,
+    "minWidth": 620,
+    "minHeight": 760
+  }
+}
+

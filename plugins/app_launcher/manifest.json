@@ -1,0 +1,36 @@
+{
+  "manifestVersion": 1,
+  "apiVersion": 1,
+  "id": "app_launcher",
+  "name": "App Launcher",
+  "icon": "ui/icon.svg",
+  "version": "1.0.4",
+  "description": "??????????????? Chrome ????",
+  "author": "SideWeave",
+  "type": "native",
+  "publisher": "sideweave",
+  "key_id": "main-2026-rotation-1",
+  "requires_trust": true,
+  "runtime": "dynamic_library",
+  "backend": "plugin.dll",
+  "autoStart": false,
+  "capabilities": [
+    "storage",
+    "filesystem.read",
+    "process.spawn",
+    "system.file_picker",
+    "system.icon"
+  ],
+  "ui": {
+    "entry": "ui/index.html",
+    "kind": "vue",
+    "assetRoot": "ui",
+    "initialWidth": 760,
+    "initialHeight": 720
+  },
+  "hoverPreview": {
+    "width": 280,
+    "height": 250,
+    "dataMethod": "get_preview"
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "manifestVersion": 1,
+  "apiVersion": 1,
+  "id": "bookmarks",
+  "name": "??",
+  "icon": "ui/icon.svg",
+  "version": "1.0.6",
+  "description": "??????????????????",
+  "author": "SideWeave",
+  "type": "native",
+  "publisher": "sideweave",
+  "key_id": "main-2026-rotation-1",
+  "requires_trust": true,
+  "runtime": "dynamic_library",
+  "backend": "plugin.dll",
+  "autoStart": false,
+  "capabilities": [
+    "storage",
+    "system.open_external"
+  ],
+  "ui": {
+    "entry": "ui/index.html",
+    "kind": "vue",
+    "assetRoot": "ui",
+    "initialWidth": 760,
+    "initialHeight": 720
+  },
+  "hoverPreview": {
+    "width": 280,
+    "height": 260,
+    "dataMethod": "get_preview"
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "manifestVersion": 1,
+  "apiVersion": 1,
+  "id": "cloudflare_tunnel",
+  "name": "Cloudflare Tunnel",
+  "icon": "ui/icon.svg",
+  "version": "1.0.8",
+  "description": "cloudflared Tunnel ????? ingress ????",
+  "author": "SideWeave",
+  "type": "native",
+  "publisher": "sideweave",
+  "key_id": "main-2026-rotation-1",
+  "requires_trust": true,
+  "runtime": "dynamic_library",
+  "backend": "plugin.dll",
+  "autoStart": false,
+  "capabilities": [
+    "storage",
+    "filesystem.read",
+    "filesystem.write",
+    "system.file_picker",
+    "process.spawn",
+    "system.open_external",
+    "network.connect"
+  ],
+  "ui": {
+    "entry": "ui/index.html",
+    "kind": "vue",
+    "assetRoot": "ui",
+    "initialWidth": 840,
+    "initialHeight": 780
+  },
+  "hoverPreview": {
+    "width": 280,
+    "height": 180,
+    "dataMethod": "get_preview"
+  }
+}
