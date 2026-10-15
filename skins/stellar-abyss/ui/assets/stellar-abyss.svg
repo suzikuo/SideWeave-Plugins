@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1920 1200" preserveAspectRatio="xMidYMid slice">
+  <defs>
+    <linearGradient id="space" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#030611"/>
+      <stop offset=".48" stop-color="#09132a"/>
+      <stop offset="1" stop-color="#050a18"/>
+    </linearGradient>
+    <radialGradient id="nebula-cyan">
+      <stop stop-color="#36d9ff" stop-opacity=".42"/>
+      <stop offset=".38" stop-color="#247bd6" stop-opacity=".2"/>
+      <stop offset="1" stop-color="#132d83" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="nebula-violet">
+      <stop stop-color="#b174ff" stop-opacity=".38"/>
+      <stop offset=".42" stop-color="#6845d9" stop-opacity=".18"/>
+      <stop offset="1" stop-color="#31166f" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="planet" cx="34%" cy="26%">
+      <stop stop-color="#e6fbff"/>
+      <stop offset=".16" stop-color="#72d8ff"/>
+      <stop offset=".56" stop-color="#28538d"/>
+      <stop offset="1" stop-color="#10152f"/>
+    </radialGradient>
+    <linearGradient id="planet-rim" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#e1fbff" stop-opacity=".82"/>
+      <stop offset=".38" stop-color="#67cfff" stop-opacity=".35"/>
+      <stop offset="1" stop-color="#8f61ff" stop-opacity="0"/>
+    </linearGradient>
+    <pattern id="fine-stars" width="173" height="139" patternUnits="userSpaceOnUse">
+      <circle cx="13" cy="20" r="1.1" fill="#e8f8ff" opacity=".78"/>
+      <circle cx="64" cy="95" r=".75" fill="#b8dfff" opacity=".66"/>
+      <circle cx="127" cy="42" r=".95" fill="#fff" opacity=".76"/>
+      <circle cx="157" cy="121" r=".65" fill="#8ce7ff" opacity=".72"/>
+      <circle cx="37" cy="128" r=".55" fill="#d5c8ff" opacity=".64"/>
+      <circle cx="103" cy="119" r=".5" fill="#fff" opacity=".56"/>
+      <circle cx="81" cy="31" r=".6" fill="#9abaff" opacity=".66"/>
+    </pattern>
+    <pattern id="distant-stars" width="283" height="221" patternUnits="userSpaceOnUse">
+      <circle cx="39" cy="59" r="1.55" fill="#f5fcff" opacity=".9"/>
+      <circle cx="191" cy="25" r="1.2" fill="#bfeaff" opacity=".8"/>
+      <circle cx="244" cy="151" r="1.35" fill="#fff" opacity=".86"/>
+      <circle cx="111" cy="186" r="1" fill="#d5c8ff" opacity=".72"/>
+    </pattern>
+    <filter id="glow" x="-80%" y="-80%" width="260%" height="260%">
+      <feGaussianBlur stdDeviation="8" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <clipPath id="planet-clip"><circle cx="1512" cy="390" r="188"/></clipPath>
+  </defs>
+  <rect width="1920" height="1200" fill="url(#space)"/>
+  <ellipse cx="510" cy="492" rx="670" ry="382" fill="url(#nebula-violet)" transform="rotate(-24 510 492)"/>
+  <ellipse cx="1242" cy="814" rx="750" ry="410" fill="url(#nebula-cyan)" transform="rotate(-19 1242 814)"/>
+  <ellipse cx="1000" cy="254" rx="500" ry="250" fill="url(#nebula-violet)" transform="rotate(14 1000 254)"/>
+  <g opacity=".58" fill="none" stroke-linecap="round">
+    <path d="M-90 848C278 694 490 546 771 568s490 152 805 83 368-243 566-299" stroke="#55d9ff" stroke-opacity=".16" stroke-width="2"/>
+    <path d="M-65 880C304 723 514 578 787 601s478 154 784 84 371-232 564-290" stroke="#a37cff" stroke-opacity=".13" stroke-width="1.5"/>
+    <path d="M-24 918C351 759 548 625 816 641s463 148 765 82 378-226 556-280" stroke="#8deaff" stroke-opacity=".1" stroke-width="1"/>
+  </g>
+  <g opacity=".9">
+    <circle cx="1512" cy="390" r="198" fill="none" stroke="#7de4ff" stroke-opacity=".14" stroke-width="1"/>
+    <circle cx="1512" cy="390" r="188" fill="url(#planet)"/>
+    <g clip-path="url(#planet-clip)" opacity=".43" fill="none" stroke="#b6eeff">
+      <path d="M1315 343c115 38 278 54 386 23M1318 399c128 45 285 52 389 16M1332 456c110 36 249 43 356 7M1381 513c96 21 181 19 279-11" stroke-width="2"/>
+      <path d="M1454 203c-43 94-48 283 1 375M1524 202c-29 92-31 290 8 376M1592 220c-15 80-10 270 25 339" stroke-width="1"/>
+    </g>
+    <ellipse cx="1512" cy="390" rx="244" ry="63" fill="none" stroke="url(#planet-rim)" stroke-width="7" transform="rotate(-17 1512 390)" opacity=".68"/>
+    <ellipse cx="1512" cy="390" rx="266" ry="72" fill="none" stroke="#8b87ff" stroke-opacity=".16" stroke-width="1" transform="rotate(-17 1512 390)"/>
+    <path d="M1304 486c60 56 134 90 215 100" fill="none" stroke="#5bdfff" stroke-opacity=".25" stroke-width="2" filter="url(#glow)"/>
+  </g>
+  <g fill="#d8f8ff" filter="url(#glow)">
+    <circle cx="319" cy="303" r="2.1"/><circle cx="845" cy="214" r="1.7"/><circle cx="1168" cy="532" r="2.2"/>
+    <circle cx="1737" cy="742" r="1.8"/><circle cx="690" cy="954" r="2"/><circle cx="256" cy="733" r="1.6"/>
+  </g>
+  <g stroke="#bdefff" stroke-opacity=".52" stroke-width="1.2" filter="url(#glow)">
+    <path d="M845 205v18M836 214h18"/><path d="M1168 522v20M1158 532h20"/><path d="M690 945v18M681 954h18"/>
+  </g>
+  <rect width="1920" height="1200" fill="url(#fine-stars)"/>
+  <rect width="1920" height="1200" fill="url(#distant-stars)"/>
+  <rect width="1920" height="1200" fill="url(#space)" opacity=".18"/>
+</svg>

@@ -1,11 +1,11 @@
-use agile_tiles_plugin_sdk::{
+use sideweave_plugin_api::{
     ErrorCode, PluginError, PluginEvent, PluginManifest, PluginRequest, PluginRequestKind,
     PluginResponse, PluginRuntime, PluginTrust, PluginUi, PluginUiKind, API_VERSION,
     MANIFEST_VERSION,
 };
-use agile_tiles_plugin_sdk::{
-    success_response, DesktopNotificationKind, DesktopNotificationOptions, HostServices, Plugin,
-    PluginContext, WindowEvent, WindowEventHandler, WindowSpec,
+use sideweave_plugin_sdk::{
+    success_response, DesktopNotificationKind, DesktopNotificationOptions, HostServices,
+    Plugin, PluginContext, WindowEvent, WindowEventHandler, WindowSpec,
 };
 use chrono::{
     DateTime, Datelike, Duration as ChronoDuration, Local, NaiveTime, TimeZone, Timelike,
@@ -33,7 +33,7 @@ const MAX_NOTIFICATION_DURATION_SECS: u32 = 60;
 const MAX_ALARM_INTERVAL_MINUTES: u32 = 10_080;
 const DEFAULT_INTERVAL_MESSAGE: &str = "时间到了，休息一下吧。";
 
-agile_tiles_plugin_sdk::export_plugin_dylib!(TimePlugin);
+sideweave_plugin_sdk::export_plugin_dylib!(TimePlugin);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Alarm {
@@ -182,12 +182,12 @@ impl TimePlugin {
             manifest: PluginManifest {
                 manifest_version: MANIFEST_VERSION,
                 api_version: API_VERSION,
-                id: agile_tiles_plugin_sdk::PluginId::new(PLUGIN_ID).expect("static plugin id"),
+                id: sideweave_plugin_api::PluginId::new(PLUGIN_ID).expect("static plugin id"),
                 name: "时钟".into(),
                 icon: "ui/icon.svg".into(),
                 version: env!("CARGO_PKG_VERSION").into(),
                 description: "时钟、闹钟、悬浮钟和番茄钟".into(),
-                author: "Agile Tiles".into(),
+                author: "SideWeave".into(),
                 runtime: PluginRuntime::DynamicLibrary,
                 backend: Some("plugin.dll".into()),
                 trust: PluginTrust::TrustedLocal,
@@ -208,7 +208,7 @@ impl TimePlugin {
                     initial_height: Some(820),
                     ..Default::default()
                 }),
-                hover_preview: Some(agile_tiles_plugin_sdk::PluginHoverPreview {
+                hover_preview: Some(sideweave_plugin_api::PluginHoverPreview {
                     width: Some(280),
                     height: Some(180),
                     data_method: Some("get_preview".into()),
@@ -803,7 +803,7 @@ fn alarm_due_key(alarm: &Alarm, now: DateTime<Local>) -> Option<String> {
 
 fn tick(
     services: &Arc<dyn HostServices>,
-    plugin_id: &agile_tiles_plugin_sdk::PluginId,
+    plugin_id: &sideweave_plugin_api::PluginId,
     state_lock: &Arc<Mutex<()>>,
     alarms: &Arc<Mutex<Vec<Alarm>>>,
     last_fired: &Arc<Mutex<HashMap<String, String>>>,
@@ -905,7 +905,7 @@ fn tick(
 
 fn record_alarm_occurrence(
     services: &dyn HostServices,
-    plugin_id: &agile_tiles_plugin_sdk::PluginId,
+    plugin_id: &sideweave_plugin_api::PluginId,
     state_lock: &Mutex<()>,
     alarms: &Mutex<Vec<Alarm>>,
     alarm_id: &str,
@@ -958,7 +958,7 @@ fn record_alarm_occurrence(
 
 fn notification_method(
     services: &dyn HostServices,
-    plugin_id: &agile_tiles_plugin_sdk::PluginId,
+    plugin_id: &sideweave_plugin_api::PluginId,
 ) -> NotificationMethod {
     services
         .storage()
@@ -972,7 +972,7 @@ fn notification_method(
 
 fn notification_duration_secs(
     services: &dyn HostServices,
-    plugin_id: &agile_tiles_plugin_sdk::PluginId,
+    plugin_id: &sideweave_plugin_api::PluginId,
 ) -> u32 {
     services
         .storage()
@@ -990,7 +990,7 @@ fn notification_duration_secs(
 
 fn alarm_clock_flash_enabled(
     services: &dyn HostServices,
-    plugin_id: &agile_tiles_plugin_sdk::PluginId,
+    plugin_id: &sideweave_plugin_api::PluginId,
 ) -> bool {
     services
         .storage()
@@ -1004,9 +1004,9 @@ fn alarm_clock_flash_enabled(
 
 fn notify_time(
     services: &dyn HostServices,
-    plugin_id: &agile_tiles_plugin_sdk::PluginId,
+    plugin_id: &sideweave_plugin_api::PluginId,
     notification: &DesktopNotificationOptions,
-) -> Result<(), agile_tiles_plugin_sdk::HostError> {
+) -> Result<(), sideweave_plugin_sdk::HostError> {
     let duration_ms = u64::from(notification_duration_secs(services, plugin_id)) * 1_000;
     let notification = notification.clone().with_duration_ms(duration_ms);
     match notification_method(services, plugin_id) {
@@ -1138,7 +1138,7 @@ fn create_clock(
         .create(
             WindowSpec {
                 id: CLOCK_WINDOW.into(),
-                title: "Agile Tiles 时钟".into(),
+                title: "SideWeave 时钟".into(),
                 url: clock_window_url_with_snapshot(style, Some(&initial_snapshot)),
                 width,
                 height,
@@ -1243,7 +1243,7 @@ fn clock_size(style: &ClockStyle) -> (f64, f64) {
 
 struct ClockWindowHandler {
     services: Arc<dyn HostServices>,
-    plugin_id: agile_tiles_plugin_sdk::PluginId,
+    plugin_id: sideweave_plugin_api::PluginId,
     state_lock: Arc<Mutex<()>>,
     style: ClockStyle,
     initial_snapshot: TimeSnapshot,

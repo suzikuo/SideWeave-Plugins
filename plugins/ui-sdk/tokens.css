@@ -90,20 +90,20 @@ button { cursor: pointer; }
   box-shadow: 3px 3px 0 rgba(0, 0, 0, 0.35);
 }
 
-html[data-agile-tiles-embedded] body {
+html[data-sideweave_embedded] body {
   padding: 16px 18px;
   min-height: 100%;
   height: auto;
   overflow: visible;
 }
 
-html[data-agile-tiles-embedded] {
+html[data-sideweave_embedded] {
   height: auto;
   min-height: 100%;
   overflow-y: auto;
 }
 
-html[data-agile-tiles-embedded] #app {
+html[data-sideweave_embedded] #app {
   height: auto;
   min-height: 100%;
 }

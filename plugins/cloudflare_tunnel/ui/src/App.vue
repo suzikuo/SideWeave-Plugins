@@ -712,7 +712,7 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-:global(html[data-agile-tiles-embedded] body) {
+:global(html[data-sideweave_embedded] body) {
   background: transparent;
 }
 

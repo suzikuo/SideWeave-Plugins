@@ -1,0 +1,369 @@
+/* Starship rail: a glassy orbital track sized to the host's native rail geometry. */
+body[data-surface="sidebar"] {
+  --rail-size: 64px;
+  --ring-size: 36px;
+  --rail-gap: 14px;
+  --rail-ink: #e8f7ff;
+  --rail-muted: #8ca8c5;
+  --rail-edge: rgba(132, 202, 240, 0.34);
+  --rail-panel: rgba(7, 17, 35, 0.94);
+  --rail-orb: rgba(10, 26, 49, 0.96);
+  background: transparent;
+}
+
+body[data-surface="sidebar"][data-theme="light"] {
+  --rail-ink: #193650;
+  --rail-muted: #5c7896;
+  --rail-edge: rgba(68, 125, 174, 0.42);
+  --rail-panel: rgba(232, 243, 255, 0.96);
+  --rail-orb: rgba(243, 249, 255, 0.98);
+}
+
+body[data-surface="sidebar"]::before {
+  display: none;
+}
+
+body[data-surface="sidebar"] .sidebar-shell {
+  position: relative;
+  display: flex;
+  width: 100vw;
+  height: 100vh;
+  align-items: center;
+  justify-content: center;
+  overflow: visible;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+}
+
+body[data-surface="sidebar"] .sidebar-content {
+  position: relative;
+  display: flex;
+  width: var(--rail-size);
+  max-width: calc(100vw - 8px);
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  margin: auto;
+  padding: 12px 0;
+  overflow: visible;
+  border: 1px solid var(--rail-edge);
+  border-radius: 999px;
+  background:
+    linear-gradient(160deg,
+      color-mix(in srgb, var(--rail-panel) calc(var(--skin-panel-opacity, 0.72) * 100%), transparent),
+      color-mix(in srgb, rgba(4, 11, 25, 0.96) calc(var(--skin-panel-opacity, 0.72) * 100%), transparent));
+  box-shadow:
+    inset 0 1px 0 rgba(225, 249, 255, 0.14),
+    inset 0 0 24px rgba(77, 172, 231, 0.08),
+    0 12px 32px rgba(0, 0, 0, 0.42),
+    0 0 22px rgba(76, 185, 236, 0.12);
+  color: var(--rail-ink);
+  isolation: isolate;
+  transition:
+    opacity 220ms ease,
+    transform 280ms cubic-bezier(0.22, 0.8, 0.24, 1),
+    filter 220ms ease;
+}
+
+body[data-surface="sidebar"] .sidebar-content::before {
+  position: absolute;
+  z-index: -1;
+  inset: 0;
+  border-radius: inherit;
+  background:
+    radial-gradient(circle at 17% 8%, rgba(222, 250, 255, 0.9) 0 1px, transparent 1.7px),
+    radial-gradient(circle at 83% 16%, rgba(125, 225, 255, 0.95) 0 1px, transparent 1.8px),
+    radial-gradient(circle at 14% 73%, rgba(177, 153, 255, 0.84) 0 1px, transparent 1.8px),
+    radial-gradient(circle at 86% 88%, rgba(223, 248, 255, 0.72) 0 1px, transparent 1.7px),
+    radial-gradient(ellipse at 50% 10%, rgba(70, 190, 240, 0.2), transparent 53%);
+  content: "";
+  opacity: calc(0.28 + var(--skin-background-opacity, 0.72) * 0.72);
+  pointer-events: none;
+}
+
+body[data-surface="sidebar"] .orbit-trace {
+  position: absolute;
+  z-index: 0;
+  top: 22px;
+  bottom: 22px;
+  left: 50%;
+  width: 1px;
+  border-left: 1px dashed rgba(127, 208, 242, 0.26);
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+body[data-surface="sidebar"] .plugin-list {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  width: 100%;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--rail-gap);
+  overflow: visible;
+  scrollbar-width: none;
+}
+
+body[data-surface="sidebar"] .plugin-list .plugin-card {
+  position: relative;
+  display: grid;
+  width: var(--ring-size);
+  min-width: var(--ring-size);
+  height: var(--ring-size);
+  min-height: var(--ring-size);
+  flex: none;
+  place-items: center;
+  gap: 0;
+  padding: 0;
+  overflow: visible;
+  border: 1px solid rgba(143, 211, 242, 0.42);
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 32% 25%, rgba(159, 232, 255, 0.19), transparent 42%),
+    linear-gradient(145deg,
+      color-mix(in srgb, var(--rail-orb) calc(var(--skin-component-opacity, 0.82) * 100%), transparent),
+      rgba(5, 13, 28, 0.97));
+  box-shadow:
+    inset 0 1px 0 rgba(235, 251, 255, 0.17),
+    inset 0 0 0 3px rgba(117, 207, 243, 0.035),
+    0 3px 9px rgba(0, 0, 0, 0.28);
+  color: var(--rail-ink);
+  cursor: pointer;
+  animation: orbital-arrive 420ms cubic-bezier(0.2, 0.85, 0.3, 1) backwards;
+  animation-delay: var(--item-delay, 0ms);
+  transition:
+    border-color 180ms ease,
+    background 180ms ease,
+    box-shadow 220ms ease,
+    color 180ms ease,
+    transform 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+body[data-surface="sidebar"] .plugin-list .plugin-card::before {
+  position: absolute;
+  inset: -4px;
+  border: 1px solid rgba(115, 217, 250, 0.14);
+  border-radius: inherit;
+  content: "";
+  opacity: 0.6;
+  transition: inset 220ms ease, border-color 220ms ease, opacity 220ms ease;
+  pointer-events: none;
+}
+
+body[data-surface="sidebar"] .plugin-list .plugin-card::after {
+  position: absolute;
+  top: 1px;
+  right: 5px;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: #9bf2ff;
+  box-shadow: 0 0 8px rgba(117, 229, 255, 0.95);
+  content: "";
+  opacity: 0.78;
+  pointer-events: none;
+}
+
+body[data-surface="sidebar"] .plugin-list .plugin-card:hover,
+body[data-surface="sidebar"] .plugin-list .plugin-card:focus-visible {
+  z-index: 2;
+  border-color: #9af0ff;
+  background:
+    radial-gradient(circle at 32% 25%, rgba(173, 242, 255, 0.28), transparent 46%),
+    linear-gradient(145deg, rgba(20, 59, 88, 0.98), rgba(12, 24, 53, 0.98));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.24),
+    0 0 0 4px rgba(100, 212, 246, 0.1),
+    0 0 22px rgba(77, 208, 249, 0.34);
+  color: #c8f8ff;
+  outline: none;
+  transform: scale(1.1);
+}
+
+body[data-surface="sidebar"] .plugin-list .plugin-card:hover::before,
+body[data-surface="sidebar"] .plugin-list .plugin-card:focus-visible::before {
+  inset: -6px;
+  border-color: rgba(136, 231, 255, 0.42);
+  opacity: 1;
+}
+
+body[data-surface="sidebar"] .plugin-list .plugin-card:active {
+  transform: scale(0.94);
+}
+
+body[data-surface="sidebar"] .plugin-list .plugin-icon {
+  position: relative;
+  display: grid;
+  width: 20px !important;
+  height: 20px !important;
+  place-items: center;
+  overflow: visible;
+  border: 0;
+  border-radius: 0;
+  background: transparent !important;
+  box-shadow: none;
+  color: currentColor;
+  font-size: 16px;
+  line-height: 1;
+}
+
+body[data-surface="sidebar"] .plugin-list .plugin-copy {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+body[data-surface="sidebar"] .plugin-list .plugin-arrow {
+  display: none;
+}
+
+body[data-surface="sidebar"] .plugin-list .system-card {
+  border-color: rgba(184, 159, 255, 0.5);
+  color: #d7c9ff;
+}
+
+body[data-surface="sidebar"] .plugin-list .system-card::after {
+  background: #c6aeff;
+  box-shadow: 0 0 8px rgba(186, 145, 255, 0.95);
+}
+
+body[data-surface="sidebar"] .sidebar-shell::after {
+  position: absolute;
+  z-index: 3;
+  width: 3px;
+  height: 42%;
+  border-radius: 9px;
+  background: linear-gradient(180deg, transparent, #7fe8ff 32%, #c2a1ff 70%, transparent);
+  box-shadow: 0 0 12px rgba(103, 219, 255, 0.78);
+  content: "";
+  opacity: 0;
+  transition: opacity 180ms ease;
+  pointer-events: none;
+}
+
+body[data-surface="sidebar"][data-position="right"] .sidebar-shell::after {
+  top: 29%;
+  left: 0;
+}
+
+body[data-surface="sidebar"][data-position="left"] .sidebar-shell::after {
+  top: 29%;
+  right: 0;
+}
+
+body[data-surface="sidebar"][data-position="top"] .sidebar-shell::after {
+  right: 33%;
+  bottom: 0;
+  left: 33%;
+  width: auto;
+  height: 3px;
+  background: linear-gradient(90deg, transparent, #7fe8ff 32%, #c2a1ff 70%, transparent);
+}
+
+body[data-surface="sidebar"][data-expanded="false"] .sidebar-content {
+  opacity: 0;
+  filter: blur(3px);
+  pointer-events: none;
+}
+
+body[data-surface="sidebar"][data-expanded="false"] .sidebar-shell::after {
+  opacity: 0.9;
+}
+
+body[data-surface="sidebar"][data-position="right"][data-expanded="false"] .sidebar-content {
+  transform: translateX(9px) scale(0.86);
+}
+
+body[data-surface="sidebar"][data-position="left"][data-expanded="false"] .sidebar-content {
+  transform: translateX(-9px) scale(0.86);
+}
+
+body[data-surface="sidebar"][data-position="top"][data-expanded="false"] .sidebar-content {
+  transform: translateY(9px) scale(0.86);
+}
+
+/* The top dock is a true horizontal orbit, matching the host's horizontal window geometry. */
+body[data-surface="sidebar"][data-position="top"] .sidebar-shell {
+  align-items: flex-start;
+}
+
+body[data-surface="sidebar"][data-position="top"] .sidebar-content {
+  width: max-content;
+  max-width: calc(100vw - 12px);
+  height: var(--rail-size);
+  flex-direction: row;
+  margin: 4px auto 0;
+  padding: 0 14px;
+  border-radius: 999px;
+}
+
+body[data-surface="sidebar"][data-position="top"] .plugin-list {
+  width: max-content;
+  max-width: 100%;
+  flex-direction: row;
+  justify-content: center;
+  gap: var(--rail-gap);
+}
+
+body[data-surface="sidebar"][data-position="top"] .orbit-trace {
+  top: 50%;
+  right: 18px;
+  bottom: auto;
+  left: 18px;
+  width: auto;
+  height: 1px;
+  border-top: 1px dashed rgba(127, 208, 242, 0.26);
+  border-left: 0;
+  transform: translateY(-50%);
+}
+
+body[data-surface="sidebar"][data-theme="light"] .sidebar-content {
+  background:
+    linear-gradient(160deg,
+      color-mix(in srgb, var(--rail-panel) calc(var(--skin-panel-opacity, 0.72) * 100%), transparent),
+      color-mix(in srgb, rgba(220, 237, 253, 0.96) calc(var(--skin-panel-opacity, 0.72) * 100%), transparent));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.82),
+    0 12px 32px rgba(29, 67, 104, 0.2),
+    0 0 20px rgba(79, 168, 219, 0.13);
+}
+
+body[data-surface="sidebar"][data-theme="light"] .plugin-list .plugin-card {
+  background:
+    radial-gradient(circle at 32% 25%, rgba(255, 255, 255, 0.9), transparent 45%),
+    linear-gradient(145deg,
+      color-mix(in srgb, var(--rail-orb) calc(var(--skin-component-opacity, 0.82) * 100%), transparent),
+      rgba(222, 238, 253, 0.98));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.92),
+    0 3px 9px rgba(39, 87, 130, 0.18);
+}
+
+body[data-surface="sidebar"][data-theme="light"] .plugin-list .plugin-card:hover,
+body[data-surface="sidebar"][data-theme="light"] .plugin-list .plugin-card:focus-visible {
+  background: linear-gradient(145deg, rgba(231, 249, 255, 0.99), rgba(213, 231, 255, 0.99));
+  color: #155777;
+}
+
+@keyframes orbital-arrive {
+  from { opacity: 0; scale: 0.72; filter: blur(4px); }
+  to { opacity: 1; scale: 1; filter: blur(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  body[data-surface="sidebar"] .sidebar-content,
+  body[data-surface="sidebar"] .plugin-card,
+  body[data-surface="sidebar"] .sidebar-shell::after {
+    animation-duration: 1ms !important;
+    transition-duration: 1ms !important;
+  }
+}

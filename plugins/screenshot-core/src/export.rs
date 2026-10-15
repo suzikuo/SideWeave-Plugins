@@ -726,7 +726,7 @@ pub(super) fn save_png(
         std::env::var_os("USERPROFILE")
             .map(std::path::PathBuf::from)?
             .join("Pictures")
-            .join("Agile Tiles")
+            .join("SideWeave")
             .join("Screenshots")
     } else {
         std::path::PathBuf::from(&settings.save_directory)

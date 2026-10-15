@@ -1,12 +1,12 @@
-use agile_tiles_plugin_sdk::{
-    ErrorCode, PluginError, PluginManifest, PluginRequest, PluginRequestKind, PluginResponse,
-    PluginRuntime, PluginTrust, API_VERSION, MANIFEST_VERSION,
+use sideweave_plugin_api::{
+    ErrorCode, PluginError, PluginManifest, PluginRequest, PluginRequestKind,
+    PluginResponse, PluginRuntime, PluginTrust, API_VERSION, MANIFEST_VERSION,
 };
-use agile_tiles_plugin_sdk::{success_response, Plugin, PluginContext};
+use sideweave_plugin_sdk::{success_response, Plugin, PluginContext};
 use serde_json::{json, Value};
 use std::path::Path;
 
-agile_tiles_plugin_sdk::export_plugin_dylib!(ToolboxPlugin);
+sideweave_plugin_sdk::export_plugin_dylib!(ToolboxPlugin);
 
 pub struct ToolboxPlugin {
     manifest: PluginManifest,
@@ -22,19 +22,19 @@ impl ToolboxPlugin {
             manifest: PluginManifest {
                 manifest_version: MANIFEST_VERSION,
                 api_version: API_VERSION,
-                id: agile_tiles_plugin_sdk::PluginId::new("toolbox").expect("static plugin id"),
+                id: sideweave_plugin_api::PluginId::new("toolbox").expect("static plugin id"),
                 name: "工具箱".into(),
                 icon: "ui/icon.svg".into(),
                 version: env!("CARGO_PKG_VERSION").into(),
                 description: "开发小工具：JSON/Base64/时间戳/UUID/正则".into(),
-                author: "Agile Tiles".into(),
+                author: "SideWeave".into(),
                 runtime: PluginRuntime::DynamicLibrary,
                 backend: Some("plugin.dll".into()),
                 trust: PluginTrust::TrustedLocal,
                 permissions: vec!["filesystem.read".into(), "system.file_picker".into()],
-                ui: Some(agile_tiles_plugin_sdk::PluginUi {
+                ui: Some(sideweave_plugin_api::PluginUi {
                     entry: "ui/index.html".into(),
-                    kind: Some(agile_tiles_plugin_sdk::PluginUiKind::Html),
+                    kind: Some(sideweave_plugin_api::PluginUiKind::Html),
                     asset_root: "ui".into(),
                     initial_width: Some(760),
                     initial_height: Some(620),

@@ -1,8 +1,8 @@
-use agile_tiles_plugin_sdk::{
+use sideweave_plugin_api::{
     PluginError, PluginManifest, PluginRequest, PluginResponse, PluginRuntime, PluginTrust,
     PluginUi, PluginUiKind, API_VERSION, MANIFEST_VERSION,
 };
-use agile_tiles_plugin_sdk::{success_response, Plugin, PluginContext};
+use sideweave_plugin_sdk::{success_response, Plugin, PluginContext};
 use serde_json::json;
 
 pub struct DemoPlugin {
@@ -15,7 +15,7 @@ impl DemoPlugin {
             manifest: PluginManifest {
                 manifest_version: MANIFEST_VERSION,
                 api_version: API_VERSION,
-                id: agile_tiles_plugin_sdk::PluginId::new("demo").expect("static plugin id"),
+                id: sideweave_plugin_api::PluginId::new("demo").expect("static plugin id"),
                 name: "Demo Plugin".into(),
                 icon: "ui/icon.svg".into(),
                 version: "0.1.0".into(),
@@ -41,7 +41,7 @@ impl DemoPlugin {
     }
 }
 
-agile_tiles_plugin_sdk::export_plugin_dylib!(DemoPlugin);
+sideweave_plugin_sdk::export_plugin_dylib!(DemoPlugin);
 
 impl Default for DemoPlugin {
     fn default() -> Self {
@@ -63,7 +63,7 @@ impl Plugin for DemoPlugin {
                 ok: false,
                 result: serde_json::Value::Null,
                 error: Some(PluginError {
-                    code: agile_tiles_plugin_sdk::ErrorCode::NotFound,
+                    code: sideweave_plugin_api::ErrorCode::NotFound,
                     message: format!("unknown method: {method}"),
                 }),
             },
@@ -73,7 +73,7 @@ impl Plugin for DemoPlugin {
                 ok: false,
                 result: serde_json::Value::Null,
                 error: Some(PluginError {
-                    code: agile_tiles_plugin_sdk::ErrorCode::InvalidRequest,
+                    code: sideweave_plugin_api::ErrorCode::InvalidRequest,
                     message: "missing method".into(),
                 }),
             },

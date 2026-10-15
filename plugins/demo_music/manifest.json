@@ -6,7 +6,7 @@
   "icon": "icon.svg",
   "version": "1.0.0",
   "description": "音乐播放器演示（支持 Custom 悬浮预览与无感控制）",
-  "author": "Agile Tiles",
+  "author": "SideWeave",
   "runtime": "web_sandbox",
   "trust": "sandboxed",
   "permissions": [

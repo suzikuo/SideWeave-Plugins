@@ -1,15 +1,16 @@
 [package]
-name = "agile-tiles-plugin-ssh-process"
+name = "sideweave_plugin-ssh-process"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "agile-tiles-ssh-plugin"
+name = "sideweave_ssh-plugin"
 path = "src/main.rs"
 
 [dependencies]
-agile-tiles-plugin-ipc = { workspace = true }
-agile-tiles-plugin-sdk = { workspace = true }
-agile-tiles-plugin-ssh-manager = { path = "../ssh_manager" }
+sideweave-plugin-ipc = { workspace = true }
+sideweave-plugin-api = { workspace = true }
+sideweave-plugin-sdk = { workspace = true }
+sideweave-plugin-ssh-manager = { package = "sideweave_plugin-ssh-manager", path = "../ssh_manager" }
 base64 = "0.22"
 serde_json = "1"

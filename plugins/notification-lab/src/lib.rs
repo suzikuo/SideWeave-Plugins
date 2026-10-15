@@ -1,11 +1,11 @@
-use agile_tiles_plugin_sdk::{
+use sideweave_plugin_api::{
     permissions, ErrorCode, PluginError, PluginManifest, PluginRequest, PluginRequestKind,
     PluginResponse, PluginRuntime, PluginTrust, PluginUi, PluginUiKind, API_VERSION,
     MANIFEST_VERSION,
 };
-use agile_tiles_plugin_sdk::{
-    success_response, DesktopNotificationKind, DesktopNotificationOptions, NotificationOptions,
-    Plugin, PluginContext,
+use sideweave_plugin_sdk::{
+    success_response, DesktopNotificationKind, DesktopNotificationOptions,
+    NotificationOptions, Plugin, PluginContext,
 };
 use serde_json::{json, Value};
 
@@ -21,12 +21,12 @@ impl NotificationLabPlugin {
             manifest: PluginManifest {
                 manifest_version: MANIFEST_VERSION,
                 api_version: API_VERSION,
-                id: agile_tiles_plugin_sdk::PluginId::new(PLUGIN_ID).expect("static plugin id"),
+                id: sideweave_plugin_api::PluginId::new(PLUGIN_ID).expect("static plugin id"),
                 name: "Notification Lab".into(),
                 icon: "ui/icon.svg".into(),
                 version: env!("CARGO_PKG_VERSION").into(),
                 description: "Test Windows, host desktop, and sidebar notifications".into(),
-                author: "Agile Tiles".into(),
+                author: "SideWeave".into(),
                 runtime: PluginRuntime::DynamicLibrary,
                 backend: Some("plugin.dll".into()),
                 trust: PluginTrust::TrustedLocal,
@@ -172,7 +172,7 @@ impl Default for NotificationLabPlugin {
     }
 }
 
-agile_tiles_plugin_sdk::export_plugin_dylib!(NotificationLabPlugin);
+sideweave_plugin_sdk::export_plugin_dylib!(NotificationLabPlugin);
 
 impl Plugin for NotificationLabPlugin {
     fn manifest(&self) -> &PluginManifest {

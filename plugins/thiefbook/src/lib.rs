@@ -8,14 +8,13 @@ use std::thread::{self, JoinHandle};
 #[cfg(windows)]
 use std::time::Duration;
 
-use agile_tiles_plugin_sdk::{
+use sideweave_plugin_api::{
     ErrorCode, PluginError, PluginManifest, PluginRequest, PluginRequestKind,
     PluginResponse, PluginRuntime, PluginTrust, PluginUi, PluginUiKind, API_VERSION,
     MANIFEST_VERSION,
 };
-use agile_tiles_plugin_sdk::{
-    success_response, Plugin, PluginContext, ShortcutAction,
-    ShortcutHandler, WindowSpec,
+use sideweave_plugin_sdk::{
+    success_response, Plugin, PluginContext, ShortcutAction, ShortcutHandler, WindowSpec,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -24,7 +23,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{GetClassNameW, GetForegroundWi
 
 const PLUGIN_ID: &str = "thiefbook";
 
-agile_tiles_plugin_sdk::export_plugin_dylib!(ThiefbookPlugin);
+sideweave_plugin_sdk::export_plugin_dylib!(ThiefbookPlugin);
 const STATE_KEY: &str = "state";
 const READER_WINDOW: &str = "thiefbook-reader";
 const STYLE_EVENT: &str = "thief://style";
@@ -439,7 +438,7 @@ fn toggle_reader(context: &PluginContext) -> Result<(), String> {
 fn create_reader(context: &PluginContext, config: &Config) -> Result<(), String> {
     context.windows().create(WindowSpec {
         id: READER_WINDOW.into(),
-        title: "Agile Tiles Reader".into(),
+        title: "SideWeave Reader".into(),
         url: "ui/reader.html".into(),
         width: reader_width(&config.style),
         height: reader_height(&config.style),
@@ -615,7 +614,7 @@ impl Default for ThiefbookPlugin {
 
 impl ThiefbookPlugin {
     pub fn new() -> Self {
-        Self { manifest: PluginManifest { manifest_version: MANIFEST_VERSION, api_version: API_VERSION, id: agile_tiles_plugin_sdk::PluginId::new(PLUGIN_ID).expect("static plugin id"), name: "书架".into(), icon: "ui/icon.svg".into(), version: env!("CARGO_PKG_VERSION").into(), description: "TXT reading shelf with floating reader and progress tracking".into(), author: "Agile Tiles".into(), runtime: PluginRuntime::DynamicLibrary, backend: Some("plugin.dll".into()), trust: PluginTrust::TrustedLocal, auto_start: true, permissions: vec!["storage".into(), "filesystem.read".into(), "filesystem.external_read".into(), "window.create".into(), "window.manage".into(), "shortcut.global".into(), "system.file_picker".into()], ui: Some(PluginUi { entry: "ui/index.html".into(), kind: Some(PluginUiKind::Html), asset_root: "ui".into(), initial_width: Some(820), initial_height: Some(820), ..Default::default() }), hover_preview: Some(agile_tiles_plugin_sdk::PluginHoverPreview { width: Some(280), height: Some(180), data_method: Some("get_preview".into()), entry: None }), minimum_host_version: None } }
+        Self { manifest: PluginManifest { manifest_version: MANIFEST_VERSION, api_version: API_VERSION, id: sideweave_plugin_api::PluginId::new(PLUGIN_ID).expect("static plugin id"), name: "书架".into(), icon: "ui/icon.svg".into(), version: env!("CARGO_PKG_VERSION").into(), description: "TXT reading shelf with floating reader and progress tracking".into(), author: "SideWeave".into(), runtime: PluginRuntime::DynamicLibrary, backend: Some("plugin.dll".into()), trust: PluginTrust::TrustedLocal, auto_start: true, permissions: vec!["storage".into(), "filesystem.read".into(), "filesystem.external_read".into(), "window.create".into(), "window.manage".into(), "shortcut.global".into(), "system.file_picker".into()], ui: Some(PluginUi { entry: "ui/index.html".into(), kind: Some(PluginUiKind::Html), asset_root: "ui".into(), initial_width: Some(820), initial_height: Some(820), ..Default::default() }), hover_preview: Some(sideweave_plugin_api::PluginHoverPreview { width: Some(280), height: Some(180), data_method: Some("get_preview".into()), entry: None }), minimum_host_version: None } }
     }
 
     fn call(&self, request: &PluginRequest, context: &PluginContext) -> Result<Value, String> {

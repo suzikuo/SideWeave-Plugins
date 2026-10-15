@@ -1,10 +1,11 @@
 mod listener_process;
 
-use agile_tiles_plugin_sdk::{
-    ErrorCode, PluginError, PluginManifest, PluginRequest, PluginRequestKind, PluginResponse,
-    PluginRuntime, PluginTrust, PluginUi, PluginUiKind, API_VERSION, MANIFEST_VERSION,
+use sideweave_plugin_api::{
+    ErrorCode, PluginError, PluginManifest, PluginRequest, PluginRequestKind,
+    PluginResponse, PluginRuntime, PluginTrust, PluginUi, PluginUiKind, API_VERSION,
+    MANIFEST_VERSION,
 };
-use agile_tiles_plugin_sdk::{success_response, Plugin, PluginContext};
+use sideweave_plugin_sdk::{success_response, Plugin, PluginContext};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -19,7 +20,7 @@ const PLUGIN_ID: &str = "port_forward";
 const STATE_KEY: &str = "state";
 const LISTEN_HOST: &str = "0.0.0.0";
 
-agile_tiles_plugin_sdk::export_plugin_dylib!(PortForwardPlugin);
+sideweave_plugin_sdk::export_plugin_dylib!(PortForwardPlugin);
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -190,12 +191,12 @@ impl PortForwardPlugin {
         Self { manifest: PluginManifest {
             manifest_version: MANIFEST_VERSION,
             api_version: API_VERSION,
-            id: agile_tiles_plugin_sdk::PluginId::new(PLUGIN_ID).expect("static plugin id"),
+            id: sideweave_plugin_api::PluginId::new(PLUGIN_ID).expect("static plugin id"),
             name: "端口工具".into(),
             icon: "ui/icon.svg".into(),
             version: env!("CARGO_PKG_VERSION").into(),
             description: "本地 TCP 转发规则、端口占用与进程管理".into(),
-            author: "Agile Tiles".into(),
+            author: "SideWeave".into(),
             runtime: PluginRuntime::DynamicLibrary,
             backend: Some("plugin.dll".into()),
             trust: PluginTrust::TrustedLocal,

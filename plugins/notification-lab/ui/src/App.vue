@@ -9,7 +9,7 @@ import {
 
 const presets = [
   { id: 'short', name: '普通短消息', title: '通知测试', body: '这是一条用于检查通知是否正常显示的测试消息。' },
-  { id: 'long-title', name: '长标题', title: 'Agile Tiles 通知实验室：检查一段较长标题的显示效果', body: '观察标题换行、截断和卡片布局。' },
+  { id: 'long-title', name: '长标题', title: 'SideWeave 通知实验室：检查一段较长标题的显示效果', body: '观察标题换行、截断和卡片布局。' },
   { id: 'long-body', name: '长正文与换行', title: '多行正文测试', body: '第一行：检查较长正文的显示效果。\n第二行：检查系统是否保留换行。\n第三行：观察通知卡片的滚动和高度。' },
   { id: 'multilingual', name: '多语言和 Emoji', title: '你好 Hello こんにちは 🔔', body: '简体中文、繁體中文、English、日本語、한국어。' },
   { id: 'empty-title', name: '空标题', title: '', body: '检查空标题时系统和宿主卡片的显示方式。' },
@@ -208,7 +208,7 @@ onUnmounted(() => {
         <button class="button alarm-text" type="button" @click="showPreview('alarm')">闹钟</button>
       </div>
     </section>
-    <p class="footnote">Windows 系统通知的外观和显示顺序由 Windows 控制；宿主桌面卡片与侧边栏气泡由 Agile Tiles 管理外观和生命周期。</p>
+    <p class="footnote">Windows 系统通知的外观和显示顺序由 Windows 控制；宿主桌面卡片与侧边栏气泡由 SideWeave 管理外观和生命周期。</p>
   </main>
 </template>
 

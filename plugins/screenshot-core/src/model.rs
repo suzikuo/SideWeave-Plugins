@@ -52,7 +52,7 @@ impl Settings {
         env::var_os("APPDATA")
             .map(PathBuf::from)
             .unwrap_or_else(env::temp_dir)
-            .join("Agile Tiles")
+            .join("SideWeave")
             .join("screenshot.json")
     }
 

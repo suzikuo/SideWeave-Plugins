@@ -130,7 +130,7 @@ onMounted(() => {
             :value="settings.saveDirectory"
             readonly
             class="dir-input"
-            placeholder="默认：图片/Agile Tiles/Screenshots"
+            placeholder="默认：图片/SideWeave/Screenshots"
             @click="onChooseDirectory"
           />
           <button type="button" class="btn-action" title="浏览并选择保存目录" @click="onChooseDirectory">
@@ -238,7 +238,7 @@ onMounted(() => {
 <style scoped>
 :global(*) { box-sizing: border-box }
 :global(body) { margin: 0; background: transparent; color: var(--text, #e8edf7); font-family: var(--font-ui, "Segoe UI", "Microsoft YaHei", sans-serif) }
-:global(html[data-agile-tiles-embedded] body) { background: transparent }
+:global(html[data-sideweave_embedded] body) { background: transparent }
 .page { min-height: calc(100vh - 32px); padding: 28px; background: color-mix(in srgb, var(--bg, #121722) calc(var(--detail-panel-opacity, 1) * 100%), transparent); border-radius: 18px }
 .hero { display: flex; justify-content: space-between; gap: 18px; align-items: flex-start }
 .eyebrow { color: var(--accent, #77a9ff); font-size: 10px; letter-spacing: .14em; font-weight: 700 }

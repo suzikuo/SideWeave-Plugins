@@ -3,11 +3,12 @@ mod config_manager;
 mod models;
 mod process_manager;
 
-use agile_tiles_plugin_sdk::{
-    ErrorCode, PluginError, PluginManifest, PluginRequest, PluginRequestKind, PluginResponse,
-    PluginRuntime, PluginTrust, PluginUi, PluginUiKind, API_VERSION, MANIFEST_VERSION,
+use sideweave_plugin_api::{
+    ErrorCode, PluginError, PluginManifest, PluginRequest, PluginRequestKind,
+    PluginResponse, PluginRuntime, PluginTrust, PluginUi, PluginUiKind, API_VERSION,
+    MANIFEST_VERSION,
 };
-use agile_tiles_plugin_sdk::{success_response, Plugin, PluginContext};
+use sideweave_plugin_sdk::{success_response, Plugin, PluginContext};
 use chrono::Local;
 use models::*;
 use serde::Serialize;
@@ -17,7 +18,7 @@ use std::path::PathBuf;
 
 const PLUGIN_ID: &str = "cloudflare_tunnel";
 
-agile_tiles_plugin_sdk::export_plugin_dylib!(CloudflareTunnelPlugin);
+sideweave_plugin_sdk::export_plugin_dylib!(CloudflareTunnelPlugin);
 
 pub struct CloudflareTunnelPlugin {
     manifest: PluginManifest,
@@ -35,12 +36,12 @@ impl CloudflareTunnelPlugin {
             manifest: PluginManifest {
                 manifest_version: MANIFEST_VERSION,
                 api_version: API_VERSION,
-                id: agile_tiles_plugin_sdk::PluginId::new(PLUGIN_ID).expect("static plugin id"),
+                id: sideweave_plugin_api::PluginId::new(PLUGIN_ID).expect("static plugin id"),
                 name: "Cloudflare Tunnel".into(),
                 icon: "ui/icon.svg".into(),
                 version: env!("CARGO_PKG_VERSION").into(),
-                description: "Agile Tiles 本地 Cloudflare Tunnel 快速管理器".into(),
-                author: "Agile Tiles".into(),
+                description: "SideWeave 本地 Cloudflare Tunnel 快速管理器".into(),
+                author: "SideWeave".into(),
                 runtime: PluginRuntime::DynamicLibrary,
                 backend: Some("plugin.dll".into()),
                 trust: PluginTrust::TrustedLocal,
@@ -60,7 +61,7 @@ impl CloudflareTunnelPlugin {
                     initial_height: Some(780),
                     ..Default::default()
                 }),
-                hover_preview: Some(agile_tiles_plugin_sdk::PluginHoverPreview {
+                hover_preview: Some(sideweave_plugin_api::PluginHoverPreview {
                     width: Some(280),
                     height: Some(180),
                     data_method: Some("get_preview".into()),

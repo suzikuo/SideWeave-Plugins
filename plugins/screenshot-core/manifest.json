@@ -12,9 +12,15 @@
   "key_id": "main-2026-rotation-1",
   "requires_trust": true,
   "runtime": "external_process",
-  "backend": "agile-tiles-screenshot-core.exe",
+  "backend": "sideweave_screenshot-core.exe",
   "autoStart": true,
-  "capabilities": ["filesystem.write", "shortcut.global", "clipboard", "network.connect", "storage"],
+  "capabilities": [
+    "filesystem.write",
+    "shortcut.global",
+    "clipboard",
+    "network.connect",
+    "storage"
+  ],
   "ui": {
     "entry": "ui/index.html",
     "kind": "vue",
@@ -25,4 +31,3 @@
     "minHeight": 760
   }
 }
-

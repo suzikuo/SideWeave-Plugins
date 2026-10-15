@@ -1,0 +1,86 @@
+/* 像素皮肤：方块配色、像素化边框、字体栈与背景图。 */
+:root[data-skin='user-minecraft'] {
+  --font-ui: 'Courier New', Consolas, 'SimHei', monospace;
+  --detail-image: url('./assets/minecraft_bg.jpg');
+  --rail-image: url('./assets/minecraft_bg.jpg');
+}
+
+:root[data-skin='user-minecraft'][data-theme='dark'] {
+  --accent: #85c65c;
+  --bg: #151515;
+  --surface: #1e1e1e;
+  --surface-subtle: #262626;
+  --surface-container: #262626;
+  --text: #e0e0e0;
+  --text-muted: #b5b5b5;
+  --border: #3a3a3a;
+  --border-strong: #6e6e6e;
+  --radius: 0px;
+  --radius-lg: 0px;
+}
+
+:root[data-skin='user-minecraft'][data-theme='light'] {
+  --accent: #548b3b;
+  --bg: #d8d8d8;
+  --surface: #c6c6c6;
+  --surface-subtle: #bdbdbd;
+  --surface-container: #b5b5b5;
+  --text: #303030;
+  --text-muted: #4a4a4a;
+  --border: #8b8b8b;
+  --border-strong: #555555;
+  --radius: 0px;
+  --radius-lg: 0px;
+}
+
+[data-skin='user-minecraft'] body,
+[data-skin='user-minecraft'] button,
+[data-skin='user-minecraft'] input,
+[data-skin='user-minecraft'] select,
+[data-skin='user-minecraft'] textarea {
+  font-family: 'Courier New', Consolas, 'SimHei', monospace !important;
+  letter-spacing: 0.35px;
+}
+
+[data-skin='user-minecraft'] .detail-shell .card {
+  border: 3px solid #1b1b1b;
+  border-radius: 0 !important;
+  box-shadow: 6px 6px 0 rgba(0, 0, 0, 0.5);
+  image-rendering: pixelated;
+}
+
+[data-skin='user-minecraft'] .rail {
+  --rail-image: url('./assets/minecraft_bg.jpg');
+  border: 3px solid #1b1b1b !important;
+  border-radius: 0 !important;
+  box-shadow: 6px 6px 0 rgba(0, 0, 0, 0.5) !important;
+  image-rendering: pixelated;
+}
+
+[data-skin='user-minecraft'] .rail .ring {
+  border-radius: 0 !important;
+  border: 3px solid #2b2b2b !important;
+  background: rgba(198, 198, 198, 0.94) !important;
+  color: #1b1b1b !important;
+  box-shadow: inset -3px -3px 0 rgba(0, 0, 0, 0.35), inset 3px 3px 0 rgba(255, 255, 255, 0.5);
+}
+
+[data-skin='user-minecraft'] .rail .ring:hover {
+  background: #7cbd52 !important;
+  color: #fff !important;
+  box-shadow: inset -3px -3px 0 rgba(0, 0, 0, 0.45), inset 3px 3px 0 rgba(255, 255, 255, 0.55);
+}
+
+[data-skin='user-minecraft'] .segmented,
+[data-skin='user-minecraft'] .card,
+[data-skin='user-minecraft'] .btn {
+  border-radius: 0 !important;
+  box-shadow: 3px 3px 0 rgba(0, 0, 0, 0.35);
+}
+
+[data-skin='user-minecraft'] .detail-shell::before,
+[data-skin='user-minecraft'] .control-surface::before,
+[data-skin='user-minecraft'] .rail::before {
+  background-size: cover;
+  background-repeat: no-repeat;
+}

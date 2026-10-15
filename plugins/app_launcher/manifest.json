@@ -5,7 +5,7 @@
   "name": "App Launcher",
   "icon": "ui/icon.svg",
   "version": "1.0.4",
-  "description": "??????????????? Chrome ????",
+  "description": "应用启动器：快速启动本地应用与 Chrome 应用窗口",
   "author": "SideWeave",
   "type": "native",
   "publisher": "sideweave",

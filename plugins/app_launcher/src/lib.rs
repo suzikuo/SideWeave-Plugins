@@ -1,8 +1,8 @@
-use agile_tiles_plugin_sdk::{
-    ErrorCode, PluginError, PluginManifest, PluginRequest, PluginRequestKind, PluginResponse,
-    PluginRuntime, PluginTrust, API_VERSION, MANIFEST_VERSION,
+use sideweave_plugin_api::{
+    ErrorCode, PluginError, PluginManifest, PluginRequest, PluginRequestKind,
+    PluginResponse, PluginRuntime, PluginTrust, API_VERSION, MANIFEST_VERSION,
 };
-use agile_tiles_plugin_sdk::{success_response, Plugin, PluginContext};
+use sideweave_plugin_sdk::{success_response, Plugin, PluginContext};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 const PLUGIN_ID: &str = "app_launcher";
 const STATE_KEY: &str = "state";
 
-agile_tiles_plugin_sdk::export_plugin_dylib!(AppLauncherPlugin);
+sideweave_plugin_sdk::export_plugin_dylib!(AppLauncherPlugin);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -88,12 +88,12 @@ impl AppLauncherPlugin {
             manifest: PluginManifest {
                 manifest_version: MANIFEST_VERSION,
                 api_version: API_VERSION,
-                id: agile_tiles_plugin_sdk::PluginId::new(PLUGIN_ID).expect("static plugin id"),
+                id: sideweave_plugin_api::PluginId::new(PLUGIN_ID).expect("static plugin id"),
                 name: "App Launcher".into(),
                 icon: "ui/icon.svg".into(),
                 version: env!("CARGO_PKG_VERSION").into(),
                 description: "应用启动器：快速启动本地应用与 Chrome 应用窗口".into(),
-                author: "Agile Tiles".into(),
+                author: "SideWeave".into(),
                 runtime: PluginRuntime::DynamicLibrary,
                 backend: Some("plugin.dll".into()),
                 trust: PluginTrust::TrustedLocal,
@@ -104,15 +104,15 @@ impl AppLauncherPlugin {
                     "system.file_picker".into(),
                     "system.icon".into(),
                 ],
-                ui: Some(agile_tiles_plugin_sdk::PluginUi {
+                ui: Some(sideweave_plugin_api::PluginUi {
                     entry: "ui/index.html".into(),
-                    kind: Some(agile_tiles_plugin_sdk::PluginUiKind::Html),
+                    kind: Some(sideweave_plugin_api::PluginUiKind::Html),
                     asset_root: "ui".into(),
                     initial_width: Some(920),
                     initial_height: Some(680),
                     ..Default::default()
                 }),
-                hover_preview: Some(agile_tiles_plugin_sdk::PluginHoverPreview {
+                hover_preview: Some(sideweave_plugin_api::PluginHoverPreview {
                     width: Some(280),
                     height: Some(250),
                     data_method: Some("get_preview".into()),
@@ -346,7 +346,7 @@ fn launch(context: &PluginContext, entry: &AppEntry) -> Result<(), String> {
 }
 
 fn write_ahk_script(entry: &AppEntry, ahk: &Path) -> Result<PathBuf, String> {
-    let dir = std::env::temp_dir().join("agile-tiles-app-launcher");
+    let dir = std::env::temp_dir().join("sideweave_app-launcher");
     std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
     let script = dir.join(format!("{}.ahk", entry.id));
     let exe = entry.exe_path.replace('"', r#"\"#);

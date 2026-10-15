@@ -18,5 +18,6 @@ members = [
 ]
 
 [workspace.dependencies]
-agile-tiles-plugin-sdk = { git = "https://github.com/suzikuo/SideWeave.git", branch = "master" }
-agile-tiles-plugin-ipc = { git = "https://github.com/suzikuo/SideWeave.git", branch = "master" }
+sideweave-plugin-api = { package = "sideweave-plugin-api", git = "https://github.com/suzikuo/SideWeave.git", branch = "master" }
+sideweave-plugin-sdk = { package = "sideweave-plugin-sdk", git = "https://github.com/suzikuo/SideWeave.git", branch = "master" }
+sideweave-plugin-ipc = { package = "sideweave-plugin-ipc", git = "https://github.com/suzikuo/SideWeave.git", branch = "master" }

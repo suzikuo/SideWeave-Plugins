@@ -5,7 +5,7 @@
   "name": "SSH",
   "icon": "ui/icon.svg",
   "version": "1.0.7",
-  "description": "SSH ????????????????????",
+  "description": "SSH profile management, key storage, terminal launch, and connectivity checks",
   "author": "SideWeave",
   "type": "native",
   "publisher": "sideweave",

@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>深空回响 · 星图中枢</title>
+  <link rel="stylesheet" href="./skin.css">
+  <link rel="stylesheet" href="./theme-light.css">
+  <link rel="stylesheet" href="./adaptive.css">
+  <script defer src="./app.js"></script>
+</head>
+<body data-surface="detail">
+  <main class="detail-shell">
+    <header class="window-head drag-region" data-tauri-drag-region>
+      <div class="window-brand"><span class="mini-mark">✦</span><span>ORBITAL <i>/</i> FLIGHT DECK</span></div>
+      <div class="window-actions" data-tauri-drag-region="false">
+        <button class="icon-button" type="button" data-action="window.minimizeDetail" aria-label="最小化">−</button>
+        <button class="icon-button close-button" type="button" data-action="window.closeDetail" aria-label="关闭">×</button>
+      </div>
+    </header>
+    <section class="detail-content">
+      <div class="hero-copy">
+        <span class="eyebrow"><span class="eyebrow-line"></span><span id="page-eyebrow">航行状态 · 01</span></span>
+        <h1 id="page-title">欢迎回到星舰</h1>
+        <p id="page-subtitle">你的数字宇宙已准备就绪。选择一个模块，继续探索。</p>
+      </div>
+      <div class="detail-grid" id="detail-plugin-grid"></div>
+      <section class="settings-panel" id="appearance-panel">
+        <div class="panel-copy"><span class="eyebrow">系统偏好</span><h2>航行外观</h2><p>调整界面显示模式，设置会自动保存。</p></div>
+        <div class="segmented-control" role="group" aria-label="显示模式">
+          <button type="button" data-theme="dark">深空</button>
+          <button type="button" data-theme="light">星云</button>
+          <button type="button" data-theme="system">跟随系统</button>
+        </div>
+      </section>
+      <div class="detail-bottom"><span><span class="pulse-dot"></span>导航系统在线</span><div class="detail-links"><button class="text-button" type="button" data-action="navigation.openDetail" data-page="market-plugins">插件市场</button><button class="text-button" type="button" data-action="navigation.openDetail" data-page="market-skins">皮肤市场</button><button class="text-button" type="button" data-action="navigation.openSettings">完整设置</button><button class="text-button" type="button" data-action="navigation.openControlCenter">控制中心 <span>↗</span></button></div></div>
+    </section>
+  </main>
+</body>
+</html>

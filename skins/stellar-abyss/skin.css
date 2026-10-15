@@ -1,0 +1,55 @@
+/* 深空回响：色彩变量供原生设置、控制中心与插件宿主继续使用。 */
+:root[data-skin='user:stellar-abyss'],
+:root[data-skin='user-stellar-abyss'] {
+  --accent: #70e7ff;
+  --bg: #050914;
+  --surface: #0c1424;
+  --surface-subtle: #111d32;
+  --surface-container: #172640;
+  --text: #edf8ff;
+  --text-muted: #91a9c4;
+  --border: #243957;
+  --border-strong: #42648d;
+  --success: #72f0c5;
+  --warning: #ffd27b;
+  --danger: #ff829f;
+  --radius: 12px;
+  --radius-lg: 20px;
+  --shadow: 0 24px 64px rgba(0, 0, 0, .52);
+  --detail-bg: #050914;
+  --detail-img-opacity: .9;
+  --rail-img-opacity: .94;
+  --detail-image: url('./ui/assets/stellar-abyss.svg');
+  --rail-image: url('./ui/assets/stellar-abyss.svg');
+}
+
+/* Native settings and control views keep their original layout. Their background layers
+   are separate so the existing opacity controls never fade text or controls. */
+[data-skin='user:stellar-abyss'] .detail-shell,
+[data-skin='user-stellar-abyss'] .detail-shell {
+  background: transparent;
+}
+[data-skin='user:stellar-abyss'] .control-surface,
+[data-skin='user-stellar-abyss'] .control-surface {
+  background: transparent;
+}
+
+[data-skin='user:stellar-abyss'] .rail,
+[data-skin='user-stellar-abyss'] .rail {
+  background: var(--rail-color, rgba(8, 16, 31, .9));
+  border-color: rgba(112, 231, 255, .28) !important;
+  box-shadow: inset 0 1px rgba(255, 255, 255, .06), 0 14px 40px rgba(0, 0, 0, .46), 0 0 26px rgba(65, 195, 255, .1) !important;
+  backdrop-filter: blur(18px);
+}
+
+[data-skin='user:stellar-abyss'] .rail .ring,
+[data-skin='user-stellar-abyss'] .rail .ring {
+  background: linear-gradient(150deg, rgba(18, 37, 63, .98), rgba(7, 16, 31, .98));
+  border-color: rgba(112, 231, 255, .32);
+}
+
+[data-skin='user:stellar-abyss'] .rail .ring:hover,
+[data-skin='user-stellar-abyss'] .rail .ring:hover {
+  border-color: #70e7ff;
+  box-shadow: 0 0 0 4px rgba(112, 231, 255, .1), 0 0 24px rgba(112, 231, 255, .22);
+}

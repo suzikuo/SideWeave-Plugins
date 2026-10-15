@@ -1,15 +1,15 @@
-use agile_tiles_plugin_sdk::{
-    ErrorCode, PluginEvent, PluginHandshakeResponse, PluginId, PluginRequest, PluginRequestKind,
-    PluginWireMessage, API_VERSION,
+use sideweave_plugin_api::{
+    ErrorCode, PluginEvent, PluginHandshakeResponse, PluginId, PluginRequest,
+    PluginRequestKind, PluginWireMessage, API_VERSION,
 };
-use agile_tiles_plugin_ipc::{FrameReader, FrameWriter};
-use agile_tiles_plugin_sdk::{
-    ClipboardService, EventBus, FileService, GlobalShortcutService, HostError, HostServices,
-    NotificationOptions, NotificationService, Plugin, PluginContext, SecretService,
-    ShortcutAction, ShortcutHandler, StorageService,
-    SystemService, WindowEventHandler, WindowService, WindowSpec,
+use sideweave_plugin_ipc::{FrameReader, FrameWriter};
+use sideweave_plugin_sdk::{
+    ClipboardService, EventBus, FileService, GlobalShortcutService, HostError,
+    HostServices, NotificationOptions, NotificationService, Plugin, PluginContext,
+    SecretService, ShortcutAction, ShortcutHandler, StorageService, SystemService,
+    WindowEventHandler, WindowService, WindowSpec,
 };
-use agile_tiles_plugin_ssh_manager::SshPlugin;
+use sideweave_plugin_ssh_manager::SshPlugin;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde_json::{json, Value};
 use std::env;
@@ -352,7 +352,7 @@ fn main() -> Result<(), String> {
             "process.spawn".into(),
             "network.connect".into(),
         ],
-        error: (!accepted).then(|| agile_tiles_plugin_sdk::PluginError {
+        error: (!accepted).then(|| sideweave_plugin_api::PluginError {
             code: ErrorCode::UnsupportedApiVersion,
             message: "plugin handshake rejected".into(),
         }),

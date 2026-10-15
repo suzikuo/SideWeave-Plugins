@@ -9,10 +9,11 @@ The repository is distributed under the MIT License; see `LICENSE`.
 - plugins/<id>/manifest.json is the source of truth for package metadata.
 - plugins/<id>/Cargo.toml and src/ contain a native backend when the runtime requires one.
 - plugins/<id>/ui/ contains the standalone UI build.
+- skins/<id>/manifest.json and its package assets are the source of truth for official skins.
 - plugins/ui-sdk/ contains the shared UI bridge used by official plugin UIs.
 - tools/build-plugin-packages.ps1 builds package ZIPs without installing them into the host.
 
-Official plugins follow the community plugin contract. Rust backends use `agile-tiles-plugin-sdk`, which re-exports API types, and add `agile-tiles-plugin-ipc` only when they run as a separate process. The workspace references these crates from SideWeave; commit `Cargo.lock` to pin the reviewed SDK revision. Do not add a direct API crate dependency or depend on host internals.
+Official plugins follow the community plugin contract. Rust backends use `sideweave-plugin-api` for protocol types and `sideweave-plugin-sdk` for host services. Add `sideweave-plugin-ipc` when the plugin runs as a separate process. These crates use the same reviewed SideWeave revision; commit `Cargo.lock` to pin it. Do not depend on host internals.
 
 The notification-lab plugin and ssh-process crate are development/support packages. The package builder includes only manifests whose publisher is sideweave and whose matching Cargo package exists.
 
@@ -29,19 +30,41 @@ To build one plugin:
 
 Archives are written under dist/packages. Import a ZIP through the SideWeave app to exercise the same local package installation flow used by plugin developers. The build tool does not write a trusted-local marker or modify the host's app data.
 
-## Prepare a signed release
+Skin packages use the same third-party skin manifest and ZIP contract, and are built separately because they contain package assets rather than a Rust backend:
 
-Run from this repository:
+    powershell -NoProfile -ExecutionPolicy Bypass -File tools/build-skin-packages.ps1 -SkinId stellar-abyss
 
-    powershell -NoProfile -ExecutionPolicy Bypass -File tools/release-package-local.ps1 -Id time
+The full publish wizard lists both plugins and skins and writes them to their matching Marketplace collections.
 
-The release tool reads the package version from the source manifest, checks that the manifest references the active SideWeave publisher key, builds the package, and writes a ZIP, .minisig, and .sha256 file under dist/local-release/plugin-<id>-v<version>.
+## Package and publish with the wizard
 
-Create a GitHub Release in suzikuo/SideWeave-Plugins using that tag and upload all three assets. Then update the exact asset URLs and repository field in suzikuo/SideWeave-Marketplace/marketplace.json, and run the Marketplace validator. The plugin repository does not publish catalog changes automatically.
+Run the full build, signing, GitHub Release, and Marketplace workflow:
+
+    powershell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-wizard.ps1
+
+The interactive wizard lets you build locally or publish one or more official plugins or skins. Before upload it verifies the source is committed and pushed to the GitHub default branch. It builds ZIP packages, checks the active SideWeave signing key, writes and verifies Minisign and SHA256 assets, creates or updates `plugin-<id>-v<version>` or `skin-<id>-v<version>` Releases in `suzikuo/SideWeave-Plugins`, updates each Marketplace entry to contain only the current version, and commits and pushes `marketplace.json`. After the catalog update succeeds, it deletes older Releases and their Git tags for the items being published. It lists every old tag and asks for confirmation before publishing and pruning.
+
+The publisher key defaults to `../_private/sideweave-publisher.key`, Minisign defaults to `../_private/minisign/minisign.exe`, and the Marketplace checkout defaults to `../marketplace`. Override paths with `-SigningKeyPath`, `-MinisignExe`, and `-MarketplacePath` when needed.
+
+Common non-interactive forms:
+
+    # Build and sign one package locally; uncommitted source changes are allowed.
+    powershell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-wizard.ps1 -LocalOnly -Id time
+
+    # Build and sign, then show the upload and old-release cleanup plan without changing anything.
+    powershell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-wizard.ps1 -PreviewOnly -Id time
+
+    # Publish an already-built signed package without rebuilding it.
+    powershell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-wizard.ps1 -SkipBuild -Id time
+
+    # Publish a package without changing the Marketplace or deleting old Releases.
+    powershell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-wizard.ps1 -SkipBuild -SkipMarketplaceUpdate -Id time
+
+The version comes from each item's `manifest.json`; native plugin versions must also match their Cargo package. Bump and commit the applicable version fields before publishing. `-Id all` or a comma-separated ID list selects multiple plugins and skins; batch mode uses each item's manifest version. `-SkipMarketplaceUpdate` is for an intentional release-only operation; it also keeps older Releases and tags.
 
 ## SDK dependencies
 
-Rust plugin packages depend on `agile-tiles-plugin-sdk`, which re-exports the API types; external-process packages also depend on `agile-tiles-plugin-ipc`. The root Cargo.toml points to the SideWeave SDK Git branch. Commit `Cargo.lock` to pin the reviewed revision, and update the lock only after reviewing and publishing the corresponding host change. Plugin business code must not depend on `src-tauri`, the host runtime crate, or a Tauri `AppHandle`.
+Rust plugin packages depend on `sideweave-plugin-api` for protocol types and `sideweave-plugin-sdk` for host services; external-process packages also depend on `sideweave-plugin-ipc`. The root Cargo.toml points to the SideWeave Git branch. Commit `Cargo.lock` to pin the reviewed revision, and update the lock only after reviewing and publishing the corresponding host change. Plugin business code must not depend on `src-tauri`, the host runtime crate, or a Tauri `AppHandle`.
 
 ## Runtime and trust
 

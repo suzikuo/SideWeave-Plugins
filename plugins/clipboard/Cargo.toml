@@ -1,14 +1,15 @@
 [package]
-name = "agile-tiles-plugin-clipboard"
+name = "sideweave_plugin-clipboard"
 version = "1.0.4"
 edition = "2021"
-description = "Clipboard history plugin for Agile Tiles"
+description = "Clipboard history plugin for SideWeave"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-agile-tiles-plugin-sdk = { workspace = true }
+sideweave-plugin-api = { workspace = true }
+sideweave-plugin-sdk = { workspace = true }
 chrono = { version = "0.4", features = ["clock"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

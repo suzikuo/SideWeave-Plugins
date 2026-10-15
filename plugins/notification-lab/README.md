@@ -13,7 +13,7 @@ context.notification().notify("标题", "通知正文")?;
 插件后端可这样调用：
 
 ```rust
-use agile_tiles_plugin_sdk::{DesktopNotificationKind, DesktopNotificationOptions};
+use sideweave_plugin_sdk::{DesktopNotificationKind, DesktopNotificationOptions};
 
 context.notification().show_desktop(
     &DesktopNotificationOptions::new("标题", "通知正文")
@@ -30,10 +30,10 @@ context.notification().show_sidebar(
 
 ## 本地安装
 
-关闭 Agile Tiles 后，在仓库根目录运行：
+关闭 SideWeave 后，在仓库根目录运行：
 
 ```powershell
 npm run notification-lab:dev-install
 ```
 
-重新启动 Agile Tiles，再从插件列表打开“Notification Lab”。该插件仅用于本地开发，不会加入常规官方插件市场构建。
+重新启动 SideWeave，再从插件列表打开“Notification Lab”。该插件仅用于本地开发，不会加入常规官方插件市场构建。

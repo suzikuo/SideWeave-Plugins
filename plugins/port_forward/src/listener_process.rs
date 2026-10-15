@@ -132,7 +132,7 @@ mod windows {
             return Some("Windows 核心进程不能从此处结束".into());
         }
         if pid == unsafe { GetCurrentProcessId() } {
-            return Some("Agile Tiles 自身进程不能从此处结束".into());
+            return Some("SideWeave 自身进程不能从此处结束".into());
         }
         if !has_path {
             return Some("无法读取进程路径，不能安全确认结束对象".into());

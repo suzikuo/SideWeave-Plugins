@@ -1,0 +1,29 @@
+{
+    "manifestVersion": 1,
+    "apiVersion": 1,
+    "id": "stellar-abyss",
+    "name": "深空回响",
+    "version": "1.0.12",
+    "description": "以星海、深空航行与全息界面为灵感的完整科幻 UI 皮肤。",
+    "author": "SideWeave",
+    "type": "skin",
+    "publisher": "sideweave",
+    "key_id": "main-2026-rotation-1",
+    "requires_trust": false,
+    "capabilities": [],
+    "appearanceDefaults": {
+        "sidebarPanelOpacity": 0.72,
+        "detailPanelOpacity": 0.0,
+        "controlPanelOpacity": 0.2,
+        "sidebarImageOpacity": 0.55,
+        "detailImageOpacity": 0.5,
+        "componentOpacity": 0.82
+    },
+    "skinUi": {
+        "assetRoot": "ui",
+        "sidebar": "sidebar.html",
+        "detail": "detail.html",
+        "control": "control.html",
+        "preview": "preview.html"
+    }
+}

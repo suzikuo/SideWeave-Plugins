@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>深空回响 · 控制中心</title>
+  <link rel="stylesheet" href="./skin.css">
+  <link rel="stylesheet" href="./theme-light.css">
+  <link rel="stylesheet" href="./adaptive.css">
+  <script defer src="./app.js"></script>
+</head>
+<body data-surface="control">
+  <main class="control-shell">
+    <header class="window-head drag-region" data-tauri-drag-region>
+      <div class="window-brand"><span class="mini-mark">✦</span><span>ORBITAL <i>/</i> SYSTEM CONTROL</span></div>
+      <div class="window-actions" data-tauri-drag-region="false"><button class="icon-button" type="button" data-action="window.minimizeDetail" aria-label="最小化">−</button><button class="icon-button close-button" type="button" data-action="window.closeDetail" aria-label="关闭">×</button></div>
+    </header>
+    <section class="control-content">
+      <div class="control-intro">
+        <div><span class="eyebrow"><span class="eyebrow-line"></span>MISSION CONTROL · ONLINE</span><h1>控制中心</h1><p>一览星舰状态，快速调整你的工作空间。</p></div>
+        <div class="core-orb" aria-hidden="true"><span></span></div>
+      </div>
+      <div class="telemetry-grid">
+        <article class="telemetry-card"><span class="telemetry-label">航行状态</span><strong><span class="pulse-dot"></span>系统稳定</strong><small>所有模块运行正常</small></article>
+        <article class="telemetry-card"><span class="telemetry-label">显示模式</span><strong id="theme-label">深空模式</strong><small>按需切换星舰配色</small><div class="compact-theme"><button type="button" data-theme="dark">深空</button><button type="button" data-theme="light">星云</button><button type="button" data-theme="system">自动</button></div></article>
+        <article class="telemetry-card"><span class="telemetry-label">星舰模块</span><strong id="enabled-count">0 / 0</strong><small>点击下方模块卡片启用或停用</small></article>
+      </div>
+      <section class="module-section"><div class="section-heading"><span>已发现模块</span><span class="count" id="module-count">00</span></div><div class="module-grid" id="control-plugin-grid"></div></section>
+      <footer class="control-footer"><span><span class="pulse-dot"></span>深空链路正常</span><div class="detail-links"><button class="text-button" type="button" data-action="navigation.openDetail" data-page="home">星图总览</button><button class="text-button" type="button" data-action="navigation.openDetail" data-page="market-plugins">插件市场</button><button class="text-button" type="button" data-action="navigation.openDetail" data-page="market-skins">皮肤市场</button><button class="text-button" type="button" data-action="navigation.openSettings">完整设置</button><button class="text-button" type="button" data-action="host.showNativeUi">全部控制项</button></div></footer>
+    </section>
+  </main>
+</body>
+</html>

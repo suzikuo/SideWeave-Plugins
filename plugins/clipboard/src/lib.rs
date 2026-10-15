@@ -1,8 +1,9 @@
-use agile_tiles_plugin_sdk::{
-    ErrorCode, PluginError, PluginEvent, PluginManifest, PluginRequest, PluginRequestKind, PluginResponse,
-    PluginRuntime, PluginTrust, PluginUi, PluginUiKind, API_VERSION, MANIFEST_VERSION,
+use sideweave_plugin_api::{
+    ErrorCode, PluginError, PluginEvent, PluginManifest, PluginRequest, PluginRequestKind,
+    PluginResponse, PluginRuntime, PluginTrust, PluginUi, PluginUiKind, API_VERSION,
+    MANIFEST_VERSION,
 };
-use agile_tiles_plugin_sdk::{success_response, HostServices, Plugin, PluginContext};
+use sideweave_plugin_sdk::{success_response, HostServices, Plugin, PluginContext};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,7 +14,7 @@ use std::time::Duration;
 const PLUGIN_ID: &str = "clipboard";
 const STATE_KEY: &str = "state";
 
-agile_tiles_plugin_sdk::export_plugin_dylib!(ClipboardPlugin);
+sideweave_plugin_sdk::export_plugin_dylib!(ClipboardPlugin);
 const POLL_MS: u64 = 1500;
 const MAX_TEXT_CHARS: usize = 100_000;
 const DEFAULT_MAX: u32 = 100;
@@ -70,12 +71,12 @@ impl ClipboardPlugin {
             manifest: PluginManifest {
                 manifest_version: MANIFEST_VERSION,
                 api_version: API_VERSION,
-                id: agile_tiles_plugin_sdk::PluginId::new(PLUGIN_ID).expect("static plugin id"),
+                id: sideweave_plugin_api::PluginId::new(PLUGIN_ID).expect("static plugin id"),
                 name: "剪贴板".into(),
                 icon: "ui/icon.svg".into(),
                 version: env!("CARGO_PKG_VERSION").into(),
                 description: "剪贴板历史：自动记录文本、搜索、一键复制".into(),
-                author: "Agile Tiles".into(),
+                author: "SideWeave".into(),
                 runtime: PluginRuntime::DynamicLibrary,
                 backend: Some("plugin.dll".into()),
                 trust: PluginTrust::TrustedLocal,
@@ -249,7 +250,7 @@ impl Plugin for ClipboardPlugin {
 
 fn poll_loop(
     services: Arc<dyn HostServices>,
-    plugin_id: agile_tiles_plugin_sdk::PluginId,
+    plugin_id: sideweave_plugin_api::PluginId,
     stop: Arc<AtomicBool>,
     enabled: Arc<AtomicBool>,
     lock: Arc<Mutex<()>>,
@@ -313,7 +314,7 @@ fn load(context: &PluginContext) -> ClipboardStore {
 
 fn load_with(
     services: &dyn HostServices,
-    plugin_id: &agile_tiles_plugin_sdk::PluginId,
+    plugin_id: &sideweave_plugin_api::PluginId,
 ) -> ClipboardStore {
     services
         .storage()
@@ -330,7 +331,7 @@ fn save(context: &PluginContext, store: &ClipboardStore) -> Result<(), String> {
 
 fn save_with(
     services: &dyn HostServices,
-    plugin_id: &agile_tiles_plugin_sdk::PluginId,
+    plugin_id: &sideweave_plugin_api::PluginId,
     store: &ClipboardStore,
 ) -> Result<(), String> {
     let value = serde_json::to_string(store).map_err(|error| error.to_string())?;

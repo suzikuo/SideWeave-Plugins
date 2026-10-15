@@ -60,7 +60,7 @@ if ($Plugins.Count -eq 0) { throw "No official plugin packages were found." }
 
 if ($ListOnly) {
     $choices = @($Plugins | Sort-Object Id | ForEach-Object {
-        [PSCustomObject]@{ id = $_.Id; name = $_.Name; version = $_.Version }
+        [PSCustomObject]@{ id = $_.Id; name = $_.Name; version = $_.Version; kind = "plugin" }
     })
     Write-Output (ConvertTo-Json -InputObject $choices -Depth 4 -Compress)
     return

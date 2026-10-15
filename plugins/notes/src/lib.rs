@@ -1,8 +1,9 @@
-use agile_tiles_plugin_sdk::{
-    ErrorCode, PluginError, PluginManifest, PluginRequest, PluginRequestKind, PluginResponse,
-    PluginRuntime, PluginTrust, PluginUi, PluginUiKind, API_VERSION, MANIFEST_VERSION,
+use sideweave_plugin_api::{
+    ErrorCode, PluginError, PluginManifest, PluginRequest, PluginRequestKind,
+    PluginResponse, PluginRuntime, PluginTrust, PluginUi, PluginUiKind, API_VERSION,
+    MANIFEST_VERSION,
 };
-use agile_tiles_plugin_sdk::{
+use sideweave_plugin_sdk::{
     success_response, HostServices, Plugin, PluginContext, WindowEvent, WindowEventHandler,
     WindowSpec,
 };
@@ -13,7 +14,7 @@ use std::sync::Arc;
 const PLUGIN_ID: &str = "notes";
 const STATE_KEY: &str = "state";
 
-agile_tiles_plugin_sdk::export_plugin_dylib!(NotesPlugin);
+sideweave_plugin_sdk::export_plugin_dylib!(NotesPlugin);
 const NOTE_W: f64 = 260.0;
 const NOTE_H: f64 = 200.0;
 const TODO_W: f64 = 280.0;
@@ -69,12 +70,12 @@ impl NotesPlugin {
             manifest: PluginManifest {
                 manifest_version: MANIFEST_VERSION,
                 api_version: API_VERSION,
-                id: agile_tiles_plugin_sdk::PluginId::new(PLUGIN_ID).expect("static plugin id"),
+                id: sideweave_plugin_api::PluginId::new(PLUGIN_ID).expect("static plugin id"),
                 name: "便签".into(),
                 icon: "ui/icon.svg".into(),
                 version: env!("CARGO_PKG_VERSION").into(),
                 description: "桌面便签：文本便签与任务清单小窗".into(),
-                author: "Agile Tiles".into(),
+                author: "SideWeave".into(),
                 runtime: PluginRuntime::DynamicLibrary,
                 backend: Some("plugin.dll".into()),
                 trust: PluginTrust::TrustedLocal,
@@ -226,7 +227,7 @@ fn save(context: &PluginContext, state: &NotesState) -> Result<(), String> {
 }
 
 fn publish_changed(context: &PluginContext) {
-    let _ = context.events().publish(agile_tiles_plugin_sdk::PluginEvent {
+    let _ = context.events().publish(sideweave_plugin_api::PluginEvent {
         plugin_id: context.plugin_id().clone(),
         topic: "notes.changed".into(),
         payload: Value::Null,
@@ -478,7 +479,7 @@ fn restore_visible(context: &PluginContext) -> Result<(), String> {
 
 struct NotesWindowHandler {
     services: Arc<dyn HostServices>,
-    plugin_id: agile_tiles_plugin_sdk::PluginId,
+    plugin_id: sideweave_plugin_api::PluginId,
     note_id: String,
 }
 

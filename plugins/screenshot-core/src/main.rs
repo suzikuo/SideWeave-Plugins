@@ -1,8 +1,8 @@
-use agile_tiles_plugin_sdk::{
-    ErrorCode, PluginError, PluginHandshakeResponse, PluginId, PluginRequest, PluginRequestKind,
-    PluginResponse, PluginWireMessage, API_VERSION,
+use sideweave_plugin_api::{
+    ErrorCode, PluginError, PluginHandshakeResponse, PluginId, PluginRequest,
+    PluginRequestKind, PluginResponse, PluginWireMessage, API_VERSION,
 };
-use agile_tiles_plugin_ipc::{FrameReader, FrameWriter};
+use sideweave_plugin_ipc::{FrameReader, FrameWriter};
 use model::{Settings, StatusSnapshot};
 use serde_json::{json, Value};
 use std::env;
@@ -531,7 +531,7 @@ fn open_directory(path: &str) -> Result<(), String> {
         let target = if path.trim().is_empty() {
             std::env::var_os("USERPROFILE")
                 .map(std::path::PathBuf::from)
-                .map(|p| p.join("Pictures").join("Agile Tiles").join("Screenshots"))
+                .map(|p| p.join("Pictures").join("SideWeave").join("Screenshots"))
                 .unwrap_or_else(|| std::path::PathBuf::from("."))
         } else {
             std::path::PathBuf::from(path.trim())

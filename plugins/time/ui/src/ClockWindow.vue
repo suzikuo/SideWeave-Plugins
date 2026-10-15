@@ -227,7 +227,7 @@ function pomoEnsureTimer() {
     pomo.value.phase = next
     pomo.value.remaining = pomoDuration.value
     void timeNotify(
-      'Agile Tiles 番茄钟',
+      'SideWeave 番茄钟',
       finished === 'work' ? '专注结束，休息一下吧 ☕' : '休息结束，开始新的专注 🍅'
     )
   }, 1000)

@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>深空回响 · 快速预览</title>
+  <link rel="stylesheet" href="./skin.css">
+  <link rel="stylesheet" href="./theme-light.css">
+  <link rel="stylesheet" href="./adaptive.css">
+  <script defer src="./app.js"></script>
+</head>
+<body data-surface="preview">
+  <main class="preview-shell">
+    <div class="preview-ambient" aria-hidden="true"></div>
+    <header class="preview-head"><span class="preview-kicker"><span class="pulse-dot"></span>LIVE MODULE FEED</span><span class="preview-mark">✦</span></header>
+    <section class="preview-main">
+      <div class="preview-title-row"><div><span class="eyebrow" id="preview-status">信号已连接</span><h1 id="preview-title">等待模块信号</h1><p id="preview-subtitle">将鼠标停留在星舰模块上查看实时数据。</p></div><button class="icon-button" type="button" data-action="preview.refresh" aria-label="刷新预览" title="刷新">⟳</button></div>
+      <div class="preview-metrics" id="preview-metrics"></div>
+      <div class="preview-progress" id="preview-progress" hidden><div class="progress-label"><span id="progress-label">任务进度</span><span id="progress-value">0%</span></div><div class="progress-track"><span id="progress-fill"></span></div></div>
+      <div class="preview-items" id="preview-items"></div>
+    </section>
+    <footer class="preview-footer"><span class="status-code">ORBITAL / TELEMETRY</span><div class="preview-actions" id="preview-actions"></div></footer>
+  </main>
+</body>
+</html>

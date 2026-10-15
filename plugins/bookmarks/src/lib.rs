@@ -1,15 +1,15 @@
-use agile_tiles_plugin_sdk::{
-    PluginManifest, PluginRequest, PluginRequestKind, PluginResponse, PluginRuntime, PluginTrust,
-    PluginUi, PluginUiKind, API_VERSION, MANIFEST_VERSION,
+use sideweave_plugin_api::{
+    PluginManifest, PluginRequest, PluginRequestKind, PluginResponse, PluginRuntime,
+    PluginTrust, PluginUi, PluginUiKind, API_VERSION, MANIFEST_VERSION,
 };
-use agile_tiles_plugin_sdk::{success_response, Plugin, PluginContext};
+use sideweave_plugin_sdk::{success_response, Plugin, PluginContext};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 const PLUGIN_ID: &str = "bookmarks";
 const STATE_KEY: &str = "state";
 
-agile_tiles_plugin_sdk::export_plugin_dylib!(BookmarksPlugin);
+sideweave_plugin_sdk::export_plugin_dylib!(BookmarksPlugin);
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -47,12 +47,12 @@ impl BookmarksPlugin {
             manifest: PluginManifest {
                 manifest_version: MANIFEST_VERSION,
                 api_version: API_VERSION,
-                id: agile_tiles_plugin_sdk::PluginId::new(PLUGIN_ID).expect("static plugin id"),
+                id: sideweave_plugin_api::PluginId::new(PLUGIN_ID).expect("static plugin id"),
                 name: "书签".into(),
                 icon: "ui/icon.svg".into(),
                 version: env!("CARGO_PKG_VERSION").into(),
                 description: "书签：标签化收藏、极速检索、一键直达".into(),
-                author: "Agile Tiles".into(),
+                author: "SideWeave".into(),
                 runtime: PluginRuntime::DynamicLibrary,
                 backend: Some("plugin.dll".into()),
                 trust: PluginTrust::TrustedLocal,
@@ -65,7 +65,7 @@ impl BookmarksPlugin {
                     initial_height: Some(760),
                     ..Default::default()
                 }),
-                hover_preview: Some(agile_tiles_plugin_sdk::PluginHoverPreview {
+                hover_preview: Some(sideweave_plugin_api::PluginHoverPreview {
                     width: Some(280),
                     height: Some(260),
                     data_method: Some("get_preview".into()),
@@ -223,8 +223,8 @@ impl Plugin for BookmarksPlugin {
                 plugin_id: request.plugin_id,
                 ok: false,
                 result: Value::Null,
-                error: Some(agile_tiles_plugin_sdk::PluginError {
-                    code: agile_tiles_plugin_sdk::ErrorCode::Internal,
+                error: Some(sideweave_plugin_api::PluginError {
+                    code: sideweave_plugin_api::ErrorCode::Internal,
                     message,
                 }),
             },

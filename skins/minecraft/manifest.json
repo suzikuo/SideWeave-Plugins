@@ -1,0 +1,22 @@
+{
+    "manifestVersion": 1,
+    "apiVersion": 1,
+    "id": "minecraft",
+    "name": "像素",
+    "version": "1.0.5",
+    "description": "方块化像素风格，包含独立配色、字体栈、界面样式和背景图。",
+    "author": "SideWeave",
+    "type": "skin",
+    "publisher": "sideweave",
+    "key_id": "main-2026-rotation-1",
+    "requires_trust": false,
+    "capabilities": [],
+    "appearanceDefaults": {
+        "sidebarPanelOpacity": 0.82,
+        "detailPanelOpacity": 0.0,
+        "controlPanelOpacity": 1.0,
+        "sidebarImageOpacity": 1.0,
+        "detailImageOpacity": 1.0,
+        "componentOpacity": 0.15
+    }
+}

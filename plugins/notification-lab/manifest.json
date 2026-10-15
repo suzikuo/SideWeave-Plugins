@@ -6,12 +6,16 @@
   "icon": "ui/icon.svg",
   "version": "0.1.0",
   "description": "Test Windows, host desktop, and sidebar notifications",
-  "author": "Agile Tiles",
+  "author": "SideWeave",
   "runtime": "dynamic_library",
   "backend": "plugin.dll",
   "trust": "trusted_local",
   "autoStart": false,
-  "permissions": ["notification.system", "notification.desktop", "notification.sidebar"],
+  "permissions": [
+    "notification.system",
+    "notification.desktop",
+    "notification.sidebar"
+  ],
   "ui": {
     "entry": "ui/index.html",
     "kind": "vue",

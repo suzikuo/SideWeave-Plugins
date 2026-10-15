@@ -1,5 +1,6 @@
 param(
     [Parameter(Mandatory = $true)][string]$Id,
+    [ValidateSet("plugin", "skin")][string]$Kind = "plugin",
     [string]$Version = "",
     [string]$SigningKeyPath = "",
     [string]$MarketplacePath = "",
@@ -23,15 +24,16 @@ if (-not [IO.Path]::IsPathRooted($OutputPath)) { $OutputPath = Join-Path $RepoRo
 $OutputPath = [IO.Path]::GetFullPath($OutputPath)
 $manifestPath = $null
 $manifest = $null
-foreach ($candidate in Get-ChildItem -LiteralPath (Join-Path $RepoRoot "plugins") -Filter "manifest.json" -File -Recurse) {
+$itemRoot = Join-Path $RepoRoot $(if ($Kind -eq "skin") { "skins" } else { "plugins" })
+foreach ($candidate in Get-ChildItem -LiteralPath $itemRoot -Filter "manifest.json" -File -Recurse) {
     $candidateManifest = Get-Content -LiteralPath $candidate.FullName -Raw -Encoding UTF8 | ConvertFrom-Json
-    if ([string]$candidateManifest.id -eq $Id -and [string]$candidateManifest.publisher -eq "sideweave") {
-        if ($manifestPath) { throw "More than one official manifest uses plugin ID $Id." }
+    if ([string]$candidateManifest.id -eq $Id) {
+        if ($manifestPath) { throw "More than one official $Kind manifest uses ID $Id." }
         $manifestPath = $candidate.FullName
         $manifest = $candidateManifest
     }
 }
-if (-not $manifestPath) { throw "Official plugin manifest not found for ID: $Id" }
+if (-not $manifestPath) { throw "Official $Kind manifest not found for ID: $Id" }
 if (-not (Test-Path -LiteralPath $SigningKeyPath -PathType Leaf)) { throw "Publisher private key not found: $SigningKeyPath" }
 if (-not (Test-Path -LiteralPath $MinisignExe -PathType Leaf)) {
     $command = Get-Command minisign -ErrorAction SilentlyContinue
@@ -45,8 +47,11 @@ if ([string]$manifest.version -ne $Version) { throw "Manifest version must match
 if ([string]$manifest.publisher -ne "sideweave" -or -not $manifest.key_id) {
     throw "Official plugin manifests must declare publisher sideweave and key_id."
 }
-if ($manifest.type -ne "native" -or $manifest.requires_trust -ne $true) {
+if ($Kind -eq "plugin" -and ($manifest.type -ne "native" -or $manifest.requires_trust -ne $true)) {
     throw "Native plugin manifests must use type native and requires_trust true."
+}
+if ($Kind -eq "skin" -and $manifest.type -ne "skin") {
+    throw "Skin manifests must use type skin."
 }
 
 $publishersPath = Join-Path $MarketplacePath "publishers.json"
@@ -64,7 +69,7 @@ if ([string]$keyHeader -notmatch '^untrusted comment:.*secret key') {
     throw "Publisher key is not a complete Minisign secret-key file."
 }
 
-$tag = "plugin-$Id-v$Version"
+$tag = if ($Kind -eq "skin") { "skin-$Id-v$Version" } else { "plugin-$Id-v$Version" }
 $releaseRoot = Join-Path $OutputPath $tag
 New-Item -ItemType Directory -Path $releaseRoot -Force | Out-Null
 $derivedPublicKey = Join-Path $releaseRoot "publisher-derived.pub"
@@ -76,7 +81,7 @@ try {
         throw "Signing key does not match sideweave/$($keyRecord.id) in publishers.json."
     }
 
-    if (-not (Test-Path -LiteralPath (Join-Path $RepoRoot "node_modules\.bin\vite.cmd") -PathType Leaf)) {
+    if ($Kind -eq "plugin" -and -not (Test-Path -LiteralPath (Join-Path $RepoRoot "node_modules\.bin\vite.cmd") -PathType Leaf)) {
         Push-Location $RepoRoot
         try {
             & npm ci
@@ -85,9 +90,21 @@ try {
             Pop-Location
         }
     }
-    $buildScript = Join-Path $RepoRoot "tools/build-plugin-packages.ps1"
-    & $buildScript -PluginId $Id -BuildProfile release -OutputDir $releaseRoot
-    if ($LASTEXITCODE -ne 0) { throw "Plugin build failed: $Id." }
+    if ($Kind -eq "skin") {
+        $previousKeyId = $env:SIDEWEAVE_OFFICIAL_PUBLISHER_KEY_ID
+        try {
+            $env:SIDEWEAVE_OFFICIAL_PUBLISHER_KEY_ID = [string]$keyRecord.id
+            $buildScript = Join-Path $RepoRoot "tools/build-skin-packages.ps1"
+            & $buildScript -SkinId $Id -OutputDir $releaseRoot
+        } finally {
+            if ($null -eq $previousKeyId) { Remove-Item Env:SIDEWEAVE_OFFICIAL_PUBLISHER_KEY_ID -ErrorAction SilentlyContinue }
+            else { $env:SIDEWEAVE_OFFICIAL_PUBLISHER_KEY_ID = $previousKeyId }
+        }
+    } else {
+        $buildScript = Join-Path $RepoRoot "tools/build-plugin-packages.ps1"
+        & $buildScript -PluginId $Id -BuildProfile release -OutputDir $releaseRoot
+    }
+    if ($LASTEXITCODE -ne 0) { throw "$Kind build failed: $Id." }
 
     $archive = Join-Path $releaseRoot "$Id-$Version.zip"
     if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) { throw "Package archive not found: $archive" }

@@ -1,8 +1,8 @@
-use agile_tiles_plugin_sdk::{
+use sideweave_plugin_api::{
     PluginId, PluginRequest, PluginRequestKind, PluginResponse, PluginWireMessage,
     DEFAULT_REQUEST_TIMEOUT_MS,
 };
-use agile_tiles_plugin_ipc::{FrameReader, FrameWriter};
+use sideweave_plugin_ipc::{FrameReader, FrameWriter};
 use serde_json::{json, Value};
 use std::fs::File;
 use std::sync::atomic::{AtomicU64, Ordering};

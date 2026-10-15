@@ -199,7 +199,7 @@ export function pluginCall<T>(method: string, payload: unknown = {}, timeoutMs =
     const pluginId = currentPluginId()
     const timer = window.setTimeout(() => {
       window.removeEventListener('message', onMessage)
-      reject(new Error('Agile Tiles UI bridge timeout'))
+      reject(new Error('SideWeave UI bridge timeout'))
     }, 8000)
     function onMessage(event: MessageEvent) {
       const data = event.data as {
@@ -266,4 +266,4 @@ export { getCurrentWindow } from '@tauri-apps/api/window'
 export { listen }
 export type { UnlistenFn } from '@tauri-apps/api/event'
 
-export {}
+export { }
