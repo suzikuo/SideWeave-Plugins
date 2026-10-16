@@ -105,7 +105,7 @@ function reset() {
 .hash-name {
   font-size: 12px;
   font-weight: 600;
-  color: color-mix(in srgb, var(--accent) 55%, var(--text));
+  color: color-mix(in srgb, var(--primary) 55%, var(--text));
 }
 .hash-line {
   display: grid;

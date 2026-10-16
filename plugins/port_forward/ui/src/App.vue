@@ -8,19 +8,23 @@ import {
   gwDelete,
   gwListeners,
   gwList,
+  gwConnectionLogs,
+  gwClearConnectionLogs,
   gwSave,
   gwStopListener,
   gwSetRunning,
   type GwRuleInput,
   type GwRuleView,
+  type ConnectionLogView,
   type ListenerInfo
 } from './api'
 
-type ActiveView = 'rules' | 'listeners'
+type ActiveView = 'rules' | 'connections' | 'listeners'
 
 const activeView = ref<ActiveView>('rules')
 const rules = ref<GwRuleView[]>([])
 const listeners = ref<ListenerInfo[]>([])
+const connectionLogs = ref<ConnectionLogView[]>([])
 const listenHost = '0.0.0.0'
 const portQuery = ref<number | ''>('')
 const queriedPort = ref<number | ''>('')
@@ -108,6 +112,7 @@ async function refresh(silent = false) {
 function refreshWhenVisible() {
   if (!pluginActive || document.hidden || showDialog.value || terminateTarget.value) return
   if (activeView.value === 'listeners') void refreshListeners(true)
+  else if (activeView.value === 'connections') void refreshConnectionLogs(true)
   else void refresh(true)
 }
 
@@ -117,6 +122,7 @@ function setPluginActive(active: boolean) {
   pollTimer = 0
   if (!active) return
   if (activeView.value === 'listeners') void refreshListeners()
+  else if (activeView.value === 'connections') void refreshConnectionLogs()
   else void refresh()
   pollTimer = window.setInterval(refreshWhenVisible, 5000)
 }
@@ -164,10 +170,46 @@ async function refreshListeners(silent = false) {
   }
 }
 
+async function refreshConnectionLogs(silent = false) {
+  try {
+    connectionLogs.value = await gwConnectionLogs()
+  } catch (e) {
+    if (!silent) showToast(String(e), 'error')
+  }
+}
+
+async function clearConnectionLogs() {
+  try {
+    await gwClearConnectionLogs()
+    connectionLogs.value = []
+    showToast('已清空临时请求记录', 'success')
+  } catch (e) {
+    showToast(String(e), 'error')
+  }
+}
+
+function formatLogTime(timestamp: number): string {
+  return new Date(timestamp).toLocaleString('zh-CN', {
+    month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit'
+  })
+}
+
+function formatDuration(milliseconds: number): string {
+  if (milliseconds < 1000) return `${milliseconds} ms`
+  return `${(milliseconds / 1000).toFixed(1)} s`
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
 function selectView(view: ActiveView) {
   activeView.value = view
   if (!pluginActive) return
   if (view === 'listeners') void refreshListeners()
+  else if (view === 'connections') void refreshConnectionLogs()
   else void refresh(true)
 }
 
@@ -281,6 +323,15 @@ async function save() {
         @click="selectView('rules')"
       >
         转发规则
+      </button>
+      <button
+        type="button"
+        role="tab"
+        :aria-selected="activeView === 'connections'"
+        :class="{ active: activeView === 'connections' }"
+        @click="selectView('connections')"
+      >
+        请求记录
       </button>
       <button
         type="button"
@@ -430,7 +481,7 @@ async function save() {
       </Teleport>
     </template>
 
-    <section v-else class="listener-view">
+    <section v-else-if="activeView === 'listeners'" class="listener-view">
       <div class="listener-toolbar">
         <label class="port-search">
           <span>端口号</span>
@@ -483,6 +534,80 @@ async function save() {
             {{ queriedPort === '' ? '没有发现监听端口' : `端口 ${queriedPort} 当前没有监听项` }}
           </div>
           <div class="empty-sub">同时检查 TCP、UDP 以及 IPv4、IPv6 监听项。</div>
+        </div>
+      </div>
+    </section>
+
+    <section v-else class="connections-view">
+      <div class="connection-toolbar">
+        <div class="connection-retention">
+          仅内存 · 最近 15 分钟 · 最多 200 条 · 停用插件后清空
+        </div>
+        <Button
+          variant="outline"
+          size="sm"
+          class="btn sm"
+          :disabled="connectionLogs.length === 0"
+          @click="clearConnectionLogs"
+        >
+          清空记录
+        </Button>
+      </div>
+      <div class="connection-note">
+        每条 TCP 连接记录一次；明文 HTTP 显示首次识别到的方法和 URL。TLS 只显示可读取的 SNI 主机名；其他 TCP 仅显示流量统计。请求正文和非 Host 请求头不会保存。
+      </div>
+      <div class="connection-list">
+        <article v-for="log in connectionLogs" :key="log.id" class="connection-card">
+          <header class="connection-card-head">
+            <div class="connection-badges">
+              <span class="protocol-chip">{{ log.protocol }}</span>
+              <span
+                class="connection-status"
+                :class="{
+                  active: !log.finished,
+                  failed: log.status.includes('失败') || log.status.includes('异常')
+                }"
+              >{{ log.status }}</span>
+              <span class="connection-rule">{{ log.rule_name }}</span>
+            </div>
+            <time>{{ formatLogTime(log.started_at_ms) }} · {{ formatDuration(log.elapsed_ms) }}</time>
+          </header>
+          <div class="connection-route mono">
+            <div class="connection-hop">
+              <small>来源</small>
+              <span :title="log.source_addr">{{ log.source_addr }}</span>
+            </div>
+            <span class="connection-arrow">→</span>
+            <div class="connection-hop">
+              <small>接入</small>
+              <span :title="log.listen_addr">{{ log.listen_addr }}</span>
+            </div>
+            <span class="connection-arrow">→</span>
+            <div class="connection-hop target-hop">
+              <small>目标</small>
+              <span :title="log.actual_target_addr || log.target_endpoint">
+                {{ log.actual_target_addr || log.target_endpoint }}
+              </span>
+            </div>
+          </div>
+          <div class="connection-request">
+            <span v-if="log.method" class="method-chip">{{ log.method }}</span>
+            <span v-if="log.request_url" class="request-url mono" :title="log.request_url">{{ log.request_url }}</span>
+            <span v-else-if="log.protocol === 'TLS' && log.host" class="request-hint mono">TLS SNI：{{ log.host }}（路径加密）</span>
+            <span v-else-if="log.protocol === 'TLS'" class="request-hint">TLS 加密连接，未读取到 SNI</span>
+            <span v-else-if="log.protocol === 'TCP'" class="request-hint">TCP 数据流 · 不解析应用层内容</span>
+            <span v-else class="request-hint">尚未识别到 HTTP 请求</span>
+          </div>
+          <div v-if="log.error" class="connection-error">{{ log.error }}</div>
+          <footer class="connection-card-foot">
+            <span>请求 {{ formatBytes(log.bytes_from_client) }}</span>
+            <span>响应 {{ formatBytes(log.bytes_from_target) }}</span>
+          </footer>
+        </article>
+        <div v-if="connectionLogs.length === 0" class="empty">
+          <span class="empty-icon"><Icon name="activity" :size="32" /></span>
+          <div class="empty-title">暂无请求记录</div>
+          <div class="empty-sub">有设备连接转发端口后，这里会显示来源、目标和可识别的请求信息。</div>
         </div>
       </div>
     </section>
@@ -575,9 +700,9 @@ async function save() {
   cursor: default;
 }
 .btn.primary {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #fff;
+  background: var(--primary);
+  border-color: var(--primary);
+  color: var(--primary-foreground);
 }
 .btn.primary:hover {
   filter: brightness(1.1);
@@ -620,6 +745,150 @@ async function save() {
   flex-direction: column;
   gap: 10px;
 }
+.connections-view {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  gap: 8px;
+}
+.connection-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex: none;
+  gap: 10px;
+}
+.connection-retention,
+.connection-note {
+  color: var(--text-muted);
+  font-size: 10.5px;
+}
+.connection-note {
+  flex: none;
+  line-height: 1.5;
+}
+.connection-list {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  gap: 7px;
+  overflow: auto;
+}
+.connection-card {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: 7px;
+  padding: 9px 11px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--surface-subtle) 55%, transparent);
+}
+.connection-card-head,
+.connection-card-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.connection-card-head time,
+.connection-card-foot {
+  color: var(--text-muted);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+.connection-badges {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.connection-status,
+.connection-rule,
+.method-chip {
+  overflow: hidden;
+  max-width: 140px;
+  padding: 3px 6px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--surface-container) 75%, transparent);
+  color: var(--text-muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.connection-status.active {
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+  color: var(--success);
+}
+.connection-status.failed {
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  color: var(--danger);
+}
+.connection-route {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+}
+.connection-hop {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+.connection-hop small {
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 9.5px;
+}
+.connection-hop span {
+  overflow: hidden;
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.connection-arrow {
+  color: var(--success);
+  font-family: inherit;
+  font-size: 12px;
+}
+.connection-request {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 6px 8px;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--surface-container) 55%, transparent);
+}
+.method-chip {
+  flex: none;
+  background: color-mix(in srgb, var(--primary) 15%, transparent);
+  color: var(--primary);
+  font-weight: 700;
+}
+.request-url,
+.request-hint {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.request-hint {
+  color: var(--text-muted);
+}
+.connection-error {
+  overflow-wrap: anywhere;
+  color: var(--danger);
+  font-size: 10.5px;
+}
+.connection-card-foot {
+  justify-content: flex-start;
+  gap: 14px;
+}
 .listener-toolbar {
   display: flex;
   align-items: flex-end;
@@ -647,7 +916,7 @@ async function save() {
   outline: none;
 }
 .port-search input:focus {
-  border-color: var(--accent);
+  border-color: var(--primary);
 }
 .listener-summary {
   margin-left: auto;
@@ -679,8 +948,8 @@ async function save() {
   justify-self: start;
   padding: 3px 6px;
   border-radius: 6px;
-  background: color-mix(in srgb, var(--accent) 13%, transparent);
-  color: var(--accent);
+  background: color-mix(in srgb, var(--primary) 13%, transparent);
+  color: var(--primary);
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.02em;
@@ -775,7 +1044,7 @@ async function save() {
 }
 .icon-btn:hover {
   background: var(--surface-container);
-  color: var(--accent);
+  color: var(--primary);
 }
 .icon-btn.danger:hover {
   color: var(--danger);
@@ -884,7 +1153,7 @@ async function save() {
   flex: none;
 }
 .chip.conns {
-  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  background: color-mix(in srgb, var(--primary) 22%, transparent);
   color: var(--text);
   flex: none;
   font-variant-numeric: tabular-nums;
@@ -992,7 +1261,7 @@ async function save() {
   outline: none;
 }
 .field input:focus {
-  border-color: var(--accent);
+  border-color: var(--primary);
 }
 .field input.invalid {
   border-color: var(--danger);
@@ -1056,12 +1325,12 @@ async function save() {
     background 0.15s ease;
 }
 .switch.on {
-  background: var(--accent);
-  border-color: var(--accent);
+  background: var(--primary);
+  border-color: var(--primary);
 }
 .switch.on .knob {
   transform: translateX(18px);
-  background: #fff;
+  background: var(--primary-foreground);
 }
 
 .dialog-foot {

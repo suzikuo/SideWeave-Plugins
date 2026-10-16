@@ -101,7 +101,7 @@ const skinClass = computed(() => `skin-${skin.value}`)
 const rootStyle = computed(() => {
   const s = style.value
   // 颜色：accent=跟随强调色；自定义 hex 写入 --clock-color 供 .time/.countdown 消费
-  const clockColor = s.color === 'accent' ? 'var(--accent)' : s.color
+  const clockColor = s.color === 'accent' ? 'var(--primary)' : s.color
   const rawClockColor = s.color === 'accent'
     ? getComputedStyle(document.documentElement).getPropertyValue('--accent').trim()
     : s.color
@@ -467,10 +467,10 @@ function onDocumentVisibilityChange() {
   line-height: 1.02;
   letter-spacing: 2px;
   font-variant-numeric: tabular-nums;
-  color: var(--clock-color, var(--accent));
+  color: var(--clock-color, var(--primary));
   white-space: nowrap;
   filter: brightness(1.35);
-  text-shadow: 0 0 18px color-mix(in srgb, var(--clock-color, var(--accent)) 70%, transparent);
+  text-shadow: 0 0 18px color-mix(in srgb, var(--clock-color, var(--primary)) 70%, transparent);
   animation: countdown-pulse 1s ease-in-out infinite;
 }
 .date.warn {
@@ -489,7 +489,7 @@ function onDocumentVisibilityChange() {
 
 /* 闹钟响铃闪动 */
 .clock-root.flashing {
-  border-color: var(--accent);
+  border-color: var(--primary);
   animation: ring 1s ease-in-out infinite;
 }
 @keyframes ring {
@@ -498,7 +498,7 @@ function onDocumentVisibilityChange() {
     box-shadow: 0 0 0 0 transparent;
   }
   50% {
-    box-shadow: 0 0 26px 4px color-mix(in srgb, var(--accent) 65%, transparent);
+    box-shadow: 0 0 26px 4px color-mix(in srgb, var(--primary) 65%, transparent);
   }
 }
 
@@ -551,7 +551,7 @@ function onDocumentVisibilityChange() {
 .pomo-fill {
   height: 100%;
   border-radius: 999px;
-  background: var(--clock-color, var(--accent));
+  background: var(--clock-color, var(--primary));
   transition: width 0.4s linear;
 }
 .pomo-btns {

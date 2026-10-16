@@ -105,8 +105,8 @@ onMounted(generate)
   transition: border-color 0.15s, background 0.15s;
 }
 .uuid-row:hover {
-  border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+  border-color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 10%, var(--surface));
 }
 .uuid-idx {
   flex: none;

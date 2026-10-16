@@ -645,9 +645,9 @@ onUnmounted(() => {
   border-color: var(--border-strong);
 }
 .btn.primary {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #fff;
+  background: var(--primary);
+  border-color: var(--primary);
+  color: var(--primary-foreground);
 }
 .btn.primary:hover {
   filter: brightness(1.1);
@@ -684,10 +684,10 @@ onUnmounted(() => {
   border-bottom: none;
 }
 .book:hover {
-  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  background: color-mix(in srgb, var(--primary) 8%, transparent);
 }
 .book.current {
-  box-shadow: inset 3px 0 0 var(--accent);
+  box-shadow: inset 3px 0 0 var(--primary);
 }
 
 .meta {
@@ -712,8 +712,8 @@ onUnmounted(() => {
   flex: none;
   padding: 1px 7px;
   border-radius: 999px;
-  border: 1px solid color-mix(in srgb, var(--accent) 60%, transparent);
-  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  border: 1px solid color-mix(in srgb, var(--primary) 60%, transparent);
+  background: color-mix(in srgb, var(--primary) 18%, transparent);
   color: var(--text);
   font-size: 10.5px;
   line-height: 1.6;
@@ -807,15 +807,15 @@ onUnmounted(() => {
 
 /* ---------- 新控件 ---------- */
 .btn.btn-on {
-  border-color: var(--accent);
-  color: var(--accent);
+  border-color: var(--primary);
+  color: var(--primary);
 }
 .rename-input {
   flex: 1;
   min-width: 0;
   padding: 3px 8px;
   border-radius: 7px;
-  border: 1px solid var(--accent);
+  border: 1px solid var(--primary);
   background: var(--surface-subtle);
   color: var(--text);
   font-size: 12.5px;
@@ -858,6 +858,6 @@ onUnmounted(() => {
   font-size: 12px;
 }
 .desktop-toggle input {
-  accent-color: var(--accent);
+  accent-color: var(--primary);
 }
 </style>

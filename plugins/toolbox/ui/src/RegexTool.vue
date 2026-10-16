@@ -228,9 +228,9 @@ function reset() {
   border-color: var(--border-strong);
 }
 .flag-chip.on {
-  border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 18%, transparent);
-  color: color-mix(in srgb, var(--accent) 60%, var(--text));
+  border-color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 18%, transparent);
+  color: color-mix(in srgb, var(--primary) 60%, var(--text));
 }
 
 .regex-text {

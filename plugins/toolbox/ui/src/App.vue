@@ -151,12 +151,12 @@ provide(TOOLBOX_API_KEY, { copyText, showToast })
   color: var(--text);
 }
 .nav-item.on {
-  background: color-mix(in srgb, var(--accent) 18%, transparent);
-  color: color-mix(in srgb, var(--accent) 60%, var(--text));
+  background: color-mix(in srgb, var(--primary) 18%, transparent);
+  color: color-mix(in srgb, var(--primary) 60%, var(--text));
   font-weight: 600;
 }
 .nav-item:focus-visible {
-  outline: 1px solid var(--accent);
+  outline: 1px solid var(--primary);
   outline-offset: 1px;
 }
 

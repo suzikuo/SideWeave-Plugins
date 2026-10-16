@@ -1600,7 +1600,7 @@ dependencies = [
 
 [[package]]
 name = "sideweave_plugin-cloudflare-tunnel"
-version = "1.0.8"
+version = "1.0.18"
 dependencies = [
  "chrono",
  "serde",
@@ -1641,7 +1641,7 @@ dependencies = [
 
 [[package]]
 name = "sideweave_plugin-port-forward"
-version = "1.0.7"
+version = "1.0.8"
 dependencies = [
  "serde",
  "serde_json",

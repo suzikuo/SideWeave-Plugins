@@ -558,9 +558,9 @@ watch(showDialog, (open) => {
   border-color: var(--border-strong);
 }
 .btn.primary {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #fff;
+  background: var(--primary);
+  border-color: var(--primary);
+  color: var(--primary-foreground);
 }
 .btn.primary:hover {
   filter: brightness(1.1);
@@ -639,8 +639,8 @@ watch(showDialog, (open) => {
   transition: background 0.15s ease, border-color 0.15s ease;
 }
 .card:hover {
-  background: color-mix(in srgb, var(--accent) 7%, var(--surface-subtle));
-  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+  background: color-mix(in srgb, var(--primary) 7%, var(--surface-subtle));
+  border-color: color-mix(in srgb, var(--primary) 40%, var(--border));
 }
 
 .avatar {
@@ -651,7 +651,7 @@ watch(showDialog, (open) => {
   width: 34px;
   height: 34px;
   border-radius: 50%;
-  background: color-mix(in srgb, var(--accent) 26%, #101416);
+  background: color-mix(in srgb, var(--primary) 26%, #101416);
   color: #dff5f7;
   font-size: 14px;
   font-weight: 600;
@@ -690,9 +690,9 @@ watch(showDialog, (open) => {
   white-space: nowrap;
 }
 .chip.auth {
-  color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 14%, transparent);
-  border: 1px solid color-mix(in srgb, var(--accent) 36%, transparent);
+  color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--primary) 36%, transparent);
 }
 .chip.tag {
   color: var(--text-muted);
@@ -750,7 +750,7 @@ watch(showDialog, (open) => {
 }
 .icon-btn:hover {
   background: var(--surface-container);
-  color: var(--accent);
+  color: var(--primary);
 }
 .icon-btn.danger:hover {
   color: var(--danger);
@@ -827,7 +827,7 @@ watch(showDialog, (open) => {
   outline: none;
 }
 .field input:focus {
-  border-color: var(--accent);
+  border-color: var(--primary);
 }
 .field input.invalid {
   border-color: var(--danger);
@@ -866,8 +866,8 @@ watch(showDialog, (open) => {
   font-size: 12px;
 }
 .segmented button.active {
-  background: var(--accent);
-  color: #fff;
+  background: var(--primary);
+  color: var(--primary-foreground);
 }
 
 .dialog-foot {
@@ -922,7 +922,7 @@ watch(showDialog, (open) => {
   font-size: 12px;
 }
 .keys-item:hover {
-  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  background: color-mix(in srgb, var(--primary) 14%, transparent);
 }
 .keys-name {
   flex: 1;

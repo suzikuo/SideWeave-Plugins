@@ -297,9 +297,9 @@ onBeforeUnmount(() => {
   font-size: 12.5px;
 }
 .btn.primary {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #fff;
+  background: var(--primary);
+  border-color: var(--primary);
+  color: var(--primary-foreground);
 }
 .btn.small {
   padding: 5px 10px;
@@ -375,8 +375,8 @@ onBeforeUnmount(() => {
   border-radius: 6px;
   font-size: 10.5px;
   line-height: 17px;
-  background: color-mix(in srgb, var(--accent) 18%, transparent);
-  color: var(--accent);
+  background: color-mix(in srgb, var(--primary) 18%, transparent);
+  color: var(--primary);
   vertical-align: 1px;
 }
 .meta {

@@ -23,6 +23,61 @@ pub struct TunnelRecord {
     pub created_at: String,
     #[serde(default)]
     pub services: Vec<ServiceRule>,
+    #[serde(default)]
+    pub file_share: Option<FileShareConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FileShareConfig {
+    pub enabled: bool,
+    pub directory: String,
+    pub hostname: String,
+    pub token: String,
+    pub port: u16,
+    pub lan_enabled: bool,
+    pub allowed_ips: Vec<String>,
+    pub upload_enabled: bool,
+    pub upload_directory: String,
+    pub max_upload_mb: u32,
+    pub max_total_upload_mb: u32,
+}
+
+impl Default for FileShareConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            directory: String::new(),
+            hostname: String::new(),
+            token: String::new(),
+            port: 12026,
+            lan_enabled: false,
+            allowed_ips: Vec::new(),
+            upload_enabled: false,
+            upload_directory: String::new(),
+            max_upload_mb: 100,
+            max_total_upload_mb: 2048,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileShareView {
+    pub enabled: bool,
+    pub directory: String,
+    pub local_url: String,
+    pub local_running: bool,
+    pub port: u16,
+    pub lan_enabled: bool,
+    pub lan_running: bool,
+    pub lan_host: String,
+    pub lan_share_url: String,
+    pub cloudflare_share_url: String,
+    pub upload_enabled: bool,
+    pub upload_directory: String,
+    pub max_upload_mb: u32,
+    pub max_total_upload_mb: u32,
+    pub allowed_ips: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -67,6 +122,7 @@ pub struct TunnelDetailView {
     pub status: TunnelState,
     pub conns: u32,
     pub services: Vec<ServiceView>,
+    pub file_share: Option<FileShareView>,
     pub error_message: Option<String>,
     pub config_path: String,
     pub credentials_path: String,

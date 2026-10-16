@@ -61,21 +61,21 @@
   cursor: not-allowed;
 }
 .tb-btn:focus-visible {
-  outline: 1px solid var(--accent);
+  outline: 1px solid var(--primary);
   outline-offset: 1px;
 }
 .tb-btn.primary {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #fff;
+  background: var(--primary);
+  border-color: var(--primary);
+  color: var(--primary-foreground);
 }
 .tb-btn.primary:hover {
   filter: brightness(1.1);
 }
 .tb-btn.active {
-  border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 16%, var(--surface-subtle));
-  color: color-mix(in srgb, var(--accent) 55%, var(--text));
+  border-color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 16%, var(--surface-subtle));
+  color: color-mix(in srgb, var(--primary) 55%, var(--text));
   font-weight: 600;
 }
 .tb-btn.ghost {
@@ -113,7 +113,7 @@
 }
 .tb-input:focus,
 .tb-textarea:focus {
-  border-color: var(--accent);
+  border-color: var(--primary);
 }
 .tb-input::placeholder,
 .tb-textarea::placeholder {
@@ -211,7 +211,7 @@
 mark.tb-mark {
   padding: 0 1px;
   border-radius: 3px;
-  background: color-mix(in srgb, var(--accent) 40%, transparent);
+  background: color-mix(in srgb, var(--primary) 40%, transparent);
   color: inherit;
 }
 

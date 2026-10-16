@@ -215,8 +215,8 @@ const caps = computed<string[]>(() => {
 
 /* 录制中的草稿键帽：强调色描边 + 轻微脉动提示 */
 .caps.draft kbd {
-  border-color: var(--accent);
-  color: var(--accent);
+  border-color: var(--primary);
+  color: var(--primary);
 }
 
 .caps em {
@@ -227,7 +227,7 @@ const caps = computed<string[]>(() => {
 
 .rec-hint {
   font-size: 11px;
-  color: var(--accent);
+  color: var(--primary);
 }
 
 .btn {
@@ -242,8 +242,8 @@ const caps = computed<string[]>(() => {
   white-space: nowrap;
 }
 .btn:hover {
-  border-color: var(--accent);
-  color: var(--accent);
+  border-color: var(--primary);
+  color: var(--primary);
 }
 .btn.ghost {
   background: transparent;

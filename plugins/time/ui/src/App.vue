@@ -870,8 +870,8 @@ onUnmounted(() => {
   gap: 8px;
   padding: 9px 14px;
   border-radius: var(--radius, 12px);
-  border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
-  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--primary) 55%, transparent);
+  background: color-mix(in srgb, var(--primary) 16%, transparent);
   color: var(--text);
   font-size: 13px;
   animation: banner-pulse 1.2s ease-in-out infinite;
@@ -882,7 +882,7 @@ onUnmounted(() => {
     box-shadow: 0 0 0 0 transparent;
   }
   50% {
-    box-shadow: 0 0 18px 2px color-mix(in srgb, var(--accent) 45%, transparent);
+    box-shadow: 0 0 18px 2px color-mix(in srgb, var(--primary) 45%, transparent);
   }
 }
 
@@ -899,8 +899,8 @@ onUnmounted(() => {
   background: color-mix(in srgb, var(--surface-subtle) 55%, transparent);
 }
 .clock-panel.imminent {
-  border-color: color-mix(in srgb, var(--accent) 60%, transparent);
-  background: color-mix(in srgb, var(--accent) 10%, var(--surface-subtle) 60%);
+  border-color: color-mix(in srgb, var(--primary) 60%, transparent);
+  background: color-mix(in srgb, var(--primary) 10%, var(--surface-subtle) 60%);
 }
 
 .next-line {
@@ -920,9 +920,9 @@ onUnmounted(() => {
   line-height: 1;
   letter-spacing: 1.5px;
   font-variant-numeric: tabular-nums;
-  color: var(--accent);
+  color: var(--primary);
   filter: brightness(1.35);
-  text-shadow: 0 0 16px color-mix(in srgb, var(--accent) 70%, transparent);
+  text-shadow: 0 0 16px color-mix(in srgb, var(--primary) 70%, transparent);
   animation: countdown-pulse 1s ease-in-out infinite;
 }
 .next-line .countdown-label {
@@ -966,9 +966,9 @@ onUnmounted(() => {
   border-color: var(--border-strong);
 }
 .btn.primary {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #fff;
+  background: var(--primary);
+  border-color: var(--primary);
+  color: var(--primary-foreground);
 }
 .btn.primary:hover {
   filter: brightness(1.1);
@@ -1010,8 +1010,8 @@ onUnmounted(() => {
   cursor: pointer;
 }
 .preset-card:hover {
-  border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 8%, var(--surface-subtle));
+  border-color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 8%, var(--surface-subtle));
 }
 .preset-title {
   display: inline-flex;
@@ -1038,7 +1038,7 @@ onUnmounted(() => {
   border-bottom: none;
 }
 .row:not(.head):hover {
-  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  background: color-mix(in srgb, var(--primary) 8%, transparent);
 }
 .row.off .c-time,
 .row.off .c-repeat,
@@ -1093,7 +1093,7 @@ onUnmounted(() => {
 }
 .icon-btn:hover {
   background: var(--surface-container);
-  color: var(--accent);
+  color: var(--primary);
 }
 .icon-btn.danger:hover {
   color: var(--danger);
@@ -1136,10 +1136,11 @@ onUnmounted(() => {
   transition: transform 0.18s;
 }
 .switch input:checked + .slider {
-  background: var(--accent);
+  background: var(--primary);
 }
 .switch input:checked + .slider::before {
   transform: translateX(14px);
+  background: var(--primary-foreground);
 }
 
 /* ---------- 对话框 ---------- */
@@ -1186,7 +1187,7 @@ onUnmounted(() => {
   outline: none;
 }
 .field input:focus {
-  border-color: var(--accent);
+  border-color: var(--primary);
 }
 .field small,
 .form-hint {
@@ -1225,8 +1226,8 @@ onUnmounted(() => {
   border-color: var(--border-strong);
 }
 .chip.on {
-  border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  border-color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 22%, transparent);
   color: var(--text);
 }
 
@@ -1239,7 +1240,7 @@ onUnmounted(() => {
   color: var(--text);
 }
 .check input {
-  accent-color: var(--accent);
+  accent-color: var(--primary);
 }
 
 .dialog-foot {
@@ -1304,8 +1305,8 @@ onUnmounted(() => {
   height: 24px;
   border-radius: 50%;
   border: 2px solid var(--border);
-  background: var(--accent);
-  color: #fff;
+  background: var(--primary);
+  color: var(--primary-foreground);
   font-size: 12px;
   font-weight: 700;
   cursor: pointer;

@@ -21,6 +21,38 @@ export interface ServiceView {
   enabled: boolean
 }
 
+export interface FileShareConfig {
+  enabled: boolean
+  directory: string
+  hostname?: string
+  token?: string
+  port?: number
+  lan_enabled?: boolean
+  allowed_ips?: string[]
+  upload_enabled?: boolean
+  upload_directory?: string
+  max_upload_mb?: number
+  max_total_upload_mb?: number
+}
+
+export interface FileShareView {
+  enabled: boolean
+  directory: string
+  local_url: string
+  local_running: boolean
+  port: number
+  lan_enabled: boolean
+  lan_running: boolean
+  lan_host: string
+  lan_share_url: string
+  cloudflare_share_url: string
+  upload_enabled: boolean
+  upload_directory: string
+  max_upload_mb: number
+  max_total_upload_mb: number
+  allowed_ips: string[]
+}
+
 export interface TunnelRecord {
   id: string
   name: string
@@ -28,6 +60,7 @@ export interface TunnelRecord {
   domain: string
   created_at: string
   services: ServiceRule[]
+  file_share?: FileShareConfig | null
 }
 
 export interface TunnelDetailView {
@@ -35,6 +68,7 @@ export interface TunnelDetailView {
   status: TunnelState
   conns: number
   services: ServiceView[]
+  file_share?: FileShareView | null
   error_message?: string | null
   config_path: string
   credentials_path: string
@@ -68,6 +102,24 @@ export const cfScanCredentials = () =>
 export const cfSaveServices = (services: ServiceRule[]) =>
   pluginCall<void>('save_services', { services })
 
+export const cfSaveFileShare = (
+  config: {
+    directory: string
+    hostname: string
+    port: number
+    lan_enabled: boolean
+    allowed_ips: string
+    upload_enabled: boolean
+    upload_directory: string
+    max_upload_mb: number
+    max_total_upload_mb: number
+  },
+  rotate_token = false
+) => pluginCall<void>('save_file_share', { ...config, rotate_token })
+
+export const cfStartFileShare = () => pluginCall<void>('start_file_share')
+export const cfStopFileShare = () => pluginCall<void>('stop_file_share')
+
 export const cfToggleService = (service_id: string, enabled: boolean) =>
   pluginCall<void>('toggle_service', { service_id, enabled })
 
@@ -81,3 +133,4 @@ export const cfGetLogs = (limit?: number) =>
 export const cfClearLogs = () => pluginCall<void>('clear_logs')
 export const cfResetTunnel = () => pluginCall<void>('reset_tunnel')
 export const cfOpenUrl = (url: string) => pluginCall<void>('open_url', { url })
+export const cfCopyText = (text: string) => pluginCall<void>('copy_text', { text })

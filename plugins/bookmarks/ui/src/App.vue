@@ -542,11 +542,11 @@ function avatarChar(name: string): string {
   padding: 8px 18px;
   border: none;
   border-radius: 999px;
-  background: var(--accent);
-  color: #fff;
+  background: var(--primary);
+  color: var(--primary-foreground);
   font-size: 12.5px;
   font-weight: 600;
-  box-shadow: 0 4px 14px color-mix(in srgb, var(--accent) 35%, transparent);
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--primary) 35%, transparent);
 }
 .add-btn:hover {
   filter: brightness(1.12);
@@ -568,7 +568,7 @@ function avatarChar(name: string): string {
   transition: border-color 0.15s ease;
 }
 .search:focus-within {
-  border-color: var(--accent);
+  border-color: var(--primary);
 }
 .search input {
   flex: 1;
@@ -605,9 +605,9 @@ function avatarChar(name: string): string {
   color: var(--text);
 }
 .chip.active {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #fff;
+  background: var(--primary);
+  border-color: var(--primary);
+  color: var(--primary-foreground);
   font-weight: 600;
 }
 
@@ -641,8 +641,8 @@ function avatarChar(name: string): string {
   color: var(--text);
 }
 .style-switch button.active {
-  background: var(--accent);
-  color: #fff;
+  background: var(--primary);
+  color: var(--primary-foreground);
   font-weight: 600;
 }
 
@@ -686,8 +686,8 @@ function avatarChar(name: string): string {
 }
 .row:hover,
 .row.confirming {
-  background: color-mix(in srgb, var(--accent) 9%, var(--surface-subtle));
-  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  background: color-mix(in srgb, var(--primary) 9%, var(--surface-subtle));
+  border-color: color-mix(in srgb, var(--primary) 45%, transparent);
 }
 
 /* 单条视图：一行一条，点 + 名称 + 网址同行，无卡片底、更紧凑 */
@@ -699,7 +699,7 @@ function avatarChar(name: string): string {
 }
 .row.compact:hover,
 .row.compact.confirming {
-  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  background: color-mix(in srgb, var(--primary) 8%, transparent);
   border-color: transparent;
 }
 .mini-dot {
@@ -751,7 +751,7 @@ function avatarChar(name: string): string {
   border-top: 1px solid color-mix(in srgb, var(--border) 30%, transparent);
 }
 .tr:hover {
-  background: color-mix(in srgb, var(--accent) 7%, transparent);
+  background: color-mix(in srgb, var(--primary) 7%, transparent);
 }
 .td-name {
   display: flex;
@@ -782,8 +782,8 @@ function avatarChar(name: string): string {
 .mini-tag {
   padding: 1px 8px;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--accent) 14%, transparent);
-  color: var(--accent);
+  background: color-mix(in srgb, var(--primary) 14%, transparent);
+  color: var(--primary);
   font-size: 10.5px;
   white-space: nowrap;
 }
@@ -839,8 +839,8 @@ function avatarChar(name: string): string {
   width: 14px;
   height: 14px;
   border-radius: 50%;
-  background: var(--accent);
-  color: #fff;
+  background: var(--primary);
+  color: var(--primary-foreground);
 }
 .preview-badge {
   flex: none;
@@ -850,9 +850,9 @@ function avatarChar(name: string): string {
   width: 14px;
   height: 14px;
   border-radius: 50%;
-  background: color-mix(in srgb, var(--accent) 25%, transparent);
-  color: var(--accent);
-  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  background: color-mix(in srgb, var(--primary) 25%, transparent);
+  color: var(--primary);
+  border: 1px solid color-mix(in srgb, var(--primary) 45%, transparent);
 }
 .url {
   font-size: 12px;
@@ -890,11 +890,11 @@ function avatarChar(name: string): string {
   color: var(--text-muted);
 }
 .icon-btn:hover {
-  background: color-mix(in srgb, var(--accent) 16%, transparent);
-  color: var(--accent);
+  background: color-mix(in srgb, var(--primary) 16%, transparent);
+  color: var(--primary);
 }
 .icon-btn.active {
-  color: var(--accent);
+  color: var(--primary);
 }
 .icon-btn.danger:hover {
   background: color-mix(in srgb, var(--danger) 16%, transparent);
@@ -994,7 +994,7 @@ function avatarChar(name: string): string {
   transition: border-color 0.15s ease;
 }
 .field input:focus {
-  border-color: var(--accent);
+  border-color: var(--primary);
 }
 .field input.invalid {
   border-color: var(--danger);
@@ -1034,12 +1034,12 @@ function avatarChar(name: string): string {
   transition: left 0.15s ease, background 0.15s ease;
 }
 .switch.on {
-  background: var(--accent);
-  border-color: var(--accent);
+  background: var(--primary);
+  border-color: var(--primary);
 }
 .switch.on .thumb {
   left: 18px;
-  background: #fff;
+  background: var(--primary-foreground);
 }
 
 .dialog-foot {
@@ -1064,9 +1064,9 @@ function avatarChar(name: string): string {
   border-color: var(--border-strong);
 }
 .btn.primary {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #fff;
+  background: var(--primary);
+  border-color: var(--primary);
+  color: var(--primary-foreground);
   font-weight: 600;
 }
 .btn.primary:hover {

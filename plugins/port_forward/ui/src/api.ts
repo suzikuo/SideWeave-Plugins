@@ -31,6 +31,27 @@ export interface ListenerInfo {
   blocked_reason: string | null
 }
 
+export interface ConnectionLogView {
+  id: number
+  started_at_ms: number
+  elapsed_ms: number
+  finished: boolean
+  rule_name: string
+  source_addr: string
+  listen_addr: string
+  target_endpoint: string
+  actual_target_addr: string | null
+  protocol: 'HTTP' | 'TLS' | 'TCP' | string
+  method: string | null
+  host: string | null
+  path: string | null
+  request_url: string | null
+  bytes_from_client: number
+  bytes_from_target: number
+  status: string
+  error: string | null
+}
+
 export const gwList = () => pluginCall<GwRuleView[]>('list')
 
 export const gwSave = (rule: GwRuleInput) =>
@@ -48,3 +69,7 @@ export const gwStopListener = (listener: Pick<ListenerInfo, 'port' | 'pid' | 'pa
   pluginCall<void>('stop_listener', {
     listener: { port: listener.port, pid: listener.pid, path: listener.path ?? '' }
   })
+
+export const gwConnectionLogs = () => pluginCall<ConnectionLogView[]>('connection_logs')
+
+export const gwClearConnectionLogs = () => pluginCall<void>('clear_connection_logs')

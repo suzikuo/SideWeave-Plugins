@@ -438,9 +438,9 @@ async function togglePreview(app: AppEntry) {
   border-color: var(--border-strong);
 }
 .btn.primary {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #fff;
+  background: var(--primary);
+  border-color: var(--primary);
+  color: var(--primary-foreground);
 }
 .btn.primary:hover {
   filter: brightness(1.1);
@@ -489,7 +489,7 @@ async function togglePreview(app: AppEntry) {
   border-bottom: none;
 }
 .tr:not(.head):hover {
-  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  background: color-mix(in srgb, var(--primary) 8%, transparent);
 }
 
 .tr.head {
@@ -576,10 +576,11 @@ async function togglePreview(app: AppEntry) {
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
 }
 .switch input:checked + .slider {
-  background-color: var(--accent);
+  background-color: var(--primary);
 }
 .switch input:checked + .slider:before {
   transform: translateX(14px);
+  background-color: var(--primary-foreground);
 }
 
 .c-actions {
@@ -602,7 +603,7 @@ async function togglePreview(app: AppEntry) {
 }
 .icon-btn:hover {
   background: var(--surface-container);
-  color: var(--accent);
+  color: var(--primary);
 }
 .icon-btn.danger:hover {
   color: var(--danger);
@@ -661,7 +662,7 @@ async function togglePreview(app: AppEntry) {
 .field input:focus,
 .field select:focus,
 .field textarea:focus {
-  border-color: var(--accent);
+  border-color: var(--primary);
 }
 .field input.invalid {
   border-color: var(--danger);
@@ -694,7 +695,7 @@ async function togglePreview(app: AppEntry) {
   color: var(--text);
 }
 .check input {
-  accent-color: var(--accent);
+  accent-color: var(--primary);
 }
 
 .dialog-foot {

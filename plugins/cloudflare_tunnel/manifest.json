@@ -4,7 +4,7 @@
   "id": "cloudflare_tunnel",
   "name": "Cloudflare Tunnel",
   "icon": "ui/icon.svg",
-  "version": "1.0.8",
+  "version": "1.0.18",
   "description": "SideWeave 本地 Cloudflare Tunnel 快速管理器",
   "author": "SideWeave",
   "type": "native",
@@ -18,10 +18,13 @@
     "storage",
     "filesystem.read",
     "filesystem.write",
+    "filesystem.external_read",
     "system.file_picker",
     "process.spawn",
     "system.open_external",
-    "network.connect"
+    "network.connect",
+    "network.listen",
+    "clipboard"
   ],
   "ui": {
     "entry": "ui/index.html",

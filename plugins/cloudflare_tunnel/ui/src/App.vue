@@ -6,14 +6,18 @@ import Icon from '../../../ui-sdk/Icon.vue'
 import Toast from '../../../ui-sdk/Toast.vue'
 import {
   cfClearLogs,
+  cfCopyText,
   cfGetLogs,
   cfGetTunnel,
   cfOpenUrl,
   cfResetTunnel,
   cfRestartTunnel,
+  cfSaveFileShare,
   cfSaveServices,
   cfScanCredentials,
   cfSetupTunnel,
+  cfStartFileShare,
+  cfStopFileShare,
   cfStartTunnel,
   cfStopTunnel,
   cfToggleService,
@@ -26,6 +30,20 @@ import {
 const detail = ref<TunnelDetailView | null>(null)
 const configured = ref(false)
 const actionLoading = ref(false)
+const fileShareSaving = ref(false)
+const fileShareToggleLoading = ref(false)
+const fileShareDirty = ref(false)
+const fileShareForm = ref({
+  directory: '',
+  hostname: '',
+  port: 12026,
+  lan_enabled: false,
+  allowed_ips: '',
+  upload_enabled: false,
+  upload_directory: '',
+  max_upload_mb: 100,
+  max_total_upload_mb: 2048
+})
 
 const toast = ref('')
 const toastKind = ref<'info' | 'error' | 'success'>('info')
@@ -50,9 +68,24 @@ async function loadData(silent = false) {
     if (res) {
       detail.value = res
       configured.value = true
+      if (!fileShareDirty.value) {
+        const share = res.tunnel.file_share
+        fileShareForm.value = {
+          directory: share?.directory ?? '',
+          hostname: share?.hostname ?? '',
+          port: share?.port || 12026,
+          lan_enabled: share?.lan_enabled ?? false,
+          allowed_ips: share?.allowed_ips?.join('\n') ?? '',
+          upload_enabled: share?.upload_enabled ?? false,
+          upload_directory: share?.upload_directory ?? '',
+          max_upload_mb: share?.max_upload_mb ?? 100,
+          max_total_upload_mb: share?.max_total_upload_mb ?? 2048
+        }
+      }
     } else {
       detail.value = null
       configured.value = false
+      fileShareDirty.value = false
     }
   } catch (e: any) {
     if (!silent) showToast(String(e?.message || e), 'error')
@@ -219,6 +252,69 @@ async function deleteService(id: string) {
   }
 }
 
+async function saveFileShare(rotateToken = false): Promise<boolean> {
+  if (fileShareSaving.value) return false
+  fileShareSaving.value = true
+  try {
+    await cfSaveFileShare(fileShareForm.value, rotateToken)
+    fileShareDirty.value = false
+    const message = rotateToken
+      ? '分享链接已重置，旧链接已失效'
+      : '文件共享设置已保存'
+    showToast(message, 'success')
+    await loadData(true)
+    return true
+  } catch (e: any) {
+    showToast(String(e?.message || e), 'error')
+    return false
+  } finally {
+    fileShareSaving.value = false
+  }
+}
+
+async function toggleFileShare() {
+  if (fileShareToggleLoading.value || fileShareSaving.value) return
+  fileShareToggleLoading.value = true
+  try {
+    const running = detail.value?.file_share?.local_running ?? false
+    if (running) {
+      await cfStopFileShare()
+      showToast('文件服务和关联转发已关闭', 'success')
+    } else {
+      if (fileShareDirty.value && !(await saveFileShare())) return
+      await cfStartFileShare()
+      showToast(
+        fileShareForm.value.hostname.trim()
+          ? '文件服务已启动，Cloudflare 转发规则已启用'
+          : '文件服务已启动',
+        'success'
+      )
+    }
+    await loadData(true)
+  } catch (e: any) {
+    showToast(String(e?.message || e), 'error')
+    await loadData(true)
+  } finally {
+    fileShareToggleLoading.value = false
+  }
+}
+
+const confirmRotateShare = ref(false)
+let rotateShareTimer = 0
+
+function rotateShareLink() {
+  if (!confirmRotateShare.value) {
+    confirmRotateShare.value = true
+    window.clearTimeout(rotateShareTimer)
+    rotateShareTimer = window.setTimeout(() => {
+      confirmRotateShare.value = false
+    }, 3000)
+    return
+  }
+  confirmRotateShare.value = false
+  void saveFileShare(true)
+}
+
 // ---------- 快捷操作 ----------
 async function openUrl(url: string) {
   try {
@@ -230,11 +326,21 @@ async function openUrl(url: string) {
 
 async function copyText(text: string, label = '内容') {
   try {
-    await navigator.clipboard.writeText(text)
+    await cfCopyText(text)
     showToast(`已复制${label}`, 'success')
-  } catch {
-    showToast('复制失败', 'error')
+  } catch (e: any) {
+    showToast(`复制失败：${String(e?.message || e)}`, 'error')
   }
+}
+
+function copyShareLink() {
+  const url = detail.value?.file_share?.local_url
+  if (url) void copyText(url, '分享链接')
+}
+
+function openShareLink() {
+  const url = detail.value?.file_share?.local_url
+  if (url) void openUrl(url)
 }
 
 // ---------- 配置向导 ----------
@@ -387,6 +493,7 @@ onMounted(() => {
 onUnmounted(() => {
   window.clearInterval(refreshTimer)
   window.clearInterval(logTimer)
+  window.clearTimeout(rotateShareTimer)
   unlistenLifecycle?.()
 })
 </script>
@@ -519,7 +626,203 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <!-- 服务列表容器 -->
+        <section class="share-panel share-dashboard">
+          <div class="share-hero">
+            <div class="share-hero-copy">
+              <span class="share-eyebrow">LOCAL FILE SHARING</span>
+              <div class="share-header">
+                <div>
+                  <div class="sb-title">本机文件共享</div>
+                  <div class="share-description">浏览和下载本机文件，也可按需开放上传或远程访问。</div>
+                </div>
+                <span class="chip" :class="detail.file_share?.local_running ? 'live' : 'paused'">
+                  <span class="dot-status" :class="detail.file_share?.local_running ? 'online' : 'paused'" />
+                  {{ detail.file_share?.local_running ? '运行中' : '已停止' }}
+                </span>
+              </div>
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              :disabled="fileShareToggleLoading || fileShareSaving"
+              @click="toggleFileShare"
+            >
+              {{ fileShareToggleLoading ? '正在处理…' : (detail.file_share?.local_running ? '停止服务' : '启动服务') }}
+            </Button>
+          </div>
+
+          <div v-if="detail.file_share" class="share-overview">
+            <div class="share-stat">
+              <span>本机端口</span>
+              <strong>{{ detail.file_share.port }}</strong>
+              <small>{{ detail.file_share.local_running ? (detail.file_share.lan_enabled ? '监听 0.0.0.0' : '仅监听本机') : '服务停止时不监听' }}</small>
+            </div>
+            <div class="share-stat">
+              <span>局域网访问</span>
+              <strong>{{ fileShareForm.lan_enabled ? '已允许' : '仅本机' }}</strong>
+              <small>{{ fileShareForm.lan_enabled ? (detail.file_share.lan_host || '可手动使用本机 IPv4') : '开启后使用局域网 IP 分享' }}</small>
+            </div>
+            <div class="share-stat">
+              <span>共享内容</span>
+              <strong>{{ fileShareForm.upload_enabled ? '浏览 + 上传' : '浏览 + 下载' }}</strong>
+              <small>{{ fileShareForm.upload_enabled ? '同一链接提供两种操作' : '上传功能已关闭' }}</small>
+            </div>
+          </div>
+
+          <div class="share-section">
+            <div class="share-section-heading">
+              <span class="section-index">01</span>
+              <div><strong>服务设置</strong><small>选择目录、端口和外部访问域名</small></div>
+            </div>
+            <div class="share-form">
+              <label class="field field-wide">
+                <span class="label">共享文件夹路径</span>
+                <input
+                  v-model="fileShareForm.directory"
+                  type="text"
+                  class="mono"
+                  placeholder="C:\Users\you\Public"
+                  @input="fileShareDirty = true"
+                />
+              </label>
+              <label class="field">
+                <span class="label">本机与局域网共用端口</span>
+                <input
+                  v-model.number="fileShareForm.port"
+                  type="number"
+                  min="1024"
+                  max="65535"
+                  @input="fileShareDirty = true"
+                />
+                <span class="field-hint">端口占用时，可改为 1024–65535 之间的其他端口。</span>
+              </label>
+              <label class="field">
+                <span class="label">Cloudflare 转发域名 <span class="optional-tag">可选</span></span>
+                <input
+                  v-model="fileShareForm.hostname"
+                  type="text"
+                  class="mono"
+                  placeholder="file.example.com"
+                  @input="fileShareDirty = true"
+                />
+                <span class="field-hint">仅填写当前 Tunnel 根域名下的完整域名。</span>
+              </label>
+            </div>
+            <div class="route-preview">
+              <span class="route-led" />
+              <template v-if="fileShareForm.hostname.trim()">
+                启动时关联 <code>{{ fileShareForm.hostname }}</code> → <code>127.0.0.1:{{ fileShareForm.port }}</code>；关闭文件服务时同步停用转发。
+              </template>
+              <template v-else>未配置 Tunnel 域名；文件服务仍可通过本机或局域网访问。</template>
+            </div>
+          </div>
+
+          <div class="share-section share-access-section">
+            <div class="share-section-heading">
+              <span class="section-index">02</span>
+              <div><strong>访问控制</strong><small>局域网监听与来源地址限制</small></div>
+            </div>
+            <label class="option-card">
+              <input v-model="fileShareForm.lan_enabled" type="checkbox" @change="fileShareDirty = true" />
+              <span class="option-check" />
+              <span class="option-copy"><strong>允许局域网访问</strong><small>监听 0.0.0.0，并使用本机局域网 IPv4 地址分享</small></span>
+              <code v-if="fileShareForm.lan_enabled" class="option-port">:{{ fileShareForm.port }}</code>
+            </label>
+            <div v-if="fileShareForm.lan_enabled" class="lan-address-note">
+              <span class="lan-address-icon">↗</span>
+              <span v-if="detail.file_share?.lan_host">当前局域网地址：<code>http://{{ detail.file_share.lan_host }}:{{ detail.file_share.port }}</code></span>
+              <span v-else>尚未自动检测到局域网 IP；服务仍会监听所有网卡，可手动使用本机 IPv4 和端口 {{ detail.file_share?.port }}。</span>
+            </div>
+            <label class="field allowlist-field">
+              <span class="label">IP 白名单 <span class="optional-tag">每行一个 IP 或 CIDR，留空不限</span></span>
+              <textarea
+                v-model="fileShareForm.allowed_ips"
+                rows="3"
+                class="mono allowlist-input"
+                placeholder="192.168.1.20&#10;192.168.1.0/24&#10;2001:db8::/48"
+                @input="fileShareDirty = true"
+              />
+              <span class="field-hint">Tunnel 请求按访客 IP 校验；局域网请求按连接来源 IP 校验。</span>
+            </label>
+          </div>
+
+          <div class="share-section">
+            <div class="share-section-heading">
+              <span class="section-index">03</span>
+              <div><strong>上传选项</strong><small>上传仅写入单独的收件目录</small></div>
+            </div>
+            <label class="option-card">
+              <input v-model="fileShareForm.upload_enabled" type="checkbox" @change="fileShareDirty = true" />
+              <span class="option-check" />
+              <span class="option-copy"><strong>允许通过共享页上传文件</strong><small>浏览列表和上传操作使用同一个分享链接</small></span>
+              <span class="option-state">{{ fileShareForm.upload_enabled ? '开启' : '关闭' }}</span>
+            </label>
+            <div v-if="fileShareForm.upload_enabled" class="share-form upload-form upload-settings">
+              <label class="field field-wide">
+                <span class="label">收件目录</span>
+                <input
+                  v-model="fileShareForm.upload_directory"
+                  type="text"
+                  class="mono"
+                  placeholder="留空则自动创建共享目录旁的同级上传目录"
+                  @input="fileShareDirty = true"
+                />
+                <span class="field-hint">必须与共享目录分开；上传文件不会出现在只读文件列表。</span>
+              </label>
+              <label class="field">
+                <span class="label">单文件上限（MB）</span>
+                <input v-model.number="fileShareForm.max_upload_mb" type="number" min="1" max="1024" @input="fileShareDirty = true" />
+              </label>
+              <label class="field">
+                <span class="label">收件目录总量（MB）</span>
+                <input v-model.number="fileShareForm.max_total_upload_mb" type="number" min="1" max="8192" @input="fileShareDirty = true" />
+              </label>
+            </div>
+            <p v-if="fileShareForm.upload_enabled" class="inline-note">通过 Tunnel 上传还受 Cloudflare 区域的单次请求大小限制。</p>
+          </div>
+
+          <div class="share-section links-section">
+            <div class="share-section-heading">
+              <span class="section-index">04</span>
+              <div><strong>分享链接</strong><small>{{ fileShareForm.upload_enabled ? '同一个链接可浏览、下载和上传' : '此链接可浏览和下载共享文件' }}</small></div>
+            </div>
+            <div v-if="detail.file_share?.local_url || detail.file_share?.lan_share_url || detail.file_share?.cloudflare_share_url" class="share-links-grid">
+              <article v-if="detail.file_share?.local_url" class="share-link-card">
+                <div class="link-card-heading"><span class="link-icon local-icon">⌂</span><div><strong>本机</strong><small>仅此电脑可访问</small></div></div>
+                <code class="mono">{{ detail.file_share.local_url }}</code>
+                <div class="share-link-actions">
+                  <Button v-if="detail.file_share.local_running" variant="outline" size="sm" @click="openShareLink">打开</Button>
+                  <Button variant="outline" size="sm" @click="copyShareLink">复制链接</Button>
+                </div>
+              </article>
+              <article v-if="detail.file_share?.lan_share_url" class="share-link-card">
+                <div class="link-card-heading"><span class="link-icon lan-icon">⌁</span><div><strong>局域网</strong><small>{{ detail.file_share.lan_host }}</small></div></div>
+                <code class="mono">{{ detail.file_share.lan_share_url }}</code>
+                <div class="share-link-actions"><Button variant="outline" size="sm" @click="copyText(detail.file_share.lan_share_url, '局域网链接')">复制链接</Button></div>
+              </article>
+              <article v-if="detail.file_share?.cloudflare_share_url" class="share-link-card">
+                <div class="link-card-heading"><span class="link-icon tunnel-icon">↗</span><div><strong>Cloudflare Tunnel</strong><small>公网域名</small></div></div>
+                <code class="mono">{{ detail.file_share.cloudflare_share_url }}</code>
+                <div class="share-link-actions"><Button variant="outline" size="sm" @click="copyText(detail.file_share.cloudflare_share_url, 'Cloudflare 链接')">复制链接</Button></div>
+              </article>
+            </div>
+            <div v-else class="links-empty"><span>↗</span><div><strong>启动文件服务后生成分享链接</strong><small>配置了局域网或 Tunnel 域名时，会在这里显示对应链接。</small></div></div>
+            <div class="link-security-row">
+              <span>分享链接包含访问令牌，请仅发给可信任的人。</span>
+              <Button variant="outline" size="sm" @click="rotateShareLink">
+                {{ confirmRotateShare ? '再次点击确认重置' : '重置所有分享链接' }}
+              </Button>
+            </div>
+          </div>
+
+          <div class="share-footer">
+            <p class="share-warning">文件服务可独立启停；停止时会同步停用关联转发。Tunnel 启停不会影响本机和局域网文件服务。</p>
+            <Button variant="default" size="sm" :disabled="fileShareSaving || fileShareToggleLoading" @click="saveFileShare()">
+              {{ fileShareSaving ? '正在保存…' : (fileShareDirty ? '保存设置' : '设置已保存') }}
+            </Button>
+          </div>
+        </section>
+
         <div class="services-box">
           <div class="services-bar">
             <div class="sb-title">
@@ -864,7 +1167,7 @@ onUnmounted(() => {
 }
 
 .dns-hint code {
-  color: var(--accent);
+  color: var(--primary);
 }
 
 .meta-right {
@@ -897,6 +1200,134 @@ onUnmounted(() => {
 }
 
 /* 服务列表 */
+.share-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface) calc(var(--component-opacity, 1) * 100%), transparent);
+}
+
+.share-header,
+.share-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.share-description {
+  margin-top: 3px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.local-port {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 20px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.local-port code {
+  color: var(--text-primary, var(--text));
+  font-family: var(--font-mono, monospace);
+}
+
+.local-port-note {
+  opacity: 0.75;
+}
+
+.share-header .chip.live {
+  color: var(--success, #10b981);
+  border: 1px solid color-mix(in srgb, var(--success, #10b981) 40%, transparent);
+  background: color-mix(in srgb, var(--success, #10b981) 10%, transparent);
+}
+
+.share-enable {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  width: fit-content;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.share-enable input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--primary);
+}
+
+.share-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 10px;
+}
+
+.upload-form {
+  align-items: start;
+}
+
+.allowlist-input {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--surface-container) calc(var(--component-opacity, 1) * 100%), transparent);
+  color: var(--text);
+  font-size: 11.5px;
+}
+
+.allowlist-input:focus {
+  outline: none;
+  border-color: var(--primary);
+}
+
+.field-hint {
+  color: var(--text-muted);
+  font-size: 10.5px;
+  line-height: 1.4;
+}
+
+.share-link {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.share-link code {
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--primary);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+.share-link-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.share-warning {
+  margin: 0;
+  color: var(--warning, #f59e0b);
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+
 .services-box {
   display: flex;
   flex-direction: column;
@@ -935,7 +1366,7 @@ onUnmounted(() => {
 }
 
 .card:hover {
-  border-color: var(--border-strong, var(--accent));
+  border-color: var(--border-strong, var(--primary));
 }
 
 .card.off {
@@ -988,7 +1419,7 @@ onUnmounted(() => {
 .subdomain-tag {
   font-size: 11px;
   background: color-mix(in srgb, var(--surface-subtle) calc(var(--component-opacity, 1) * 100%), transparent);
-  color: var(--accent);
+  color: var(--primary);
   padding: 1px 5px;
   border-radius: 3px;
 }
@@ -1013,7 +1444,7 @@ onUnmounted(() => {
 }
 
 .url:hover {
-  color: var(--accent);
+  color: var(--primary);
   text-decoration: underline;
 }
 
@@ -1146,9 +1577,9 @@ onUnmounted(() => {
 }
 
 .btn.primary {
-  background: color-mix(in srgb, var(--accent) calc(var(--component-opacity, 1) * 100%), transparent);
-  border-color: var(--accent);
-  color: #fff;
+  background: color-mix(in srgb, var(--primary) calc(var(--component-opacity, 1) * 100%), transparent);
+  border-color: var(--primary);
+  color: var(--primary-foreground);
 }
 
 .btn.primary:hover:not(:disabled) {
@@ -1195,7 +1626,7 @@ onUnmounted(() => {
 }
 
 .setup-icon {
-  color: var(--accent);
+  color: var(--primary);
   margin-bottom: 6px;
 }
 
@@ -1244,7 +1675,7 @@ input {
 }
 
 input:focus {
-  border-color: var(--accent);
+  border-color: var(--primary);
 }
 
 .grid2 {
@@ -1275,12 +1706,12 @@ input:focus {
 
 .scanned-row .chk {
   opacity: 0;
-  color: var(--accent);
+  color: var(--primary);
 }
 
 .scanned-row.active {
-  border-color: var(--accent);
-  color: var(--accent);
+  border-color: var(--primary);
+  color: var(--primary);
 }
 
 .scanned-row.active .chk {
@@ -1419,5 +1850,117 @@ input:focus {
 
 .mono {
   font-family: monospace;
+}
+
+.share-dashboard {
+  flex-shrink: 0;
+  gap: 0;
+  padding: 0;
+  overflow: hidden;
+  border-radius: 14px;
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--text) 5%, transparent);
+}
+
+.share-hero {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 20px;
+  background:
+    radial-gradient(circle at 85% 10%, color-mix(in srgb, var(--primary) 13%, transparent), transparent 40%),
+    color-mix(in srgb, var(--surface-subtle) 68%, var(--surface));
+  border-bottom: 1px solid var(--border);
+}
+
+.share-hero-copy { min-width: 0; }
+.share-eyebrow { display: block; margin-bottom: 5px; color: var(--primary); font-size: 9px; font-weight: 750; letter-spacing: .16em; }
+.share-header { display: flex; align-items: center; gap: 14px; }
+.share-header .sb-title { font-size: 15px; }
+.share-description { margin-top: 4px; font-size: 11px; }
+.share-header .chip { display: inline-flex; align-items: center; gap: 6px; padding: 5px 9px; border-radius: 999px; font-size: 10px; white-space: nowrap; }
+.share-header .dot-status { width: 6px; height: 6px; }
+
+.share-overview {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 9px;
+  padding: 13px 18px 2px;
+}
+
+.share-stat {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--surface-container) 55%, transparent);
+}
+
+.share-stat > span { color: var(--text-muted); font-size: 10px; }
+.share-stat strong { overflow: hidden; color: var(--text); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.share-stat small { overflow: hidden; color: var(--text-muted); font-size: 9.5px; text-overflow: ellipsis; white-space: nowrap; }
+
+.share-section { display: flex; flex-direction: column; gap: 12px; padding: 16px 18px; border-top: 1px solid var(--border); }
+.share-section-heading { display: flex; align-items: center; gap: 10px; }
+.share-section-heading > div { display: flex; flex-direction: column; gap: 2px; }
+.share-section-heading strong { color: var(--text); font-size: 12px; }
+.share-section-heading small { color: var(--text-muted); font-size: 9.5px; }
+.section-index { display: grid; width: 27px; height: 27px; place-items: center; flex: none; border: 1px solid color-mix(in srgb, var(--primary) 25%, var(--border)); border-radius: 8px; background: color-mix(in srgb, var(--primary) 9%, transparent); color: var(--primary); font-family: var(--font-mono, monospace); font-size: 10px; font-weight: 700; }
+.field-wide { grid-column: 1 / -1; }
+.field .label { display: flex; align-items: center; gap: 7px; }
+.optional-tag { color: var(--text-muted); font-size: 9px; font-weight: 400; }
+.route-preview { display: flex; align-items: flex-start; gap: 8px; padding: 9px 11px; border: 1px solid color-mix(in srgb, var(--primary) 16%, var(--border)); border-radius: 8px; background: color-mix(in srgb, var(--primary) 4%, transparent); color: var(--text-muted); font-size: 10px; line-height: 1.55; overflow-wrap: anywhere; }
+.route-preview code, .lan-address-note code { color: var(--primary); font-family: var(--font-mono, monospace); }
+.route-led { width: 6px; height: 6px; margin-top: 4px; border-radius: 50%; flex: none; background: var(--primary); }
+
+.option-card { display: flex; align-items: center; gap: 10px; min-height: 48px; padding: 9px 12px; border: 1px solid var(--border); border-radius: 9px; background: color-mix(in srgb, var(--surface-container) 50%, transparent); cursor: pointer; transition: border-color .15s, background .15s; }
+.option-card:hover { border-color: color-mix(in srgb, var(--primary) 50%, var(--border)); }
+.option-card input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.option-check { display: grid; width: 17px; height: 17px; place-items: center; flex: none; border: 1px solid var(--border-strong); border-radius: 5px; background: var(--surface); }
+.option-card input:checked + .option-check { border-color: var(--primary); background: var(--primary); }
+.option-card input:checked + .option-check::after { width: 7px; height: 4px; border-bottom: 2px solid white; border-left: 2px solid white; content: ''; transform: rotate(-45deg) translateY(-1px); }
+.option-card input:focus-visible + .option-check { outline: 2px solid var(--primary); outline-offset: 2px; }
+.option-copy { display: flex; min-width: 0; flex-direction: column; gap: 3px; flex: 1; }
+.option-copy strong { color: var(--text); font-size: 11px; }
+.option-copy small { color: var(--text-muted); font-size: 9.5px; }
+.option-port, .option-state { padding: 3px 7px; border-radius: 6px; background: color-mix(in srgb, var(--primary) 9%, transparent); color: var(--primary); font-size: 10px; }
+.lan-address-note { display: flex; align-items: flex-start; gap: 7px; padding: 2px 2px 0; color: var(--text-muted); font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }
+.lan-address-icon { color: var(--primary); }
+.allowlist-field { margin-top: 2px; }
+.upload-settings { margin-top: 1px; }
+.inline-note { margin: -3px 0 0; color: var(--text-muted); font-size: 9.5px; }
+
+.share-links-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; }
+.share-link-card { display: flex; min-width: 0; flex-direction: column; gap: 10px; padding: 11px; border: 1px solid var(--border); border-radius: 9px; background: color-mix(in srgb, var(--surface-container) 48%, transparent); }
+.link-card-heading { display: flex; align-items: center; gap: 8px; }
+.link-card-heading > div { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.link-card-heading strong { color: var(--text); font-size: 10.5px; }
+.link-card-heading small { overflow: hidden; color: var(--text-muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.link-icon { display: grid; width: 26px; height: 26px; place-items: center; flex: none; border-radius: 8px; font-size: 15px; }
+.local-icon { background: color-mix(in srgb, var(--success, #10b981) 13%, transparent); color: var(--success, #10b981); }
+.lan-icon { background: color-mix(in srgb, #0ea5e9 13%, transparent); color: #0ea5e9; }
+.tunnel-icon { background: color-mix(in srgb, var(--primary) 12%, transparent); color: var(--primary); }
+.share-link-card code { min-height: 30px; padding: 7px 8px; border: 1px solid var(--border); border-radius: 6px; background: color-mix(in srgb, var(--surface) 65%, transparent); color: var(--primary); font-size: 9px; line-height: 1.4; overflow-wrap: anywhere; user-select: all; }
+.share-link-card .share-link-actions { margin-top: auto; }
+.links-empty { display: flex; align-items: center; gap: 10px; padding: 14px; border: 1px dashed var(--border-strong); border-radius: 9px; color: var(--text-muted); }
+.links-empty > span { color: var(--primary); font-size: 19px; }
+.links-empty > div { display: flex; flex-direction: column; gap: 4px; }
+.links-empty strong { color: var(--text); font-size: 10.5px; }
+.links-empty small { font-size: 9px; }
+.link-security-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--text-muted); font-size: 9px; }
+.share-footer { align-items: center; padding: 12px 18px; border-top: 1px solid var(--border); background: color-mix(in srgb, var(--surface-subtle) 55%, transparent); }
+.share-footer .share-warning { max-width: 520px; color: var(--text-muted); font-size: 9.5px; }
+
+@media (max-width: 680px) {
+  .share-overview { grid-template-columns: 1fr; }
+  .share-stat { display: grid; grid-template-columns: 1fr auto; align-items: center; }
+  .share-stat small { grid-column: 1 / -1; }
+  .share-links-grid { grid-template-columns: 1fr; }
+  .share-hero { align-items: flex-start; }
+  .share-footer { align-items: flex-start; flex-direction: column; }
+  .link-security-row { align-items: flex-start; flex-direction: column; }
 }
 </style>

@@ -76,7 +76,7 @@ async function pickImage() {
   word-break: break-all;
 }
 .qr-result:hover {
-  border-color: var(--accent);
+  border-color: var(--primary);
 }
 .qr-idx {
   flex: none;

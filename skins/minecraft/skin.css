@@ -6,7 +6,11 @@
 }
 
 :root[data-skin='user-minecraft'][data-theme='dark'] {
-  --accent: #85c65c;
+  --accent: #262626;
+  --accent-foreground: #e0e0e0;
+  --primary: #85c65c;
+  --primary-foreground: #151515;
+  --ring: var(--primary);
   --bg: #151515;
   --surface: #1e1e1e;
   --surface-subtle: #262626;
@@ -20,7 +24,11 @@
 }
 
 :root[data-skin='user-minecraft'][data-theme='light'] {
-  --accent: #548b3b;
+  --accent: #bdbdbd;
+  --accent-foreground: #303030;
+  --primary: #548b3b;
+  --primary-foreground: #303030;
+  --ring: var(--primary);
   --bg: #d8d8d8;
   --surface: #c6c6c6;
   --surface-subtle: #bdbdbd;

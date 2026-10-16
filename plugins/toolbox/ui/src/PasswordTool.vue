@@ -159,7 +159,7 @@ onMounted(generate)
   cursor: pointer;
 }
 .tb-check input {
-  accent-color: var(--accent);
+  accent-color: var(--primary);
 }
 .strength {
   display: flex;
@@ -177,7 +177,7 @@ onMounted(generate)
 .strength-fill {
   height: 100%;
   border-radius: 999px;
-  background: var(--accent);
+  background: var(--primary);
   transition: width 0.2s ease;
 }
 .strength-label {
@@ -199,8 +199,8 @@ onMounted(generate)
   word-break: break-all;
 }
 .pwd-item:hover {
-  border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  border-color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 8%, transparent);
 }
 .pwd-text {
   color: var(--text);

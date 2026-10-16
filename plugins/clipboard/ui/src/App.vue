@@ -294,7 +294,7 @@ onBeforeUnmount(() => {
   outline: none;
 }
 .search-row input:focus {
-  border-color: var(--accent);
+  border-color: var(--primary);
 }
 .count {
   font-size: 12px;
@@ -318,18 +318,18 @@ onBeforeUnmount(() => {
   cursor: pointer;
 }
 .item:hover {
-  border-color: var(--accent);
+  border-color: var(--primary);
 }
 .item.pinned {
-  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  border-color: color-mix(in srgb, var(--primary) 45%, transparent);
 }
 .pin-mark {
-  color: var(--accent);
+  color: var(--primary);
   margin-right: 6px;
   vertical-align: -2px;
 }
 .icon-btn.on {
-  color: var(--accent);
+  color: var(--primary);
 }
 .text {
   font-size: 12.5px;
@@ -403,9 +403,10 @@ onBeforeUnmount(() => {
   transition: transform 0.18s;
 }
 .switch input:checked + .slider {
-  background: var(--accent);
+  background: var(--primary);
 }
 .switch input:checked + .slider::before {
   transform: translateX(14px);
+  background: var(--primary-foreground);
 }
 </style>

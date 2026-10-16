@@ -29,7 +29,8 @@
 :root,
 :root[data-theme='dark'] {
   color-scheme: dark;
-  --accent: #4d80ff;
+  --accent: #27272a;
+  --accent-foreground: #fafafa;
   --bg: #09090b;
   --surface: #101113;
   --surface-subtle: #18191b;
@@ -49,22 +50,22 @@
   --card-foreground: var(--text);
   --popover: var(--surface);
   --popover-foreground: var(--text);
-  --primary: var(--accent);
-  --primary-foreground: #fff;
+  --primary: #fafafa;
+  --primary-foreground: #09090b;
   --secondary: var(--surface-subtle);
   --secondary-foreground: var(--text);
   --muted: var(--surface-subtle);
   --muted-foreground: var(--text-muted);
-  --accent-foreground: #fff;
   --destructive: var(--danger);
   --destructive-foreground: #fff;
   --input: var(--border);
-  --ring: var(--accent);
+  --ring: var(--primary);
 }
 
 :root[data-theme='light'] {
   color-scheme: light;
-  --accent: #3370ff;
+  --accent: #f4f4f5;
+  --accent-foreground: #18181b;
   --bg: #fafafa;
   --surface: #ffffff;
   --surface-subtle: #f4f4f5;
@@ -76,6 +77,16 @@
   --success: #15803d;
   --warning: #a16207;
   --danger: #b91c1c;
+  --primary: #18181b;
+  --primary-foreground: #fafafa;
+  --secondary: var(--surface-subtle);
+  --secondary-foreground: var(--text);
+  --muted: var(--surface-subtle);
+  --muted-foreground: var(--text-muted);
+  --destructive: var(--danger);
+  --destructive-foreground: #fff;
+  --input: var(--border);
+  --ring: var(--primary);
 }
 
 *,
@@ -124,7 +135,7 @@ textarea {
 
 input[type='checkbox'],
 input[type='radio'] {
-  accent-color: var(--accent);
+  accent-color: var(--primary);
 }
 
 :where(button, a, input, select, textarea, [role='button'], [tabindex]):focus-visible {
@@ -132,9 +143,13 @@ input[type='radio'] {
   outline-offset: 2px !important;
 }
 
+button[data-slot='button']:focus-visible {
+  outline: none !important;
+}
+
 ::selection {
-  color: #fff;
-  background: color-mix(in srgb, var(--accent) 78%, transparent);
+  color: var(--primary-foreground);
+  background: color-mix(in srgb, var(--primary) 78%, transparent);
 }
 
 @media (prefers-reduced-motion: reduce) {
