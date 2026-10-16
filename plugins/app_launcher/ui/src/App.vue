@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import Button from '@ui-sdk/Button.vue'
 import { computed, onMounted, ref } from 'vue'
 import Icon from '../../../ui-sdk/Icon.vue'
 import Toast from '../../../ui-sdk/Toast.vue'
@@ -241,8 +242,8 @@ async function togglePreview(app: AppEntry) {
   <div class="launcher">
     <div class="toolbar">
       <div class="actions">
-        <button class="btn primary" @click="openAdd"><Icon name="plus" :size="14" /> Add App</button>
-        <button class="btn" @click="openAddChrome"><Icon name="globe" :size="14" /> Add Chrome</button>
+        <Button variant="default" size="sm" class="btn primary" @click="openAdd"><Icon name="plus" :size="14" /> Add App</Button>
+        <Button variant="outline" size="sm" class="btn" @click="openAddChrome"><Icon name="globe" :size="14" /> Add Chrome</Button>
       </div>
       <div class="search">
         <Icon name="search" :size="14" />
@@ -296,15 +297,15 @@ async function togglePreview(app: AppEntry) {
           </label>
         </span>
         <span class="c-actions">
-          <button class="icon-btn" title="启动" @click.stop="launch(app)">
+          <Button variant="outline" size="sm" class="icon-btn" title="启动" @click.stop="launch(app)">
             <Icon name="play" :size="14" />
-          </button>
-          <button class="icon-btn" title="编辑" @click.stop="openEdit(app)">
+          </Button>
+          <Button variant="outline" size="sm" class="icon-btn" title="编辑" @click.stop="openEdit(app)">
             <Icon name="pencil" :size="14" />
-          </button>
-          <button class="icon-btn danger" title="删除" @click.stop="remove(app)">
+          </Button>
+          <Button variant="destructive" size="sm" class="icon-btn danger" title="删除" @click.stop="remove(app)">
             <Icon name="trash" :size="14" />
-          </button>
+          </Button>
         </span>
       </div>
       <div v-if="filtered.length === 0" class="empty-row">
@@ -323,9 +324,9 @@ async function togglePreview(app: AppEntry) {
               <option value="application">application</option>
               <option value="chrome">chrome</option>
             </select>
-            <button v-if="form.app_type === 'chrome'" class="btn" type="button" @click="applyChromePreset">
+            <Button variant="outline" size="sm" v-if="form.app_type === 'chrome'" class="btn" type="button" @click="applyChromePreset">
               Detect Chrome
-            </button>
+            </Button>
           </div>
 
           <label class="field">
@@ -348,7 +349,7 @@ async function togglePreview(app: AppEntry) {
                 placeholder="C:\\path\\to\\app.exe"
                 :class="{ invalid: !!pathError }"
               />
-              <button class="btn" @click="browse"><Icon name="folder" :size="14" /> …</button>
+              <Button variant="outline" size="sm" class="btn" @click="browse"><Icon name="folder" :size="14" /> …</Button>
             </div>
             <span v-if="pathError" class="field-err">{{ pathError }}</span>
           </label>
@@ -390,8 +391,8 @@ async function togglePreview(app: AppEntry) {
           </label>
 
           <footer class="dialog-foot">
-            <button class="btn" @click="showDialog = false">取消</button>
-            <button class="btn primary" @click="save">保存</button>
+            <Button variant="outline" size="sm" class="btn" @click="showDialog = false">取消</Button>
+            <Button variant="default" size="sm" class="btn primary" @click="save">保存</Button>
           </footer>
         </div>
       </div>

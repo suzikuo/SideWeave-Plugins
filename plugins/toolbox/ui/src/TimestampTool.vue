@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import Button from '@ui-sdk/Button.vue'
 /** 时间戳工具：当前秒/毫秒实时走秒 + 双向转换（时间戳自动识别秒/毫秒） */
 import { computed, inject, onActivated, onDeactivated, onMounted, onUnmounted, ref } from 'vue'
 import { onPluginLifecycle } from '../../../ui-sdk/runtime'
@@ -144,12 +145,12 @@ function reset() {
         <div class="now-cell">
           <span class="now-k">秒</span>
           <code class="tb-mono now-v">{{ nowSecs }}</code>
-          <button class="tb-btn sm" @click="api.copyText(nowSecs, '已复制秒级时间戳')">复制</button>
+          <Button variant="outline" size="sm" class="tb-btn sm" @click="api.copyText(nowSecs, '已复制秒级时间戳')">复制</Button>
         </div>
         <div class="now-cell">
           <span class="now-k">毫秒</span>
           <code class="tb-mono now-v">{{ nowMillis }}</code>
-          <button class="tb-btn sm" @click="api.copyText(nowMillis, '已复制毫秒时间戳')">复制</button>
+          <Button variant="outline" size="sm" class="tb-btn sm" @click="api.copyText(nowMillis, '已复制毫秒时间戳')">复制</Button>
         </div>
       </div>
       <div class="tb-status hint">此刻：{{ nowLocal }}</div>
@@ -163,7 +164,7 @@ function reset() {
           <div class="tb-desc">输入即时换算，自动识别秒 / 毫秒</div>
         </div>
         <span class="tb-flex" />
-        <button class="tb-btn ghost" @click="reset">重置</button>
+        <Button variant="ghost" size="sm" class="tb-btn ghost" @click="reset">重置</Button>
       </div>
 
       <div class="tb-cols">
@@ -182,16 +183,16 @@ function reset() {
           <div class="tb-kv">
             <span class="k">本地</span>
             <code class="tb-mono">{{ tsLocal }}</code>
-            <button class="tb-btn sm" :disabled="!tsParsed.ok" @click="api.copyText(tsLocal)">
+            <Button variant="outline" size="sm" class="tb-btn sm" :disabled="!tsParsed.ok" @click="api.copyText(tsLocal)">
               复制
-            </button>
+            </Button>
           </div>
           <div class="tb-kv">
             <span class="k">ISO</span>
             <code class="tb-mono">{{ tsIso }}</code>
-            <button class="tb-btn sm" :disabled="!tsParsed.ok" @click="api.copyText(tsIso)">
+            <Button variant="outline" size="sm" class="tb-btn sm" :disabled="!tsParsed.ok" @click="api.copyText(tsIso)">
               复制
-            </button>
+            </Button>
           </div>
           <div class="tb-kv">
             <span class="k">星期</span>
@@ -208,16 +209,16 @@ function reset() {
           <div class="tb-kv">
             <span class="k">秒</span>
             <code class="tb-mono">{{ dateSecs }}</code>
-            <button class="tb-btn sm" :disabled="!dateParsed" @click="api.copyText(dateSecs)">
+            <Button variant="outline" size="sm" class="tb-btn sm" :disabled="!dateParsed" @click="api.copyText(dateSecs)">
               复制
-            </button>
+            </Button>
           </div>
           <div class="tb-kv">
             <span class="k">毫秒</span>
             <code class="tb-mono">{{ dateMillis }}</code>
-            <button class="tb-btn sm" :disabled="!dateParsed" @click="api.copyText(dateMillis)">
+            <Button variant="outline" size="sm" class="tb-btn sm" :disabled="!dateParsed" @click="api.copyText(dateMillis)">
               复制
-            </button>
+            </Button>
           </div>
         </div>
       </div>

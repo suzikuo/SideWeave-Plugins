@@ -349,8 +349,8 @@ pub(super) fn apply_toolbar_menu(state: &mut UiState, menu: ToolbarMenu, index: 
         }
         invalidate(state);
         match index {
-            0 => super::ocr_ui::start_text_extraction(state),
-            1 => super::ocr_ui::start_qr_recognition(state),
+            0 => super::ocr_ui::start_qr_recognition(state),
+            1 => super::ocr_ui::start_text_extraction(state),
             _ => {}
         }
         return;

@@ -972,13 +972,13 @@ pub(super) unsafe fn draw_toolbar_menu_gdi(
 
     if layout.header_height > 0 {
         let title = match menu {
-            ToolbarMenu::Recognition => "识别方式",
+            ToolbarMenu::Recognition => "",
             ToolbarMenu::RecordingFps => "录制设置",
             ToolbarMenu::RecordingExport => "选择导出格式",
             _ => "",
         };
         let subtitle = match menu {
-            ToolbarMenu::Recognition => "选择要识别的内容",
+            ToolbarMenu::Recognition => "",
             ToolbarMenu::RecordingFps => "MP4 手动停止 · GIF/WebP 最长 10 秒 · 选择录制帧率",
             ToolbarMenu::RecordingExport => "保存录屏文件",
             _ => "",
@@ -1173,7 +1173,7 @@ pub(super) unsafe fn draw_toolbar_menu_gdi(
                 draw_menu_text(dc, left + 12, top, right - 8, bottom, label);
             }
             ToolbarMenu::Recognition => {
-                let label = if index == 0 { "提取文字" } else { "识别二维码" };
+                let label = if index == 0 { "二维码" } else { "OCR" };
                 draw_menu_text(dc, left + 12, top, right - 8, bottom, label);
             }
             ToolbarMenu::ScrollMode => {

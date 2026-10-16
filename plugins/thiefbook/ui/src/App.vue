@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import Button from '@ui-sdk/Button.vue'
 /** Thiefbook 书架器详情页：书架管理（导入 / 改名 / 打开悬浮窗 / 删除）
  *  + 悬浮窗设置（字号/颜色/透明/宽高/每页字数/固定/全局热键，即改即存热更新） */
 import { computed, onMounted, onUnmounted, ref } from 'vue'
@@ -315,21 +316,21 @@ onUnmounted(() => {
   <div class="thief-view">
     <!-- 工具栏 -->
     <div class="toolbar">
-      <button class="btn primary" :disabled="importing" @click="importBook">
+      <Button variant="default" size="sm" class="btn primary" :disabled="importing" @click="importBook">
         <Icon name="plus" :size="14" /> 导入 txt
-      </button>
+      </Button>
       <span class="spacer" />
-      <button class="btn" title="显示 / 隐藏悬浮阅读窗" @click="toggleReader">
+      <Button variant="outline" size="sm" class="btn" title="显示 / 隐藏悬浮阅读窗" @click="toggleReader">
         <Icon name="book-open" :size="14" /> 悬浮窗
-      </button>
-      <button
+      </Button>
+      <Button variant="outline" size="sm"
         class="btn"
         :class="{ 'btn-on': style.pinned }"
         :title="style.pinned ? '取消固定（恢复鼠标交互与老板键）' : '固定（点击穿透：翻页点击/拖拽/老板键全部失效，仅显示文字）'"
         @click="togglePinned"
       >
         <Icon name="eye-off" :size="14" /> {{ style.pinned ? '取消固定' : '固定' }}
-      </button>
+      </Button>
     </div>
 
     <section class="find-panel">
@@ -348,8 +349,8 @@ onUnmounted(() => {
           @input="resetFind"
           @keydown.enter.prevent="findAndOpen($event.shiftKey ? -1 : 1)"
         />
-        <button class="btn small" :disabled="findBusy || !findQuery.trim() || books.length === 0" @click="findAndOpen(-1)">上一个</button>
-        <button class="btn small primary" :disabled="findBusy || !findQuery.trim() || books.length === 0" @click="findAndOpen(1)">下一个</button>
+        <Button variant="outline" size="sm" class="btn small" :disabled="findBusy || !findQuery.trim() || books.length === 0" @click="findAndOpen(-1)">上一个</Button>
+        <Button variant="default" size="sm" class="btn small primary" :disabled="findBusy || !findQuery.trim() || books.length === 0" @click="findAndOpen(1)">下一个</Button>
       </div>
       <div class="find-status" aria-live="polite">{{ findStatus || '在所选书籍中查找；Enter 下一个，Shift+Enter 上一个' }}</div>
     </section>
@@ -378,23 +379,23 @@ onUnmounted(() => {
             <template v-else>
               <span class="name" :title="b.path">{{ b.name }}</span>
               <span v-if="b.id === currentId" class="badge">当前</span>
-              <button class="icon-btn" title="修改展示名（防路人围观）" @click="startRename(b)">
+              <Button variant="outline" size="sm" class="icon-btn" title="修改展示名（防路人围观）" @click="startRename(b)">
                 <Icon name="pencil" :size="13" />
-              </button>
+              </Button>
             </template>
           </div>
           <span class="pct">{{ formatProgress(b.offset, b.total_chars) }}</span>
         </div>
         <div class="actions">
-          <button class="btn small" title="在悬浮窗中打开本书" @click="openBook(b)">打开</button>
-          <button
+          <Button variant="outline" size="sm" class="btn small" title="在悬浮窗中打开本书" @click="openBook(b)">打开</Button>
+          <Button variant="destructive" size="sm"
             class="icon-btn danger"
             :class="{ armed: confirmingId === b.id }"
             :title="confirmingId === b.id ? '再点一次确认删除' : '删除'"
             @click="askRemove(b)"
           >
             <Icon name="trash" :size="14" />
-          </button>
+          </Button>
         </div>
       </div>
       <div v-if="books.length === 0" class="empty">书架空空，点击"导入 txt"添加第一本书</div>
@@ -519,14 +520,14 @@ onUnmounted(() => {
             :model-value="style.hotkey_toggle"
             @commit="(v) => applyHotkey('hotkey_toggle', v)"
           />
-          <button
+          <Button variant="outline" size="sm"
             v-if="style.hotkey_toggle"
             type="button"
             class="btn small"
             @click="applyHotkey('hotkey_toggle', '')"
           >
             清除
-          </button>
+          </Button>
         </div>
       </div>
       <div class="style-row">
@@ -536,14 +537,14 @@ onUnmounted(() => {
             :model-value="style.hotkey_prev"
             @commit="(v) => applyHotkey('hotkey_prev', v)"
           />
-          <button
+          <Button variant="outline" size="sm"
             v-if="style.hotkey_prev"
             type="button"
             class="btn small"
             @click="applyHotkey('hotkey_prev', '')"
           >
             清除
-          </button>
+          </Button>
         </div>
       </div>
       <div class="style-row">
@@ -553,14 +554,14 @@ onUnmounted(() => {
             :model-value="style.hotkey_next"
             @commit="(v) => applyHotkey('hotkey_next', v)"
           />
-          <button
+          <Button variant="outline" size="sm"
             v-if="style.hotkey_next"
             type="button"
             class="btn small"
             @click="applyHotkey('hotkey_next', '')"
           >
             清除
-          </button>
+          </Button>
         </div>
       </div>
       <p class="hint">打开/关闭 即老板键；热键全局生效（无需悬浮窗聚焦）。</p>

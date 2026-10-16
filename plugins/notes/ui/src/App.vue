@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import Button from '@ui-sdk/Button.vue'
 /** 便签详情页：新建文本/任务便签、显示/隐藏、循环颜色；删除进历史（可恢复/彻底删除） */
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import Icon from '../../../ui-sdk/Icon.vue'
@@ -180,12 +181,12 @@ onBeforeUnmount(() => {
 <template>
   <div class="notes-view">
     <div class="toolbar">
-      <button class="btn primary" @click="createNote('text')">
+      <Button variant="default" size="sm" class="btn primary" @click="createNote('text')">
         <Icon name="plus" :size="14" /> 新建便签
-      </button>
-      <button class="btn" @click="createNote('todo')">
+      </Button>
+      <Button variant="outline" size="sm" class="btn" @click="createNote('todo')">
         <Icon name="check" :size="14" /> 新建任务便签
-      </button>
+      </Button>
       <span class="spacer" />
       <span class="hint">便签在桌面上可直接编辑、拖拽、缩放；有内容的删除进历史，空白便签直接删除</span>
     </div>
@@ -209,17 +210,17 @@ onBeforeUnmount(() => {
             >
               <option v-for="s in NOTE_SKINS" :key="s.id" :value="s.id">{{ s.label }}</option>
             </select>
-            <button class="btn small" @click="toggleVisible(n)">
+            <Button variant="outline" size="sm" class="btn small" @click="toggleVisible(n)">
               {{ n.visible ? '隐藏' : '显示' }}
-            </button>
-            <button
+            </Button>
+            <Button variant="destructive" size="sm"
               class="icon-btn danger"
               :class="{ armed: confirmId === n.id }"
               :title="confirmId === n.id ? '再点一次确认（移入历史）' : '删除'"
               @click="removeNote(n)"
             >
               <Icon name="trash" :size="14" />
-            </button>
+            </Button>
           </div>
         </div>
         <div v-if="active.length === 0" class="empty">
@@ -231,9 +232,9 @@ onBeforeUnmount(() => {
         <div class="sec-head">
           <span class="sec-title">历史便签（{{ history.length }}）</span>
           <span class="spacer" />
-          <button class="btn small danger-btn" :class="{ armed: clearArmed }" @click="clearHistory">
+          <Button variant="outline" size="sm" class="btn small danger-btn" :class="{ armed: clearArmed }" @click="clearHistory">
             {{ clearArmed ? '再点一次确认清空' : '清空历史' }}
-          </button>
+          </Button>
         </div>
         <div class="grid">
           <div v-for="n in history" :key="n.id" class="note-card history">
@@ -245,15 +246,15 @@ onBeforeUnmount(() => {
               <div class="meta">{{ meta(n) }}</div>
             </div>
             <div class="actions">
-              <button class="btn small" @click="restoreNote(n)">恢复</button>
-              <button
+              <Button variant="outline" size="sm" class="btn small" @click="restoreNote(n)">恢复</Button>
+              <Button variant="destructive" size="sm"
                 class="icon-btn danger"
                 :class="{ armed: purgeId === n.id }"
                 :title="purgeId === n.id ? '再点一次彻底删除' : '彻底删除'"
                 @click="purgeNote(n)"
               >
                 <Icon name="trash" :size="14" />
-              </button>
+              </Button>
             </div>
           </div>
         </div>

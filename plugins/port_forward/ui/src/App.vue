@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import Button from '@ui-sdk/Button.vue'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { onPluginLifecycle } from '../../../ui-sdk/runtime'
 import Icon from '../../../ui-sdk/Icon.vue'
@@ -294,7 +295,7 @@ async function save() {
 
     <template v-if="activeView === 'rules'">
       <div class="toolbar">
-        <button class="btn primary" @click="openAdd"><Icon name="plus" :size="14" /> 新建规则</button>
+        <Button variant="default" size="sm" class="btn primary" @click="openAdd"><Icon name="plus" :size="14" /> 新建规则</Button>
         <div class="chip stats" :class="{ live: runningCount > 0 }">
           <span class="dot-mini" /> 运行中 {{ runningCount }}
         </div>
@@ -316,29 +317,29 @@ async function save() {
             </div>
           </div>
           <div class="ops">
-            <button v-if="!r.running" class="btn primary sm" @click="toggleRun(r)">
+            <Button variant="default" size="sm" v-if="!r.running" class="btn primary sm" @click="toggleRun(r)">
               <Icon name="play" :size="12" /> 启动
-            </button>
-            <button v-else class="btn stop sm" @click="toggleRun(r)">
+            </Button>
+            <Button variant="outline" size="sm" v-else class="btn stop sm" @click="toggleRun(r)">
               <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
                 <rect x="5" y="5" width="14" height="14" rx="2" />
               </svg>
               停止
-            </button>
-            <button class="icon-btn" title="编辑" @click="openEdit(r)">
+            </Button>
+            <Button variant="outline" size="sm" class="icon-btn" title="编辑" @click="openEdit(r)">
               <Icon name="pencil" :size="14" />
-            </button>
-            <button
+            </Button>
+            <Button variant="destructive" size="sm"
               v-if="confirmId !== r.id"
               class="icon-btn danger"
               title="删除"
               @click="askDelete(r)"
             >
               <Icon name="trash" :size="14" />
-            </button>
-            <button v-else class="btn confirm-del sm" title="再点一次确认删除" @click="doDelete(r)">
+            </Button>
+            <Button variant="outline" size="sm" v-else class="btn confirm-del sm" title="再点一次确认删除" @click="doDelete(r)">
               再点一次确认删除
-            </button>
+            </Button>
           </div>
         </div>
 
@@ -421,8 +422,8 @@ async function save() {
           </div>
 
             <footer class="dialog-foot">
-              <button class="btn" @click="closeDialog">取消</button>
-              <button class="btn primary" @click="save">保存</button>
+              <Button variant="outline" size="sm" class="btn" @click="closeDialog">取消</Button>
+              <Button variant="default" size="sm" class="btn primary" @click="save">保存</Button>
             </footer>
           </div>
         </div>
@@ -442,9 +443,9 @@ async function save() {
             @keyup.enter="refreshListeners()"
           />
         </label>
-        <button class="btn primary" :disabled="listenerRefreshing" @click="refreshListeners()">
+        <Button variant="default" size="sm" class="btn primary" :disabled="listenerRefreshing" @click="refreshListeners()">
           {{ listenerRefreshing ? '查询中…' : '检查端口' }}
-        </button>
+        </Button>
         <span class="listener-summary">{{ filterDescription }} · {{ listeners.length }} 项</span>
       </div>
 
@@ -465,14 +466,14 @@ async function save() {
             <div v-if="listener.path" class="listener-path" :title="listener.path">{{ listener.path }}</div>
             <div v-else class="listener-path muted">进程路径不可读取</div>
           </div>
-          <button
+          <Button variant="outline" size="sm"
             v-if="listener.can_terminate"
             class="btn terminate sm"
             :disabled="terminatingPid === listener.pid"
             @click="openTerminate(listener)"
           >
             {{ terminatingPid === listener.pid ? '处理中…' : '结束进程' }}
-          </button>
+          </Button>
           <span v-else class="blocked-action" :title="listener.blocked_reason || ''">不可结束</span>
         </article>
 
@@ -499,10 +500,10 @@ async function save() {
           </div>
           <p class="terminate-warning">如果这是由 Windows 服务管理的进程，它可能会自动重新启动。</p>
           <footer class="dialog-foot">
-            <button class="btn" :disabled="terminatingPid !== null" @click="terminateTarget = null">取消</button>
-            <button class="btn terminate-confirm" :disabled="terminatingPid !== null" @click="terminateProcess">
+            <Button variant="outline" size="sm" class="btn" :disabled="terminatingPid !== null" @click="terminateTarget = null">取消</Button>
+            <Button variant="outline" size="sm" class="btn terminate-confirm" :disabled="terminatingPid !== null" @click="terminateProcess">
               {{ terminatingPid !== null ? '处理中…' : '强制结束进程' }}
-            </button>
+            </Button>
           </footer>
         </div>
       </div>

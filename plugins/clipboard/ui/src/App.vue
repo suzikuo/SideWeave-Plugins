@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import Button from '@ui-sdk/Button.vue'
 /** 剪贴板历史详情页：自动记录（后台轮询）、搜索、一键复制、删除/清空、容量与开关设置 */
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import Icon from '../../../ui-sdk/Icon.vue'
@@ -171,14 +172,14 @@ onBeforeUnmount(() => {
         />
         <span>条</span>
       </label>
-      <button
+      <Button variant="destructive" size="sm"
         class="btn danger"
         :class="{ armed: confirmClear }"
         :disabled="items.length === 0"
         @click="clearAll"
       >
         {{ confirmClear ? '确认清空' : '清空历史' }}
-      </button>
+      </Button>
     </div>
 
     <div class="search-row">
@@ -196,21 +197,21 @@ onBeforeUnmount(() => {
           <span>{{ fmtTime(item.ts) }}</span>
           <span>{{ item.text.length }} 字符</span>
           <span v-if="copiedId === item.id" class="copied">已复制 ✓</span>
-          <button
+          <Button variant="outline" size="sm"
             class="icon-btn"
             :class="{ on: item.pinned }"
             :title="item.pinned ? '取消收藏' : '收藏（置顶且不淘汰）'"
             @click.stop="pinToggle(item)"
           >
             <Icon name="bookmark" :size="13" />
-          </button>
-          <button
+          </Button>
+          <Button variant="outline" size="sm"
             class="icon-btn"
             title="删除该条"
             @click.stop="removeItem(item)"
           >
             <Icon name="trash" :size="13" />
-          </button>
+          </Button>
         </div>
       </div>
       <div v-if="filtered.length === 0" class="empty">

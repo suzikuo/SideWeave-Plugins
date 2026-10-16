@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import Button from '@ui-sdk/Button.vue'
 /** 二维码识别：选择图片文件 → 后端 rqrr 解码 → 展示图中全部二维码内容，点击复制 */
 import { inject, ref } from 'vue'
 import { pluginCall } from '../../../ui-sdk/runtime'
@@ -36,9 +37,9 @@ async function pickImage() {
           <div class="tb-desc">选择图片文件，解码图中全部二维码（png / jpg / webp / bmp）</div>
         </div>
         <span class="tb-flex" />
-        <button class="tb-btn" :disabled="loading" @click="pickImage">
+        <Button variant="outline" size="sm" class="tb-btn" :disabled="loading" @click="pickImage">
           {{ loading ? '识别中…' : '选择图片' }}
-        </button>
+        </Button>
       </div>
 
       <p v-if="error" class="qr-error">{{ error }}</p>

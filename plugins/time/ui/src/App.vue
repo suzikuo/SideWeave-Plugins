@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import Button from '@ui-sdk/Button.vue'
 /** Time plugin details: alarm management, floating clock controls, and next-alarm countdown. */
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { listen, onPluginLifecycle, type UnlistenFn } from '../../../ui-sdk/runtime'
@@ -508,16 +509,16 @@ onUnmounted(() => {
     <!-- 工具栏 -->
     <div class="toolbar">
       <span class="spacer" />
-      <button class="btn" title="显示 / 隐藏桌面悬浮时钟" @click="toggleDesktopClock">
+      <Button variant="outline" size="sm" class="btn" title="显示 / 隐藏桌面悬浮时钟" @click="toggleDesktopClock">
         <Icon name="clock" :size="14" /> 悬浮钟
-      </button>
-      <button
+      </Button>
+      <Button variant="outline" size="sm"
         class="btn"
         :title="clockStyle.pinned ? '取消固定并恢复交互' : '固定悬浮钟并启用鼠标穿透'"
         @click="toggleClockPinned"
       >
         {{ clockStyle.pinned ? '取消固定' : '固定' }}
-      </button>
+      </Button>
     </div>
 
     <!-- 悬浮钟样式 -->
@@ -735,7 +736,7 @@ onUnmounted(() => {
 
       <div class="alarm-list-heading">
         <h4 class="alarm-list-title">所有闹钟</h4>
-        <button class="btn primary" @click="openAdd"><Icon name="plus" :size="14" /> 新建闹钟</button>
+        <Button variant="default" size="sm" class="btn primary" @click="openAdd"><Icon name="plus" :size="14" /> 新建闹钟</Button>
       </div>
       <div class="list" role="table">
         <div class="row head" role="row">
@@ -756,12 +757,12 @@ onUnmounted(() => {
             </label>
           </span>
           <span class="c-actions">
-            <button class="icon-btn" title="编辑" @click="openEdit(a)">
+            <Button variant="outline" size="sm" class="icon-btn" title="编辑" @click="openEdit(a)">
               <Icon name="pencil" :size="14" />
-            </button>
-            <button class="icon-btn danger" title="删除" @click="remove(a)">
+            </Button>
+            <Button variant="destructive" size="sm" class="icon-btn danger" title="删除" @click="remove(a)">
               <Icon name="trash" :size="14" />
-            </button>
+            </Button>
           </span>
         </div>
         <div v-if="sortedAlarms.length === 0" class="empty-row">
@@ -842,8 +843,8 @@ onUnmounted(() => {
           </label>
 
           <footer class="dialog-foot">
-            <button class="btn" @click="showDialog = false">取消</button>
-            <button class="btn primary" @click="save">保存</button>
+            <Button variant="outline" size="sm" class="btn" @click="showDialog = false">取消</Button>
+            <Button variant="default" size="sm" class="btn primary" @click="save">保存</Button>
           </footer>
         </div>
       </div>

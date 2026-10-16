@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import Button from '@ui-sdk/Button.vue'
 /** 颜色转换：HEX / RGB / HSL 双向解析 + 预览色块 + 取色器 */
 import { computed, inject, ref } from 'vue'
 import {
@@ -54,7 +55,7 @@ function reset() {
           <div class="tb-desc">HEX / RGB / HSL 双向解析 · 支持透明度</div>
         </div>
         <span class="tb-flex" />
-        <button class="tb-btn ghost" @click="reset">重置</button>
+        <Button variant="ghost" size="sm" class="tb-btn ghost" @click="reset">重置</Button>
       </div>
 
       <div class="color-row">
@@ -76,17 +77,17 @@ function reset() {
       <div class="tb-kv">
         <span class="k">HEX</span>
         <code class="tb-mono">{{ hexOut || '—' }}</code>
-        <button class="tb-btn sm" :disabled="!parsed" @click="api.copyText(hexOut)">复制</button>
+        <Button variant="outline" size="sm" class="tb-btn sm" :disabled="!parsed" @click="api.copyText(hexOut)">复制</Button>
       </div>
       <div class="tb-kv">
         <span class="k">RGB</span>
         <code class="tb-mono">{{ rgbOut || '—' }}</code>
-        <button class="tb-btn sm" :disabled="!parsed" @click="api.copyText(rgbOut)">复制</button>
+        <Button variant="outline" size="sm" class="tb-btn sm" :disabled="!parsed" @click="api.copyText(rgbOut)">复制</Button>
       </div>
       <div class="tb-kv">
         <span class="k">HSL</span>
         <code class="tb-mono">{{ hslOut || '—' }}</code>
-        <button class="tb-btn sm" :disabled="!parsed" @click="api.copyText(hslOut)">复制</button>
+        <Button variant="outline" size="sm" class="tb-btn sm" :disabled="!parsed" @click="api.copyText(hslOut)">复制</Button>
       </div>
     </div>
   </div>

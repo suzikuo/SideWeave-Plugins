@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import Button from '@ui-sdk/Button.vue'
 /** URL 编解码工具：encodeURIComponent / decodeURIComponent 双向 + 交换 */
 import { inject, ref } from 'vue'
 import { FALLBACK_API, TOOLBOX_API_KEY } from './shared'
@@ -61,10 +62,10 @@ function reset() {
           <div class="tb-desc">encodeURIComponent / decodeURIComponent</div>
         </div>
         <span class="tb-flex" />
-        <button class="tb-btn primary" @click="encode">编码</button>
-        <button class="tb-btn primary" @click="decode">解码</button>
-        <button class="tb-btn" @click="swap">交换</button>
-        <button class="tb-btn ghost" @click="reset">重置</button>
+        <Button variant="default" size="sm" class="tb-btn primary" @click="encode">编码</Button>
+        <Button variant="default" size="sm" class="tb-btn primary" @click="decode">解码</Button>
+        <Button variant="outline" size="sm" class="tb-btn" @click="swap">交换</Button>
+        <Button variant="ghost" size="sm" class="tb-btn ghost" @click="reset">重置</Button>
       </div>
 
       <div class="tb-label-row"><span class="tb-label">输入</span></div>
@@ -80,9 +81,9 @@ function reset() {
       <div class="tb-label-row">
         <span class="tb-label">输出</span>
         <span class="tb-flex" />
-        <button class="tb-btn sm" :disabled="!output" @click="api.copyText(output, '已复制输出')">
+        <Button variant="outline" size="sm" class="tb-btn sm" :disabled="!output" @click="api.copyText(output, '已复制输出')">
           复制
-        </button>
+        </Button>
       </div>
       <pre class="tb-out io-out" :class="{ empty: !output }">{{ output || '输出将显示在这里' }}</pre>
     </div>

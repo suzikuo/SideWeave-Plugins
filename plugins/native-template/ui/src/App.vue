@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref } from 'vue'
+import { Button } from './components/ui/button'
 import { pluginCall } from './runtime'
 
 const message = ref('')
@@ -20,9 +21,9 @@ async function hello() {
   <section class="panel">
     <h2>Demo Plugin</h2>
     <p>{{ message || 'Plugin detail page is running.' }}</p>
-    <button type="button" :disabled="loading" @click="hello">
+    <Button variant="outline" size="sm" type="button" :disabled="loading" @click="hello">
       {{ loading ? 'Loading…' : 'Call plugin' }}
-    </button>
+    </Button>
   </section>
 </template>
 

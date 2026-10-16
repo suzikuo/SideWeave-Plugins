@@ -5,16 +5,19 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>自定义预览演示</title>
   <style>
-    :root { color-scheme: dark; font-family: "Segoe UI","Microsoft YaHei",sans-serif; --accent:#50e3c2; --text:#f4f7fb; --muted:#9aa8ba; }
+    :root { color-scheme: dark; font-family: Inter,"Segoe UI Variable","Segoe UI","Microsoft YaHei",system-ui,sans-serif; --accent:#4d80ff; --bg:#09090b; --surface:#101113; --text:#fafafa; --muted:#a1a1aa; --border:#292a2e; }
     * { box-sizing:border-box; }
-    body { margin:0; min-height:100vh; padding:30px; color:var(--text); background:radial-gradient(ellipse at 12% 0%,#223a43,transparent 42%),#10151f; }
+    body { margin:0; min-height:100vh; padding:30px; color:var(--text); background:var(--bg); }
     main { max-width:680px; margin:auto; }
-    .tag { color:var(--accent); font:700 11px Consolas,monospace; letter-spacing:.15em; }
-    h1 { margin:10px 0 8px; font-size:26px; }
+    .tag { color:var(--accent); font-size:11px; font-weight:600; letter-spacing:.08em; }
+    h1 { margin:10px 0 8px; font-size:24px; font-weight:650; letter-spacing:-.025em; }
     p { color:var(--muted); line-height:1.7; }
-    section { margin-top:24px; padding:20px; border:1px solid #ffffff1b; border-radius:18px; background:#171f2dee; }
+    section { margin-top:24px; padding:20px; border:1px solid var(--border); border-radius:10px; background:var(--surface); box-shadow:0 12px 28px #0003; }
     li { margin:12px 0; color:var(--muted); line-height:1.55; }
     code { color:var(--accent); font:12px Consolas,monospace; }
+    ::selection { color:#fff; background:color-mix(in srgb,var(--accent) 78%,transparent); }
+    :focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+    @media (prefers-color-scheme:light) { :root { color-scheme:light; --accent:#3370ff; --bg:#fafafa; --surface:#fff; --text:#09090b; --muted:#71717a; --border:#e4e4e7; } section { box-shadow:0 8px 22px #18181b14; } }
   </style>
 </head>
 <body>

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import Button from '@ui-sdk/Button.vue'
 /** 全局热键录制器：展示态键帽 + 录制态捕获 keydown 生成组合串，由父组件负责持久化 */
 import { computed, onUnmounted, ref } from 'vue'
 
@@ -174,14 +175,14 @@ const caps = computed<string[]>(() => {
         <em>+ …</em>
       </span>
       <span v-else class="rec-hint">请按下新的组合键（Esc 取消）</span>
-      <button class="btn ghost" type="button" @click="cancelRecording">取消</button>
+      <Button variant="ghost" size="sm" class="btn ghost" type="button" @click="cancelRecording">取消</Button>
     </template>
     <template v-else>
       <span v-if="caps.length" class="caps">
         <kbd v-for="seg in caps" :key="seg">{{ capLabel(seg) }}</kbd>
       </span>
       <span v-else class="rec-hint">未设置</span>
-      <button class="btn" type="button" @click="startRecording">修改</button>
+      <Button variant="outline" size="sm" class="btn" type="button" @click="startRecording">修改</Button>
     </template>
   </div>
 </template>

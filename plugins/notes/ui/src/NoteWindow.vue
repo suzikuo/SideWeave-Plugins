@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import Button from '@ui-sdk/Button.vue'
 /** 桌面便签窗：文本便签（正文自动保存）与任务便签（清单勾选、划线保留、回车添加、双击改字）。 */
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import type { Directive } from 'vue'
@@ -207,10 +208,10 @@ const vFocus: Directive<HTMLInputElement> = {
   <div class="note-root" :class="skinClass" :style="rootStyle">
     <div class="note-head" data-tauri-drag-region>
       <button class="dot" :style="{ background: '#3a3325' }" title="换颜色" @click="cycleColor" />
-      <button class="head-btn skin-btn" :title="`皮肤：${skinLabel}（点击切换）`" @click="cycleSkin">✦</button>
+      <Button variant="outline" size="sm" class="head-btn skin-btn" :title="`皮肤：${skinLabel}（点击切换）`" @click="cycleSkin">✦</Button>
       <span v-if="kind === 'todo' && items.length" class="count">{{ doneCount }}/{{ items.length }}</span>
       <span class="grow" data-tauri-drag-region />
-      <button class="head-btn" title="隐藏（可在书架详情页重新打开）" @click="hideNote">✕</button>
+      <Button variant="outline" size="sm" class="head-btn" title="隐藏（可在书架详情页重新打开）" @click="hideNote">✕</Button>
     </div>
 
     <template v-if="kind === 'todo'">

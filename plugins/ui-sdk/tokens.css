@@ -1,36 +1,107 @@
-:root {
+@import 'tailwindcss';
+@source './**/*';
+@source '../*/ui/src/**/*';
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-ring-offset-background: var(--background);
+  --radius-sm: calc(var(--radius) - 2px);
+  --radius-md: var(--radius);
+}
+
+/* Shared neutral tokens for first-party plugin surfaces. */
+:root,
+:root[data-theme='dark'] {
+  color-scheme: dark;
   --accent: #4d80ff;
-  --bg: #141419;
-  --surface: #1c1d22;
-  --surface-subtle: #23242a;
-  --surface-container: #2d2e35;
-  --text: #e8e9ed;
-  --text-muted: #9a9ca6;
-  --border: #3a3b42;
-  --border-strong: #6a6c76;
-  --success: #56dbbc;
-  --danger: #ffb4ab;
-  --warning: #e5bd68;
-  --shadow: 0 14px 36px rgba(0, 0, 0, 0.3);
-  --radius: 8px;
-  --radius-lg: 12px;
+  --bg: #09090b;
+  --surface: #101113;
+  --surface-subtle: #18191b;
+  --surface-container: #232428;
+  --text: #fafafa;
+  --text-muted: #a1a1aa;
+  --border: #292a2e;
+  --border-strong: #45464d;
+  --success: #4ade80;
+  --danger: #f87171;
+  --warning: #facc15;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.34), 0 10px 28px rgba(0, 0, 0, 0.2);
+  --radius: 6px;
+  --radius-lg: 10px;
+  --radius-xl: 14px;
+  --font-ui: Inter, 'Segoe UI Variable', 'Segoe UI', 'Microsoft YaHei UI', system-ui, sans-serif;
+  --font-mono: 'Cascadia Code', Consolas, 'Microsoft YaHei UI', monospace;
+
+  --background: var(--bg);
+  --foreground: var(--text);
+  --card: var(--surface);
+  --card-foreground: var(--text);
+  --popover: var(--surface);
+  --popover-foreground: var(--text);
+  --primary: var(--accent);
+  --primary-foreground: #fff;
+  --secondary: var(--surface-subtle);
+  --secondary-foreground: var(--text);
+  --muted: var(--surface-subtle);
+  --muted-foreground: var(--text-muted);
+  --accent-foreground: #fff;
+  --destructive: var(--danger);
+  --destructive-foreground: #fff;
+  --input: var(--border);
+  --ring: var(--accent);
 }
 
 :root[data-theme='light'] {
-  --accent: #3370ff;
-  --bg: #f2f3f7;
-  --surface: #ffffff;
-  --surface-subtle: #eef0f4;
-  --surface-container: #e8eaef;
-  --text: #1a1c1e;
-  --text-muted: #42474b;
-  --border: #c1c7cb;
-  --border-strong: #72777b;
-  --success: #006b5b;
-  --danger: #ba1a1a;
-  --warning: #805600;
-  --shadow: 0 10px 28px rgba(24, 28, 36, 0.1), 0 2px 8px rgba(24, 28, 36, 0.06);
   color-scheme: light;
+  --accent: #3370ff;
+  --bg: #fafafa;
+  --surface: #ffffff;
+  --surface-subtle: #f4f4f5;
+  --surface-container: #e4e4e7;
+  --text: #09090b;
+  --text-muted: #71717a;
+  --border: #e4e4e7;
+  --border-strong: #d4d4d8;
+  --success: #15803d;
+  --danger: #b91c1c;
+  --warning: #a16207;
+  --shadow: 0 1px 2px rgba(24, 24, 27, 0.05), 0 8px 22px rgba(24, 24, 27, 0.08);
+
+  --background: var(--bg);
+  --foreground: var(--text);
+  --card: var(--surface);
+  --card-foreground: var(--text);
+  --popover: var(--surface);
+  --popover-foreground: var(--text);
+  --primary: var(--accent);
+  --primary-foreground: #fff;
+  --secondary: var(--surface-subtle);
+  --secondary-foreground: var(--text);
+  --muted: var(--surface-subtle);
+  --muted-foreground: var(--text-muted);
+  --accent-foreground: #fff;
+  --destructive: var(--danger);
+  --destructive-foreground: #fff;
+  --input: var(--border);
+  --ring: var(--accent);
 }
 
 :root[data-skin='minecraft'][data-theme='dark'] {
@@ -59,20 +130,124 @@
   --border-strong: #555555;
   --radius: 0px;
   --radius-lg: 0px;
-  color-scheme: light;
 }
 
-* { box-sizing: border-box; }
-html, body, #app { height: 100%; }
-html, body { margin: 0; overflow: auto; overflow-x: hidden; }
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  min-height: 100%;
+}
+
+html,
+body {
+  margin: 0;
+  overflow: auto;
+  overflow-x: hidden;
+}
+
 body {
   background: var(--surface);
   color: var(--text);
-  font-family: var(--font-ui, 'Segoe UI Variable', 'Segoe UI', 'Microsoft YaHei UI', system-ui, sans-serif);
+  font-family: var(--font-ui);
   font-size: 13px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
-button, input, select, textarea { font: inherit; }
-button { cursor: pointer; }
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled,
+input:disabled,
+select:disabled,
+textarea:disabled {
+  cursor: not-allowed;
+}
+
+input,
+select,
+textarea {
+  color: var(--text);
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--text-muted);
+  opacity: 0.72;
+}
+
+input[type='checkbox'],
+input[type='radio'],
+input[type='range'] {
+  accent-color: var(--accent);
+}
+
+:where(button, a, input, select, textarea, [role='button'], [tabindex]):focus-visible {
+  outline: 2px solid var(--ring) !important;
+  outline-offset: 2px !important;
+}
+
+::selection {
+  color: var(--primary-foreground);
+  background: color-mix(in srgb, var(--accent) 78%, transparent);
+}
+
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+
+::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: var(--border-strong);
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+html[data-agile-tiles-embedded='true'] body,
+html[data-sideweave_embedded] body {
+  min-height: 100%;
+  height: auto;
+  padding: 16px 18px;
+  overflow: visible;
+}
+
+html[data-agile-tiles-embedded='true'],
+html[data-sideweave_embedded] {
+  min-height: 100%;
+  height: auto;
+  overflow-y: auto;
+}
+
+html[data-agile-tiles-embedded='true'] #app,
+html[data-sideweave_embedded] #app {
+  min-height: 100%;
+  height: auto;
+}
 
 [data-skin='minecraft'] body,
 [data-skin='minecraft'] button,
@@ -90,34 +265,13 @@ button { cursor: pointer; }
   box-shadow: 3px 3px 0 rgba(0, 0, 0, 0.35);
 }
 
-html[data-sideweave_embedded] body {
-  padding: 16px 18px;
-  min-height: 100%;
-  height: auto;
-  overflow: visible;
-}
-
-html[data-sideweave_embedded] {
-  height: auto;
-  min-height: 100%;
-  overflow-y: auto;
-}
-
-html[data-sideweave_embedded] #app {
-  height: auto;
-  min-height: 100%;
-}
-
-::-webkit-scrollbar {
-  width: 2px;
-  height: 2px;
-}
-
-::-webkit-scrollbar-thumb {
-  background: var(--border);
-  border-radius: 2px;
-}
-
-::-webkit-scrollbar-track {
-  background: transparent;
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

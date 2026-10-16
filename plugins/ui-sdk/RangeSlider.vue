@@ -30,6 +30,6 @@ function onInput(event: Event) { draft.value = Number((event.target as HTMLInput
 <style scoped>
 .rslider { position: relative; display: inline-flex; align-items: center; }
 .rslider input { width: 180px; accent-color: var(--accent); cursor: pointer; }
-.bubble { position: absolute; bottom: calc(100% + 8px); transform: translateX(-50%); padding: 3px 8px; border-radius: 7px; background: #101013; border: 1px solid rgba(255,255,255,.12); color: #f0f1f3; font-size: 11px; white-space: nowrap; opacity: 0; pointer-events: none; transition: opacity .16s ease; }
+.bubble { position: absolute; bottom: calc(100% + 8px); transform: translateX(-50%); padding: 3px 8px; border-radius: var(--radius, 6px); background: var(--popover, var(--surface)); border: 1px solid var(--border); color: var(--popover-foreground, var(--text)); box-shadow: var(--shadow); font-size: 11px; white-space: nowrap; opacity: 0; pointer-events: none; transition: opacity .16s ease; }
 .rslider:hover .bubble, .rslider:focus-within .bubble { opacity: 1; }
 </style>

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import Button from '@ui-sdk/Button.vue'
 /** 密码生成器：长度/字符集可配，crypto.getRandomValues 均匀取样，批量生成 + 点击复制 */
 import { inject, onMounted, ref, computed } from 'vue'
 import { FALLBACK_API, TOOLBOX_API_KEY } from './shared'
@@ -109,7 +110,7 @@ onMounted(generate)
           <div class="tb-desc">crypto.getRandomValues 均匀取样 · 每类至少一位 · 点击单条复制</div>
         </div>
         <span class="tb-flex" />
-        <button class="tb-btn primary" @click="generate">重新生成</button>
+        <Button variant="default" size="sm" class="tb-btn primary" @click="generate">重新生成</Button>
       </div>
 
       <div class="opt-grid">
@@ -133,7 +134,7 @@ onMounted(generate)
         </div>
       </div>
       <p v-if="list.length" class="tb-hint">点击任意密码复制；全部复制：</p>
-      <button v-if="list.length" class="tb-btn" @click="copyAll">复制全部</button>
+      <Button variant="outline" size="sm" v-if="list.length" class="tb-btn" @click="copyAll">复制全部</Button>
     </div>
   </div>
 </template>

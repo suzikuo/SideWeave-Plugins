@@ -27,6 +27,7 @@ mod scroll_input;
 mod session;
 pub mod tencent_ocr;
 mod toolbar;
+mod translation;
 #[cfg(windows)]
 mod windows;
 
@@ -168,7 +169,7 @@ impl Core {
                 self.refresh_tencent_credentials(host).map(|_| {
                     json!({
                         "native": true,
-                        "features": ["region", "annotation", "scroll", "ocr", "pin", "watermark", "recording", "animated_webp", "gif", "mp4"]
+                        "features": ["region", "annotation", "scroll", "ocr", "translation", "pin", "watermark", "recording", "animated_webp", "gif", "mp4"]
                     })
                 })
             }

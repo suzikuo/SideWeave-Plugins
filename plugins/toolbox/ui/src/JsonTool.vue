@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import Button from '@ui-sdk/Button.vue'
 /** JSON 工具：格式化（2 空格缩进）/ 压缩 / 校验，错误定位到行列，输入即时计算 */
 import { computed, inject, ref, watch } from 'vue'
 import {
@@ -93,14 +94,14 @@ const statusText = computed(() =>
           <div class="tb-desc">格式化 / 压缩 / 校验，输入即时计算</div>
         </div>
         <span class="tb-flex" />
-        <button class="tb-btn" :class="{ active: mode === 'pretty' }" @click="setMode('pretty')">
+        <Button variant="outline" size="sm" class="tb-btn" :class="{ active: mode === 'pretty' }" @click="setMode('pretty')">
           格式化
-        </button>
-        <button class="tb-btn" :class="{ active: mode === 'min' }" @click="setMode('min')">
+        </Button>
+        <Button variant="outline" size="sm" class="tb-btn" :class="{ active: mode === 'min' }" @click="setMode('min')">
           压缩
-        </button>
-        <button class="tb-btn" @click="validate">校验</button>
-        <button class="tb-btn ghost" @click="reset">重置</button>
+        </Button>
+        <Button variant="outline" size="sm" class="tb-btn" @click="validate">校验</Button>
+        <Button variant="ghost" size="sm" class="tb-btn ghost" @click="reset">重置</Button>
       </div>
 
       <div class="tb-cols">
@@ -117,9 +118,9 @@ const statusText = computed(() =>
           <div class="tb-label-row">
             <span class="tb-label">输出</span>
             <span class="tb-flex" />
-            <button class="tb-btn sm" :disabled="!output" @click="api.copyText(output, '已复制输出')">
+            <Button variant="outline" size="sm" class="tb-btn sm" :disabled="!output" @click="api.copyText(output, '已复制输出')">
               复制
-            </button>
+            </Button>
           </div>
           <pre v-if="issue" class="tb-out json-area error">{{ statusText }}</pre>
           <pre v-else class="tb-out json-area" :class="{ empty: !output }">{{ output || '输出将显示在这里' }}</pre>

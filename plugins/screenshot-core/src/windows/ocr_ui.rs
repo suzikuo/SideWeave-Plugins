@@ -2,6 +2,7 @@ use super::scroll_ui::show_scroll_tip;
 use super::{set_error, wide, UiState, WAKE};
 use crate::model::Settings;
 use crate::tencent_ocr::{RecognizeAgentRequest, TencentCloudCredentials, TencentOcrService};
+use crate::translation::translate_to_chinese;
 use arboard::Clipboard;
 use std::ptr::{null, null_mut};
 use std::thread;
@@ -26,7 +27,7 @@ const OCR_RESULT_WIDTH: i32 = 480;
 const OCR_RESULT_HEIGHT: i32 = 560;
 
 pub(super) fn start_text_extraction(state: &mut UiState) {
-    if state.ocr_pending {
+    if state.ocr_pending || state.translation_pending {
         return;
     }
     let (width, height, pixels) = match selected_image(state) {
@@ -109,7 +110,7 @@ pub(super) fn start_text_extraction(state: &mut UiState) {
 }
 
 pub(super) fn start_qr_recognition(state: &mut UiState) {
-    if state.ocr_pending {
+    if state.ocr_pending || state.translation_pending {
         return;
     }
     let (width, height, pixels) = match selected_image(state) {
@@ -146,7 +147,7 @@ pub(super) fn finish_text_extraction(
     generation: u64,
     result: Result<String, String>,
 ) {
-    finish_recognition(state, generation, result, "文字提取结果");
+    finish_recognition(state, generation, result, "文字提取结果", true);
 }
 
 pub(super) fn finish_qr_recognition(
@@ -154,7 +155,7 @@ pub(super) fn finish_qr_recognition(
     generation: u64,
     result: Result<String, String>,
 ) {
-    finish_recognition(state, generation, result, "二维码识别结果");
+    finish_recognition(state, generation, result, "二维码识别结果", false);
 }
 
 fn finish_recognition(
@@ -162,11 +163,13 @@ fn finish_recognition(
     generation: u64,
     result: Result<String, String>,
     title: &'static str,
+    can_translate: bool,
 ) {
     if generation != state.ocr_generation {
         return;
     }
     state.ocr_pending = false;
+    state.translation_pending = false;
     if state.capture.is_none() && state.editor.is_none() {
         return;
     }
@@ -177,7 +180,7 @@ fn finish_recognition(
                 status.ocr_text = Some(text.clone());
                 status.error = None;
             }
-            if !show_result_window(state, &text, title) {
+            if !show_result_window(state, &text, title, can_translate) {
                 show_scroll_tip(state, "识别完成，但结果窗口无法打开".into());
             }
         }
@@ -188,8 +191,19 @@ fn finish_recognition(
     }
 }
 
-fn show_result_window(state: &mut UiState, text: &str, title: &'static str) -> bool {
+fn show_result_window(
+    state: &mut UiState,
+    text: &str,
+    title: &'static str,
+    can_translate: bool,
+) -> bool {
     state.ocr_result_title = title;
+    state.ocr_result_original_text = Some(text.to_string());
+    state.ocr_result_display_text = Some(text.to_string());
+    state.ocr_result_can_translate = can_translate;
+    state.ocr_result_translated = false;
+    state.ocr_result_copied = false;
+    state.translation_pending = false;
     unsafe {
         if state.ocr_result_window.is_null() {
             let (x, y) = result_window_position(state);
@@ -367,11 +381,7 @@ pub(super) unsafe fn result_window_wnd_proc(
                 return 0;
             }
             if x >= width - 100 && x <= width - 20 && y >= height - 56 && y <= height - 20 {
-                let text = state
-                    .status
-                    .lock()
-                    .ok()
-                    .and_then(|status| status.ocr_text.clone());
+                let text = state.ocr_result_display_text.clone();
                 if let Some(text) = text {
                     match Clipboard::new().and_then(|mut clipboard| clipboard.set_text(text)) {
                         Ok(()) => {
@@ -387,6 +397,20 @@ pub(super) unsafe fn result_window_wnd_proc(
                     }
                     InvalidateRect(hwnd, null(), 0);
                 }
+                return 0;
+            }
+            if state.ocr_result_can_translate
+                && (20..=176).contains(&x)
+                && y >= height - 56
+                && y <= height - 20
+            {
+                if state.ocr_result_translated {
+                    if let Some(text) = state.ocr_result_original_text.clone() {
+                        set_result_text(state, &text, "文字提取结果", false);
+                    }
+                } else {
+                    start_translation(state);
+                }
             }
             0
         }
@@ -399,6 +423,11 @@ pub(super) unsafe fn result_window_wnd_proc(
                 state.ocr_result_window = null_mut();
                 state.ocr_result_edit = null_mut();
                 state.ocr_result_copied = false;
+                state.ocr_result_original_text = None;
+                state.ocr_result_display_text = None;
+                state.ocr_result_can_translate = false;
+                state.ocr_result_translated = false;
+                state.translation_pending = false;
                 if !state.ocr_result_font.is_null() {
                     DeleteObject(state.ocr_result_font as HGDIOBJ);
                     state.ocr_result_font = null_mut();
@@ -492,15 +521,137 @@ unsafe fn paint_result_window(hwnd: HWND, state: &UiState) {
         0x1 | 0x4 | 0x20 | 0x8000,
     );
 
+    if state.ocr_result_can_translate {
+        let button_left = 20;
+        let button_right = 176;
+        let button_top = height - 56;
+        let button_color = if state.translation_pending {
+            0x00aeb9c8
+        } else {
+            0x00f0ede7
+        };
+        let button_pen = CreatePen(0, 1, button_color);
+        let button_brush = CreateSolidBrush(button_color);
+        let old_pen = SelectObject(dc, button_pen as HGDIOBJ);
+        let old_brush = SelectObject(dc, button_brush as HGDIOBJ);
+        RoundRect(dc, button_left, button_top, button_right, height - 20, 10, 10);
+        SelectObject(dc, old_pen);
+        SelectObject(dc, old_brush);
+        DeleteObject(button_pen as HGDIOBJ);
+        DeleteObject(button_brush as HGDIOBJ);
+
+        SetTextColor(dc, 0x004b5563);
+        let button_text = wide(if state.translation_pending {
+            "翻译中…"
+        } else if state.ocr_result_translated {
+            "显示原文"
+        } else {
+            "翻译成中文"
+        });
+        let mut button_rect = RECT {
+            left: button_left,
+            top: button_top,
+            right: button_right,
+            bottom: height - 20,
+        };
+        DrawTextW(
+            dc,
+            button_text.as_ptr(),
+            -1,
+            &mut button_rect,
+            0x1 | 0x4 | 0x20 | 0x8000,
+        );
+    }
+
     if !old_font.is_null() {
         SelectObject(dc, old_font);
     }
     EndPaint(hwnd, &paint);
 }
 
+pub(super) fn finish_translation(
+    state: &mut UiState,
+    generation: u64,
+    result: Result<String, String>,
+) {
+    if generation != state.ocr_generation || !state.translation_pending {
+        return;
+    }
+    state.translation_pending = false;
+    if state.ocr_result_window.is_null() {
+        return;
+    }
+    unsafe {
+        InvalidateRect(state.ocr_result_window, null(), 0);
+    }
+    match result {
+        Ok(text) if !text.trim().is_empty() => {
+            set_result_text(state, &text, "中文翻译结果", true);
+        }
+        Ok(_) => {
+            let error = "翻译服务返回了空译文".to_string();
+            set_error(state, error.clone());
+            show_scroll_tip(state, error);
+        }
+        Err(error) => {
+            set_error(state, error.clone());
+            show_scroll_tip(state, error);
+        }
+    }
+}
+
+fn start_translation(state: &mut UiState) {
+    if state.translation_pending {
+        return;
+    }
+    let Some(text) = state.ocr_result_original_text.clone() else {
+        return;
+    };
+    state.ocr_generation = state.ocr_generation.wrapping_add(1);
+    let generation = state.ocr_generation;
+    state.translation_pending = true;
+    state.ocr_result_copied = false;
+    unsafe {
+        InvalidateRect(state.ocr_result_window, null(), 0);
+    }
+
+    let command_tx = state.command_tx.clone();
+    let hwnd = state.hwnd as isize;
+    thread::spawn(move || {
+        let result = translate_to_chinese(&text);
+        if command_tx
+            .send(super::Command::TranslationFinished { generation, result })
+            .is_ok()
+        {
+            unsafe {
+                PostMessageW(hwnd as _, WAKE, 0, 0);
+            }
+        }
+    });
+}
+
+fn set_result_text(state: &mut UiState, text: &str, title: &'static str, translated: bool) {
+    state.ocr_result_display_text = Some(text.to_string());
+    state.ocr_result_title = title;
+    state.ocr_result_translated = translated;
+    state.ocr_result_copied = false;
+    unsafe {
+        if !state.ocr_result_edit.is_null() {
+            let content = wide(&to_windows_line_endings(text));
+            SetWindowTextW(state.ocr_result_edit, content.as_ptr());
+        }
+        if !state.ocr_result_window.is_null() {
+            let window_title = wide(title);
+            SetWindowTextW(state.ocr_result_window, window_title.as_ptr());
+            InvalidateRect(state.ocr_result_window, null(), 0);
+        }
+    }
+}
+
 pub(super) fn invalidate_pending(state: &mut UiState) {
     state.ocr_generation = state.ocr_generation.wrapping_add(1);
     state.ocr_pending = false;
+    state.translation_pending = false;
 }
 
 pub(super) fn close_session_transients(state: &mut UiState) {

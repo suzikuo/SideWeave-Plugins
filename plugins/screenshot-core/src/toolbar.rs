@@ -712,7 +712,7 @@ pub fn menu_layout(
     let (width, item_height, header_height) = match menu {
         ToolbarMenu::RecordingFps => (276, 42, 52),
         ToolbarMenu::RecordingExport => (216, 36, 52),
-        ToolbarMenu::Recognition => (216, 38, 52),
+        ToolbarMenu::Recognition => (216, 38, 0),
         ToolbarMenu::ScrollMode => (204, 32, 0),
         ToolbarMenu::Color => (224, 32, 0),
         ToolbarMenu::Size | ToolbarMenu::Style => (176, 32, 0),

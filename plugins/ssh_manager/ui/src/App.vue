@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import Button from '@ui-sdk/Button.vue'
 /** SSH 会话管理：按标签分组卡片、终端连接、TCP 测速、复制命令、增删改（M3 令牌） */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import Icon from '../../../ui-sdk/Icon.vue'
@@ -313,9 +314,9 @@ watch(showDialog, (open) => {
 <template>
   <div class="ssh">
     <div class="toolbar">
-      <button class="btn primary" @click="openAdd">
+      <Button variant="default" size="sm" class="btn primary" @click="openAdd">
         <Icon name="plus" :size="14" /> 新增会话
-      </button>
+      </Button>
       <div class="search">
         <Icon name="search" :size="14" />
         <input v-model="search" type="text" placeholder="搜索名称、主机或用户" />
@@ -351,8 +352,8 @@ watch(showDialog, (open) => {
           </div>
 
           <div class="actions">
-            <button class="btn primary connect" @click="connect(p)">连接</button>
-            <button
+            <Button variant="default" size="sm" class="btn primary connect" @click="connect(p)">连接</Button>
+            <Button variant="outline" size="sm"
               class="btn test"
               :class="testClass(p.id)"
               :title="tests[p.id]?.title ?? 'TCP 连通性测试'"
@@ -360,8 +361,8 @@ watch(showDialog, (open) => {
               @click="runTest(p)"
             >
               {{ tests[p.id]?.text ?? '测试' }}
-            </button>
-            <button class="icon-btn" title="复制命令" @click="copyCommand(p)">
+            </Button>
+            <Button variant="outline" size="sm" class="icon-btn" title="复制命令" @click="copyCommand(p)">
               <!-- 自绘 copy 图标（Icon.vue 无该图标） -->
               <svg
                 width="14"
@@ -377,18 +378,18 @@ watch(showDialog, (open) => {
                 <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
                 <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
               </svg>
-            </button>
-            <button class="icon-btn" title="编辑" @click="openEdit(p)">
+            </Button>
+            <Button variant="outline" size="sm" class="icon-btn" title="编辑" @click="openEdit(p)">
               <Icon name="pencil" :size="14" />
-            </button>
-            <button
+            </Button>
+            <Button variant="destructive" size="sm"
               class="icon-btn danger"
               :class="{ confirming: confirmId === p.id }"
               :title="confirmId === p.id ? '再次点击确认删除' : '删除'"
               @click="remove(p)"
             >
               <Icon name="trash" :size="14" />
-            </button>
+            </Button>
           </div>
         </div>
       </section>
@@ -478,11 +479,11 @@ watch(showDialog, (open) => {
                 type="text"
                 placeholder="id_ed25519（托管名）或 C:\Users\you\.ssh\id_ed25519"
               />
-              <button type="button" class="btn" :disabled="importingKey" @click="importKey">
+              <Button variant="outline" size="sm" type="button" class="btn" :disabled="importingKey" @click="importKey">
                 {{ importingKey ? '导入中…' : '导入' }}
-              </button>
+              </Button>
               <div class="keys-menu-wrap">
-                <button type="button" class="btn" @click="toggleKeyMenu">历史</button>
+                <Button variant="outline" size="sm" type="button" class="btn" @click="toggleKeyMenu">历史</Button>
                 <div v-if="showKeyMenu" class="keys-menu">
                   <p v-if="keys.length === 0" class="keys-empty">还没有托管密钥，先点"导入"</p>
                   <div v-for="k in keys" :key="k.name" class="keys-item" @click="pickKey(k)">
@@ -512,8 +513,8 @@ watch(showDialog, (open) => {
           </label>
 
           <footer class="dialog-foot">
-            <button class="btn" @click="showDialog = false">取消</button>
-            <button class="btn primary" @click="save">保存</button>
+            <Button variant="outline" size="sm" class="btn" @click="showDialog = false">取消</Button>
+            <Button variant="default" size="sm" class="btn primary" @click="save">保存</Button>
           </footer>
         </div>
       </div>

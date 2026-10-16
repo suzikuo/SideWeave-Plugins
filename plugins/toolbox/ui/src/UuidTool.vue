@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import Button from '@ui-sdk/Button.vue'
 /** UUID 工具：crypto.randomUUID（v4）批量生成，单条点击复制 + 一键复制全部 */
 import { inject, onMounted, ref } from 'vue'
 import { FALLBACK_API, TOOLBOX_API_KEY, generateUuid } from './shared'
@@ -46,9 +47,9 @@ onMounted(generate)
             @keyup.enter="generate"
           />
         </label>
-        <button class="tb-btn primary" @click="generate">重新生成</button>
-        <button class="tb-btn" @click="copyAll">复制全部</button>
-        <button class="tb-btn ghost" @click="reset">重置</button>
+        <Button variant="default" size="sm" class="tb-btn primary" @click="generate">重新生成</Button>
+        <Button variant="outline" size="sm" class="tb-btn" @click="copyAll">复制全部</Button>
+        <Button variant="ghost" size="sm" class="tb-btn ghost" @click="reset">重置</Button>
       </div>
 
       <div class="uuid-list">

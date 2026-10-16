@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import Button from '@ui-sdk/Button.vue'
 /** 正则测试：pattern + flags 输入，mark 包裹高亮全部匹配并统计匹配数 */
 import { computed, inject, ref } from 'vue'
 import { FALLBACK_API, TOOLBOX_API_KEY, debouncedRef } from './shared'
@@ -144,7 +145,7 @@ function reset() {
           <div class="tb-desc">输入即匹配，高亮所有结果并计数</div>
         </div>
         <span class="tb-flex" />
-        <button class="tb-btn ghost" @click="reset">重置</button>
+        <Button variant="ghost" size="sm" class="tb-btn ghost" @click="reset">重置</Button>
       </div>
 
       <div class="regex-row">
@@ -182,7 +183,7 @@ function reset() {
       <div class="tb-label-row">
         <span class="tb-label">匹配结果</span>
         <span class="tb-flex" />
-        <button class="tb-btn sm" :disabled="!state.count" @click="copyMatches">复制匹配</button>
+        <Button variant="outline" size="sm" class="tb-btn sm" :disabled="!state.count" @click="copyMatches">复制匹配</Button>
         <span class="tb-status" :class="state.error ? 'err' : state.hasPattern && state.hasText ? 'ok' : 'hint'">
           {{ statusText }}
         </span>

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import Button from '@ui-sdk/Button.vue'
 /** Bookmarks 书签插件详情页：标签过滤 + 搜索 + 置顶分组 + 双击直达（Pulse 深色胶囊风格） */
 import { computed, onMounted, ref } from 'vue'
 import Icon from '../../../ui-sdk/Icon.vue'
@@ -264,7 +265,7 @@ function avatarChar(name: string): string {
   <div class="bookmarks">
     <div class="toolbar">
       <div class="toolbar-left">
-        <button class="add-btn" @click="openAdd"><Icon name="plus" :size="14" /> 新增书签</button>
+        <Button variant="outline" size="sm" class="add-btn" @click="openAdd"><Icon name="plus" :size="14" /> 新增书签</Button>
         <div class="style-switch" title="列表样式">
           <button :class="{ active: view === 'card' }" @click="setView('card')">卡片</button>
           <button :class="{ active: view === 'compact' }" @click="setView('compact')">单条</button>
@@ -326,21 +327,21 @@ function avatarChar(name: string): string {
                 <span class="url" :title="it.url">{{ it.url }}</span>
               </span>
               <span class="actions">
-                <button class="icon-btn" title="打开" @click.stop="open(it)">
+                <Button variant="outline" size="sm" class="icon-btn" title="打开" @click.stop="open(it)">
                   <Icon name="play" :size="14" />
-                </button>
-                <button class="icon-btn" title="编辑" @click.stop="openEdit(it)">
+                </Button>
+                <Button variant="outline" size="sm" class="icon-btn" title="编辑" @click.stop="openEdit(it)">
                   <Icon name="pencil" :size="14" />
-                </button>
-                <button
+                </Button>
+                <Button variant="outline" size="sm"
                   class="icon-btn"
                   :class="{ active: it.pinned }"
                   :title="it.pinned ? '取消置顶' : '置顶'"
                   @click.stop="togglePin(it)"
                 >
                   <Icon name="bookmark" :size="14" />
-                </button>
-                <button
+                </Button>
+                <Button variant="outline" size="sm"
                   class="icon-btn"
                   :class="{ active: it.in_preview }"
                   :title="it.in_preview ? '从悬浮预览移除' : '加入悬浮预览'"
@@ -350,13 +351,13 @@ function avatarChar(name: string): string {
                     <path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z" />
                     <circle cx="12" cy="12" r="3" />
                   </svg>
-                </button>
-                <button v-if="confirmId === it.id" class="confirm-btn" @click.stop="requestRemove(it)">
+                </Button>
+                <Button variant="outline" size="sm" v-if="confirmId === it.id" class="confirm-btn" @click.stop="requestRemove(it)">
                   再点一次确认删除
-                </button>
-                <button v-else class="icon-btn danger" title="删除" @click.stop="requestRemove(it)">
+                </Button>
+                <Button variant="destructive" size="sm" v-else class="icon-btn danger" title="删除" @click.stop="requestRemove(it)">
                   <Icon name="trash" :size="14" />
-                </button>
+                </Button>
               </span>
             </div>
           </div>
@@ -394,21 +395,21 @@ function avatarChar(name: string): string {
               </span>
               <span class="td td-ops">
                 <span class="actions inline">
-                  <button class="icon-btn" title="打开" @click.stop="open(it)">
+                  <Button variant="outline" size="sm" class="icon-btn" title="打开" @click.stop="open(it)">
                     <Icon name="play" :size="14" />
-                  </button>
-                  <button class="icon-btn" title="编辑" @click.stop="openEdit(it)">
+                  </Button>
+                  <Button variant="outline" size="sm" class="icon-btn" title="编辑" @click.stop="openEdit(it)">
                     <Icon name="pencil" :size="14" />
-                  </button>
-                  <button
+                  </Button>
+                  <Button variant="outline" size="sm"
                     class="icon-btn"
                     :class="{ active: it.pinned }"
                     :title="it.pinned ? '取消置顶' : '置顶'"
                     @click.stop="togglePin(it)"
                   >
                     <Icon name="bookmark" :size="14" />
-                  </button>
-                  <button
+                  </Button>
+                  <Button variant="outline" size="sm"
                     class="icon-btn"
                     :class="{ active: it.in_preview }"
                     :title="it.in_preview ? '从悬浮预览移除' : '加入悬浮预览'"
@@ -418,13 +419,13 @@ function avatarChar(name: string): string {
                       <path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z" />
                       <circle cx="12" cy="12" r="3" />
                     </svg>
-                  </button>
-                  <button v-if="confirmId === it.id" class="confirm-btn" @click.stop="requestRemove(it)">
+                  </Button>
+                  <Button variant="outline" size="sm" v-if="confirmId === it.id" class="confirm-btn" @click.stop="requestRemove(it)">
                     再点一次确认删除
-                  </button>
-                  <button v-else class="icon-btn danger" title="删除" @click.stop="requestRemove(it)">
+                  </Button>
+                  <Button variant="destructive" size="sm" v-else class="icon-btn danger" title="删除" @click.stop="requestRemove(it)">
                     <Icon name="trash" :size="14" />
-                  </button>
+                  </Button>
                 </span>
               </span>
             </div>
@@ -505,8 +506,8 @@ function avatarChar(name: string): string {
           </div>
 
           <footer class="dialog-foot">
-            <button class="btn" @click="showDialog = false">取消</button>
-            <button class="btn primary" @click="save">保存</button>
+            <Button variant="outline" size="sm" class="btn" @click="showDialog = false">取消</Button>
+            <Button variant="default" size="sm" class="btn primary" @click="save">保存</Button>
           </footer>
         </div>
       </div>

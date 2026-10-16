@@ -2,6 +2,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Music Preview</title>
   <style>
     * {
@@ -13,15 +14,16 @@
     }
 
     :root {
-      --accent: #6366f1;
-      --bg: #0f172a;
-      --surface: #1e293b;
-      --surface-subtle: rgba(255, 255, 255, 0.06);
-      --surface-container: rgba(255, 255, 255, 0.1);
-      --text: #f8fafc;
-      --text-muted: #94a3b8;
-      --border: rgba(255, 255, 255, 0.12);
-      --border-strong: rgba(255, 255, 255, 0.2);
+      color-scheme: dark;
+      --accent: #4d80ff;
+      --bg: #09090b;
+      --surface: #101113;
+      --surface-subtle: #18191b;
+      --surface-container: #232428;
+      --text: #fafafa;
+      --text-muted: #a1a1aa;
+      --border: #292a2e;
+      --border-strong: #45464d;
       --radius: 10px;
       --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     }
@@ -137,7 +139,7 @@
       width: 20px;
       height: 20px;
       border-radius: 50%;
-      background: linear-gradient(135deg, var(--accent), #ec4899);
+      background: var(--accent);
       display: flex;
       align-items: center;
       justify-content: center;
@@ -201,7 +203,7 @@
     }
 
     .fav-btn.is-fav {
-      color: #f43f5e;
+      color: #f87171;
     }
 
     /* Progress bar */
@@ -223,7 +225,7 @@
 
     .progress-fill {
       height: 100%;
-      background: linear-gradient(90deg, var(--accent), #a855f7);
+      background: var(--accent);
       border-radius: 999px;
       transition: width 0.1s linear;
     }
@@ -291,7 +293,16 @@
     }
 
     .mute-btn.is-muted {
-      color: #ef4444;
+      color: #f87171;
+    }
+
+    :focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
     }
   </style>
 </head>

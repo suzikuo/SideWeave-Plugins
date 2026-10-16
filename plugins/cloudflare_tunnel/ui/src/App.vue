@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import Button from '@ui-sdk/Button.vue'
 import { onMounted, onUnmounted, ref } from 'vue'
 import { onPluginLifecycle } from '../../../ui-sdk/runtime'
 import Icon from '../../../ui-sdk/Icon.vue'
@@ -404,28 +405,28 @@ onUnmounted(() => {
 
       <div class="tb-right">
         <template v-if="configured && detail">
-          <button class="btn sm" title="实时日志监控" @click="openLogs">
+          <Button variant="outline" size="sm" class="btn sm" title="实时日志监控" @click="openLogs">
             <Icon name="terminal" :size="12" /> 控制台
-          </button>
+          </Button>
 
-          <button
+          <Button variant="outline" size="sm"
             v-if="detail.status === 'running'"
             class="btn sm stop"
             :disabled="actionLoading"
             @click="stopTunnel"
           >
             <Icon name="square" :size="11" /> 停止
-          </button>
-          <button
+          </Button>
+          <Button variant="default" size="sm"
             v-else
             class="btn sm primary"
             :disabled="actionLoading"
             @click="startTunnel"
           >
             <Icon name="play" :size="11" /> 启动
-          </button>
+          </Button>
 
-          <button
+          <Button variant="outline" size="sm"
             v-if="detail.status === 'running'"
             class="icon-btn"
             title="重启以重载配置"
@@ -433,7 +434,7 @@ onUnmounted(() => {
             @click="restartTunnel"
           >
             <Icon name="refresh" :size="13" />
-          </button>
+          </Button>
         </template>
       </div>
     </header>
@@ -484,9 +485,9 @@ onUnmounted(() => {
               <input v-model="setupForm.tunnel_id" type="text" class="mono" placeholder="5cc43274-..." />
             </label>
 
-            <button class="btn primary full" :disabled="actionLoading" @click="submitSetup">
+            <Button variant="default" size="sm" class="btn primary full" :disabled="actionLoading" @click="submitSetup">
               {{ actionLoading ? '正在配置...' : '保存并进入' }}
-            </button>
+            </Button>
           </div>
         </div>
       </div>
@@ -502,19 +503,19 @@ onUnmounted(() => {
             </span>
           </div>
           <div class="meta-right">
-            <button
+            <Button variant="outline" size="sm"
               class="tiny-btn"
               @click="copyText(`${detail.tunnel.tunnel_id}.cfargotunnel.com`, 'CNAME 目标')"
             >
               复制目标
-            </button>
-            <button
+            </Button>
+            <Button variant="destructive" size="sm"
               class="tiny-btn danger"
               :class="{ active: confirmReset }"
               @click="handleReset"
             >
               {{ confirmReset ? '确认重置' : '重设' }}
-            </button>
+            </Button>
           </div>
         </div>
 
@@ -527,9 +528,9 @@ onUnmounted(() => {
                 {{ detail.services.filter(s => s.enabled).length }} / {{ detail.services.length }}
               </span>
             </div>
-            <button class="btn sm primary" @click="openAddService">
+            <Button variant="default" size="sm" class="btn sm primary" @click="openAddService">
               <Icon name="plus" :size="12" /> 添加服务
-            </button>
+            </Button>
           </div>
 
           <!-- 空提示 -->
@@ -579,54 +580,54 @@ onUnmounted(() => {
 
               <!-- 右侧紧凑操作区 -->
               <div class="actions">
-                <button
+                <Button variant="outline" size="sm"
                   class="action-btn"
                   :class="s.enabled ? 'btn-pause' : 'btn-resume'"
                   :title="s.enabled ? '暂停此子域名（流量返回 404）' : '启用此子域名'"
                   @click="toggleService(s.id, s.enabled)"
                 >
                   {{ s.enabled ? '暂停' : '启用' }}
-                </button>
+                </Button>
 
-                <button
+                <Button variant="outline" size="sm"
                   class="action-btn"
                   title="在系统浏览器中打开"
                   @click="openUrl(s.full_url)"
                 >
                   打开
-                </button>
+                </Button>
 
-                <button
+                <Button variant="outline" size="sm"
                   class="action-btn"
                   title="复制公网链接"
                   @click="copyText(s.full_url, '公网链接')"
                 >
                   复制
-                </button>
+                </Button>
 
-                <button
+                <Button variant="outline" size="sm"
                   class="icon-btn"
                   title="编辑"
                   @click="openEditService(s)"
                 >
                   <Icon name="pencil" :size="13" />
-                </button>
+                </Button>
 
-                <button
+                <Button variant="destructive" size="sm"
                   v-if="confirmDelId !== s.id"
                   class="icon-btn danger"
                   title="删除"
                   @click="deleteService(s.id)"
                 >
                   <Icon name="trash" :size="13" />
-                </button>
-                <button
+                </Button>
+                <Button variant="outline" size="sm"
                   v-else
                   class="action-btn del-confirm"
                   @click="deleteService(s.id)"
                 >
                   确认删除
-                </button>
+                </Button>
               </div>
             </div>
           </div>
@@ -640,9 +641,9 @@ onUnmounted(() => {
         <div class="dialog">
           <div class="dialog-head">
             <h3>{{ editingServiceId ? '编辑服务' : '添加本地服务' }}</h3>
-            <button class="icon-btn" @click="showServiceDialog = false">
+            <Button variant="outline" size="sm" class="icon-btn" @click="showServiceDialog = false">
               <Icon name="x" :size="14" />
-            </button>
+            </Button>
           </div>
 
           <div class="dialog-body">
@@ -669,8 +670,8 @@ onUnmounted(() => {
           </div>
 
           <div class="dialog-foot">
-            <button class="btn sm" @click="showServiceDialog = false">取消</button>
-            <button class="btn sm primary" @click="submitService">保存生效</button>
+            <Button variant="outline" size="sm" class="btn sm" @click="showServiceDialog = false">取消</Button>
+            <Button variant="default" size="sm" class="btn sm primary" @click="submitService">保存生效</Button>
           </div>
         </div>
       </div>
@@ -687,10 +688,10 @@ onUnmounted(() => {
               <span class="sub-tip">即时查看输出，退出即停止</span>
             </div>
             <div class="head-ops">
-              <button class="btn sm" @click="clearLogs">清空</button>
-              <button class="icon-btn" @click="closeLogs">
+              <Button variant="outline" size="sm" class="btn sm" @click="clearLogs">清空</Button>
+              <Button variant="outline" size="sm" class="icon-btn" @click="closeLogs">
                 <Icon name="x" :size="14" />
-              </button>
+              </Button>
             </div>
           </div>
 

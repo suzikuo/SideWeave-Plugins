@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import Button from '@ui-sdk/Button.vue'
 /** 哈希工具：SHA-1 / SHA-256 / SHA-512（crypto.subtle），输入即算，HEX + Base64 双输出 */
 import { inject, ref, watch } from 'vue'
 import { FALLBACK_API, TOOLBOX_API_KEY, bufferToBase64, bufferToHex, debouncedRef } from './shared'
@@ -60,7 +61,7 @@ function reset() {
           <div class="tb-desc">SHA-1 / SHA-256 / SHA-512 · 输入即算 · HEX 与 Base64 双输出</div>
         </div>
         <span class="tb-flex" />
-        <button class="tb-btn ghost" @click="reset">重置</button>
+        <Button variant="ghost" size="sm" class="tb-btn ghost" @click="reset">重置</Button>
       </div>
 
       <textarea
@@ -77,14 +78,14 @@ function reset() {
         <div class="hash-line">
           <span class="hash-k">HEX</span>
           <code class="tb-mono">{{ r.hex }}</code>
-          <button class="tb-btn sm" @click="api.copyText(r.hex, `已复制 ${r.name} HEX`)">复制</button>
+          <Button variant="outline" size="sm" class="tb-btn sm" @click="api.copyText(r.hex, `已复制 ${r.name} HEX`)">复制</Button>
         </div>
         <div class="hash-line">
           <span class="hash-k">Base64</span>
           <code class="tb-mono">{{ r.b64 }}</code>
-          <button class="tb-btn sm" @click="api.copyText(r.b64, `已复制 ${r.name} Base64`)">
+          <Button variant="outline" size="sm" class="tb-btn sm" @click="api.copyText(r.b64, `已复制 ${r.name} Base64`)">
             复制
-          </button>
+          </Button>
         </div>
       </div>
     </div>

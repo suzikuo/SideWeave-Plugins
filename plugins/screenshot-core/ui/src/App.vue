@@ -110,7 +110,7 @@ onMounted(() => {
       <div>
         <div class="eyebrow">SCREENSHOT CORE</div>
         <h1>截图设置</h1>
-        <p>配置快捷键、保存位置、滚动截图默认值和 OCR 服务。</p>
+        <p>配置快捷键、截图选项、识别与翻译服务。</p>
       </div>
       <button class="primary save-top" :disabled="saving" @click="saveSettings">
         {{ saving ? '保存中…' : '保存设置' }}
@@ -152,6 +152,16 @@ onMounted(() => {
       </div>
       <label>水印文字<input v-model="settings.watermarkText" placeholder="可选，导出时绘制在右下角" /></label>
       <label class="check"><input v-model="settings.autoCopy" type="checkbox" />完成后自动复制到图片剪贴板</label>
+    </section>
+
+    <section class="card">
+      <h2>翻译接口设置</h2>
+      <p class="hint">OCR 识别结果可在结果窗口中手动翻译成中文。</p>
+      <div class="translation-endpoint">
+        <span>接口</span>
+        <code>https://translate.googleapis.com/translate_a/single</code>
+      </div>
+      <p class="hint">Google 公共翻译接口，自动识别原文并翻译成简体中文，无需密钥。只有点击结果窗口中的“翻译成中文”时，识别文字才会通过 HTTPS 发送到该接口。</p>
     </section>
 
     <section class="card">
@@ -271,6 +281,9 @@ button:disabled { opacity: .45; cursor: not-allowed }
 .credential-status { margin: 0 0 10px; color: var(--warning, #ffbc72); font-size: 12px }
 .credential-status.ready { color: var(--success, #8de0b2) }
 .saved-credentials { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 10px 0 14px; color: var(--text-muted, #8d98ad); font-size: 12px }
+.translation-endpoint { display: grid; grid-template-columns: 96px 1fr; align-items: center; gap: 12px; margin: 12px 0; font-size: 12px }
+.translation-endpoint span { color: var(--text-muted, #8d98ad) }
+.translation-endpoint code { overflow-wrap: anywhere }
 code { color: var(--accent, #b8d1ff) }
 @media (max-width: 620px) { .grid { grid-template-columns: 1fr } .dir-row { grid-template-columns: 1fr } .save-top { display: none } }
 </style>

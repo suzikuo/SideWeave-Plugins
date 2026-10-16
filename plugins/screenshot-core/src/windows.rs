@@ -104,6 +104,11 @@ pub(crate) struct UiState {
     pub(crate) ocr_result_font: HFONT,
     pub(crate) ocr_result_copied: bool,
     pub(crate) ocr_result_title: &'static str,
+    pub(crate) ocr_result_original_text: Option<String>,
+    pub(crate) ocr_result_display_text: Option<String>,
+    pub(crate) ocr_result_can_translate: bool,
+    pub(crate) ocr_result_translated: bool,
+    pub(crate) translation_pending: bool,
     pub(crate) scroll_masks: Vec<HWND>,
     pub(crate) scroll_border: HWND,
     pub(crate) scroll_target: HWND,
@@ -197,6 +202,10 @@ enum Command {
         result: Result<String, String>,
     },
     QrFinished {
+        generation: u64,
+        result: Result<String, String>,
+    },
+    TranslationFinished {
         generation: u64,
         result: Result<String, String>,
     },
@@ -374,6 +383,11 @@ fn ui_thread(
             ocr_result_font: null_mut(),
             ocr_result_copied: false,
             ocr_result_title: "文字提取结果",
+            ocr_result_original_text: None,
+            ocr_result_display_text: None,
+            ocr_result_can_translate: false,
+            ocr_result_translated: false,
+            translation_pending: false,
             scroll_masks: Vec::new(),
             scroll_border: null_mut(),
             scroll_target: null_mut(),
@@ -531,6 +545,9 @@ fn handle_command(state: &mut UiState, command: Command) {
         }
         Command::QrFinished { generation, result } => {
             ocr_ui::finish_qr_recognition(state, generation, result)
+        }
+        Command::TranslationFinished { generation, result } => {
+            ocr_ui::finish_translation(state, generation, result)
         }
         Command::Hotkey(value) => update_hotkey(state, &value),
         Command::Pin => pin_last(state),

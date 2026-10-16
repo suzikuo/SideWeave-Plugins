@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import Button from '@ui-sdk/Button.vue'
 /** 桌面悬浮时钟：大字时钟，闹钟前 ≤5 分钟切换大倒计时；
  * 根元素 data-tauri-drag-region 支持拖动，固定会启用宿主原生鼠标穿透。
  * 监听全局事件 time://alarm，并按设置闪动提醒。 */
@@ -348,10 +349,10 @@ function onDocumentVisibilityChange() {
             <div class="pomo-fill" :style="{ width: pomoPct + '%' }" />
           </div>
           <div class="pomo-btns">
-            <button class="pomo-btn" @click.stop="pomoToggle">
+            <Button variant="outline" size="sm" class="pomo-btn" @click.stop="pomoToggle">
               {{ pomo.running ? '暂停' : '开始' }}
-            </button>
-            <button class="pomo-btn" @click.stop="pomoReset">重置</button>
+            </Button>
+            <Button variant="outline" size="sm" class="pomo-btn" @click.stop="pomoReset">重置</Button>
           </div>
         </div>
       </template>
