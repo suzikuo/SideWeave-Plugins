@@ -1,0 +1,41 @@
+{
+  "manifestVersion": 1,
+  "apiVersion": 1,
+  "id": "file_share",
+  "name": "本地文件服务",
+  "icon": "ui/icon.svg",
+  "version": "1.0.0",
+  "description": "独立管理本机和局域网文件浏览、上传、账号认证与媒体预览。",
+  "author": "SideWeave",
+  "type": "native",
+  "publisher": "sideweave",
+  "key_id": "main-2026-rotation-1",
+  "requires_trust": true,
+  "runtime": "dynamic_library",
+  "backend": "plugin.dll",
+  "autoStart": false,
+  "capabilities": [
+    "storage",
+    "filesystem.read",
+    "filesystem.write",
+    "system.file_picker",
+    "system.open_external",
+    "clipboard",
+    "network.listen"
+  ],
+  "requiredCapabilities": [
+    "filesystem.write"
+  ],
+  "ui": {
+    "entry": "ui/index.html",
+    "kind": "vue",
+    "assetRoot": "ui",
+    "initialWidth": 900,
+    "initialHeight": 760
+  },
+  "hoverPreview": {
+    "width": 280,
+    "height": 180,
+    "dataMethod": "get_preview"
+  }
+}

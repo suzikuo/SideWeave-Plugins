@@ -5,6 +5,7 @@ members = [
     "plugins/bookmarks",
     "plugins/clipboard",
     "plugins/cloudflare_tunnel",
+    "plugins/file_share",
     "plugins/native-template",
     "plugins/notes",
     "plugins/notification-lab",

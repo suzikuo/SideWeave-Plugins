@@ -212,15 +212,32 @@ impl ScreenCapture {
     }
 
     pub(super) fn grab_virtual_desktop() -> Option<Self> {
+        let bounds = Self::virtual_desktop_rect()?;
+        let x = bounds.left;
+        let y = bounds.top;
+        let width = bounds.width() as i32;
+        let height = bounds.height() as i32;
+        let pixels = super::hdr_capture::capture_virtual_desktop(bounds)
+            .or_else(|| Self::grab_virtual_desktop_gdi(bounds))?;
+        let dimmed_pixels = pixels
+            .iter()
+            .map(|value| (*value as u16 * 55 / 100) as u8)
+            .collect();
+        Some(Self {
+            x,
+            y,
+            width,
+            height,
+            pixels,
+            dimmed_pixels,
+        })
+    }
+
+    fn grab_virtual_desktop_gdi(bounds: ScreenRect) -> Option<Vec<u8>> {
         unsafe {
-            let bounds = Self::virtual_desktop_rect()?;
-
             let x = bounds.left;
-
             let y = bounds.top;
-
             let width = bounds.width() as i32;
-
             let height = bounds.height() as i32;
             let screen_dc = GetDC(null_mut());
             if screen_dc.is_null() {
@@ -265,18 +282,7 @@ impl ScreenCapture {
             DeleteObject(bitmap as HGDIOBJ);
             DeleteDC(memory_dc);
             ReleaseDC(null_mut(), screen_dc);
-            let dimmed_pixels = pixels
-                .iter()
-                .map(|value| (*value as u16 * 55 / 100) as u8)
-                .collect();
-            (!pixels.is_empty()).then_some(Self {
-                x,
-                y,
-                width,
-                height,
-                pixels,
-                dimmed_pixels,
-            })
+            (!pixels.is_empty()).then_some(pixels)
         }
     }
 

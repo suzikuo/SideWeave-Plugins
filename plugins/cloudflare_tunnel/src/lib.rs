@@ -1,6 +1,5 @@
 mod checker;
 mod config_manager;
-mod file_share;
 mod models;
 mod process_manager;
 
@@ -54,7 +53,6 @@ impl CloudflareTunnelPlugin {
                     "process.spawn".into(),
                     "system.open_external".into(),
                     "network.connect".into(),
-                    "network.listen".into(),
                     "clipboard".into(),
                 ],
                 ui: Some(PluginUi {
@@ -81,54 +79,37 @@ impl CloudflareTunnelPlugin {
         match request.method.as_deref() {
             Some("get_preview") => {
                 if !config_manager::has_tunnel() {
-                    return Ok(json!({
-                        "title": "Cloudflare Tunnel",
-                        "status": "offline",
-                        "statusText": "未配置",
-                        "subtitle": "未检测到本地 Tunnel",
-                        "metrics": [],
-                        "actions": []
-                    }));
+                    return Ok(
+                        json!({"title":"Cloudflare Tunnel","status":"offline","statusText":"未配置","subtitle":"未检测到本地 Tunnel","metrics":[],"actions":[]}),
+                    );
                 }
                 let tunnel = config_manager::load_tunnel()?;
-                let (state, conns, _err_msg) = process_manager::get_tunnel_status();
+                let (state, conns, _) = process_manager::get_tunnel_status();
                 let (status, status_text) = match state {
                     models::TunnelState::Running => ("online", format!("已连接 ({conns} 链路)")),
-                    models::TunnelState::Starting => ("busy", "正在启动...".to_string()),
+                    models::TunnelState::Starting => ("busy", "正在启动…".to_string()),
                     models::TunnelState::Stopped => ("offline", "已停止".to_string()),
                     models::TunnelState::Error => ("error", "运行异常".to_string()),
                 };
-                let is_active =
-                    state == models::TunnelState::Running || state == models::TunnelState::Starting;
-                let active_services = tunnel.services.iter().filter(|s| s.enabled).count();
-                let total_services = tunnel.services.len();
-
-                let action = if is_active {
-                    json!({
-                        "id": "stop",
-                        "label": "停止",
-                        "method": "stop",
-                        "danger": true
-                    })
+                let active = matches!(
+                    state,
+                    models::TunnelState::Running | models::TunnelState::Starting
+                );
+                let visible_services = tunnel.services.len();
+                let active_services = tunnel.services.iter().filter(|service| service.enabled).count();
+                let tunnel_action = if active {
+                    json!({"id":"stop","label":"停止","method":"stop","danger":true})
                 } else {
-                    json!({
-                        "id": "start",
-                        "label": "启动",
-                        "method": "start",
-                        "primary": true
-                    })
+                    json!({"id":"start","label":"启动","method":"start","primary":true})
                 };
-
                 Ok(json!({
-                    "title": "Cloudflare Tunnel",
-                    "status": status,
-                    "statusText": status_text,
-                    "subtitle": tunnel.domain,
-                    "metrics": [
-                        { "label": "服务状态", "value": format!("{active_services}/{total_services} 启用") },
-                        { "label": "Tunnel 名称", "value": tunnel.name }
+                    "title":"Cloudflare Tunnel", "status":status, "statusText":status_text,
+                    "subtitle":tunnel.domain,
+                    "metrics":[
+                        {"label":"服务路由","value":format!("{}/{} 启用",active_services,visible_services)},
+                        {"label":"Tunnel 名称","value":tunnel.name}
                     ],
-                    "actions": [action]
+                    "actions":[tunnel_action]
                 }))
             }
 
@@ -138,91 +119,29 @@ impl CloudflareTunnelPlugin {
                 }
                 let tunnel = config_manager::load_tunnel()?;
                 let (status, conns, err_msg) = process_manager::get_tunnel_status();
-
                 let mut service_views = Vec::new();
-                for s in &tunnel.services {
-                    let port = config_manager::extract_port(&s.service);
-                    let full_host = config_manager::full_hostname(&s.hostname, &tunnel.domain);
-                    let is_file_share_route = s.enabled
-                        && tunnel.file_share.as_ref().is_some_and(|share| {
-                            share.enabled
-                                && share.port == port
-                                && !share.hostname.trim().is_empty()
-                                && config_manager::full_hostname(&share.hostname, &tunnel.domain)
-                                    .eq_ignore_ascii_case(&full_host)
-                        });
-                    let is_online = if is_file_share_route {
-                        file_share::is_running()
-                    } else {
-                        checker::is_local_port_listening(port)
-                    };
+                for service in &tunnel.services {
+                    let port = config_manager::extract_port(&service.service);
+                    let full_host =
+                        config_manager::full_hostname(&service.hostname, &tunnel.domain);
+                    let online = checker::is_local_port_listening(port);
                     service_views.push(ServiceView {
-                        id: s.id.clone(),
-                        name: s.name.clone(),
-                        hostname: s.hostname.clone(),
+                        id: service.id.clone(),
+                        name: service.name.clone(),
+                        hostname: service.hostname.clone(),
                         full_url: format!("https://{full_host}"),
-                        service: s.service.clone(),
+                        service: service.service.clone(),
                         port,
-                        local_online: is_online,
-                        enabled: s.enabled,
+                        local_online: online,
+                        enabled: service.enabled,
+                        disable_chunked_encoding: service.disable_chunked_encoding,
                     });
                 }
-
-                let file_share_view = tunnel.file_share.as_ref().map(|share| {
-                    let local_running = file_share::is_running();
-                    let lan_running = file_share::lan_is_running();
-                    let cloudflare_route_enabled = local_running
-                        && file_share_route_is_enabled(&tunnel, &share.hostname, share.port);
-                    let lan_host = file_share::lan_host()
-                        .or_else(file_share::detect_lan_ipv4)
-                        .unwrap_or_default();
-                    FileShareView {
-                        enabled: share.enabled,
-                        directory: share.directory.clone(),
-                        local_url: if local_running && !share.token.is_empty() {
-                            format!("http://127.0.0.1:{}/{}/", share.port, share.token)
-                        } else {
-                            String::new()
-                        },
-                        local_running,
-                        port: share.port,
-                        lan_enabled: share.lan_enabled,
-                        lan_running,
-                        lan_host: lan_host.clone(),
-                        lan_share_url: if share.lan_enabled
-                            && lan_running
-                            && !share.token.is_empty()
-                            && !lan_host.is_empty()
-                        {
-                            format!("http://{lan_host}:{}/{}/", share.port, share.token)
-                        } else {
-                            String::new()
-                        },
-                        cloudflare_share_url: if cloudflare_route_enabled && !share.token.is_empty()
-                        {
-                            format!("https://{}/{}/", share.hostname, share.token)
-                        } else {
-                            String::new()
-                        },
-                        upload_enabled: share.upload_enabled,
-                        upload_directory: share.upload_directory.clone(),
-                        max_upload_mb: share.max_upload_mb,
-                        max_total_upload_mb: share.max_total_upload_mb,
-                        allowed_ips: share.allowed_ips.clone(),
-                        access_logs: file_share::get_access_logs(100),
-                    }
-                });
-                let mut tunnel_view = tunnel.clone();
-                if let Some(share) = tunnel_view.file_share.as_mut() {
-                    // The token is a bearer secret. The UI only receives the complete share URL.
-                    share.token.clear();
-                }
                 let view = TunnelDetailView {
-                    tunnel: tunnel_view,
+                    tunnel,
                     status,
                     conns,
                     services: service_views,
-                    file_share: file_share_view,
                     error_message: err_msg,
                     config_path: config_manager::config_yaml_path()
                         .to_string_lossy()
@@ -285,25 +204,10 @@ impl CloudflareTunnelPlugin {
                     domain,
                     created_at: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
                     services: existing_services,
-                    file_share: existing_tunnel.and_then(|tunnel| tunnel.file_share),
                 };
                 config_manager::save_tunnel(&record)?;
 
                 Ok(Value::Null)
-            }
-
-            Some("pick_file_share_directory") => {
-                let kind = request
-                    .payload
-                    .get("kind")
-                    .and_then(Value::as_str)
-                    .unwrap_or("share");
-                let title = match kind {
-                    "share" => "选择共享文件夹",
-                    "upload" => "选择上传文件夹",
-                    _ => return Err("未知的文件夹选择类型".into()),
-                };
-                Ok(json!(pick_file_share_directory(title)?))
             }
 
             Some("scan_credentials") => {
@@ -340,6 +244,7 @@ impl CloudflareTunnelPlugin {
                         hostname: sub,
                         service: norm_service,
                         enabled: s.enabled,
+                        disable_chunked_encoding: s.disable_chunked_encoding,
                     });
                 }
 
@@ -375,176 +280,6 @@ impl CloudflareTunnelPlugin {
                 Ok(Value::Null)
             }
 
-            Some("save_file_share") => {
-                let mut tunnel = config_manager::load_tunnel()?;
-                let was_running = file_share::is_running();
-                let previous_tunnel = tunnel.clone();
-                let previous_share = tunnel.file_share.clone();
-                let previous_config = fs::read(config_manager::config_yaml_path()).ok();
-                let mut share = previous_share.clone().unwrap_or_default();
-                share.enabled = was_running;
-                if let Some(port) = request.payload.get("port").and_then(Value::as_u64) {
-                    if !(1024..=65535).contains(&port) {
-                        return Err("本机文件服务端口必须在 1024 到 65535 之间".into());
-                    }
-                    share.port = port as u16;
-                }
-                share.lan_enabled = request
-                    .payload
-                    .get("lan_enabled")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(share.lan_enabled);
-                share.directory = request
-                    .payload
-                    .get("directory")
-                    .and_then(Value::as_str)
-                    .unwrap_or(&share.directory)
-                    .trim()
-                    .to_string();
-                share.hostname = request
-                    .payload
-                    .get("hostname")
-                    .and_then(Value::as_str)
-                    .unwrap_or(&share.hostname)
-                    .trim()
-                    .trim_matches('.')
-                    .to_ascii_lowercase();
-                if !share.hostname.is_empty() {
-                    normalize_file_share_hostname(&share.hostname, &tunnel.domain)?;
-                }
-
-                if let Some(value) = request.payload.get("allowed_ips").and_then(Value::as_str) {
-                    share.allowed_ips = value
-                        .split(|character| character == '\n' || character == ',')
-                        .map(str::trim)
-                        .filter(|entry| !entry.is_empty())
-                        .map(str::to_string)
-                        .collect();
-                }
-                file_share::validate_allowed_ips(&share.allowed_ips)?;
-
-                share.upload_enabled = request
-                    .payload
-                    .get("upload_enabled")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(share.upload_enabled);
-                share.upload_directory = request
-                    .payload
-                    .get("upload_directory")
-                    .and_then(Value::as_str)
-                    .unwrap_or(&share.upload_directory)
-                    .trim()
-                    .to_string();
-                if let Some(max_upload_mb) =
-                    request.payload.get("max_upload_mb").and_then(Value::as_u64)
-                {
-                    if !(1..=1024).contains(&max_upload_mb) {
-                        return Err("单个上传文件大小限制必须在 1 到 1024 MB 之间".into());
-                    }
-                    share.max_upload_mb = max_upload_mb as u32;
-                }
-                if let Some(max_total_upload_mb) = request
-                    .payload
-                    .get("max_total_upload_mb")
-                    .and_then(Value::as_u64)
-                {
-                    if !(1..=8192).contains(&max_total_upload_mb) {
-                        return Err("上传目录总量上限必须在 1 到 8192 MB 之间".into());
-                    }
-                    share.max_total_upload_mb = max_total_upload_mb as u32;
-                }
-
-                let rotate_token = request
-                    .payload
-                    .get("rotate_token")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
-                if rotate_token
-                    || share.token.len() != 32
-                    || !share.token.bytes().all(|byte| byte.is_ascii_hexdigit())
-                {
-                    share.token = uuid::Uuid::new_v4().simple().to_string();
-                }
-                if was_running {
-                    if share.directory.is_empty() {
-                        return Err("请先填写要共享的文件夹路径".into());
-                    }
-                    let root = fs::canonicalize(&share.directory)
-                        .map_err(|error| format!("共享目录无法访问：{error}"))?;
-                    if !root.is_dir() {
-                        return Err("共享路径不是一个目录".into());
-                    }
-                    share.directory = root.to_string_lossy().into_owned();
-                }
-                if let Err(error) = file_share::start(&mut share) {
-                    if was_running {
-                        if let Some(mut previous) = previous_share.clone() {
-                            let _ = file_share::start(&mut previous);
-                        }
-                    }
-                    return Err(error);
-                }
-                tunnel.file_share = Some(share);
-                let save_result = (|| {
-                    if was_running {
-                        if let Some(previous) = previous_share.as_ref() {
-                            if !same_tunnel_hostname(
-                                &previous.hostname,
-                                &tunnel.file_share.as_ref().unwrap().hostname,
-                                &tunnel.domain,
-                            ) {
-                                set_file_share_route(
-                                    &mut tunnel,
-                                    &previous.hostname,
-                                    previous.port,
-                                    false,
-                                )?;
-                            }
-                        }
-                        let (hostname, port) = tunnel
-                            .file_share
-                            .as_ref()
-                            .map(|share| (share.hostname.clone(), share.port))
-                            .ok_or_else(|| "文件服务配置不存在".to_string())?;
-                        if !hostname.is_empty() {
-                            set_file_share_route(&mut tunnel, &hostname, port, true)?;
-                        }
-                        config_manager::save_tunnel(&tunnel)
-                    } else {
-                        config_manager::save_tunnel_record_only(&tunnel)
-                    }
-                })();
-                if let Err(error) = save_result {
-                    if was_running {
-                        if let Some(mut previous) = previous_share {
-                            let _ = file_share::start(&mut previous);
-                        } else {
-                            file_share::stop();
-                        }
-                    }
-                    let _ = config_manager::save_tunnel(&previous_tunnel);
-                    return Err(error);
-                }
-                if was_running
-                    && (tunnel.services != previous_tunnel.services
-                        || active_tunnel_config_changed(previous_config))
-                    && process_manager::is_cloudflared_running_globally()
-                {
-                    process_manager::restart_tunnel()?;
-                }
-                Ok(Value::Null)
-            }
-
-            Some("start_file_share") => {
-                start_file_share()?;
-                Ok(Value::Null)
-            }
-
-            Some("stop_file_share") => {
-                stop_file_share()?;
-                Ok(Value::Null)
-            }
-
             Some("start") => {
                 process_manager::start_tunnel()?;
                 Ok(Value::Null)
@@ -577,7 +312,6 @@ impl CloudflareTunnelPlugin {
 
             Some("reset_tunnel") => {
                 let stop_result = process_manager::stop_tunnel();
-                file_share::stop();
                 stop_result?;
                 config_manager::delete_tunnel_data()?;
                 Ok(Value::Null)
@@ -623,44 +357,11 @@ impl Plugin for CloudflareTunnelPlugin {
     }
 
     fn handle(&mut self, request: PluginRequest, context: &PluginContext) -> PluginResponse {
-        if matches!(request.kind, PluginRequestKind::Activate) && config_manager::has_tunnel() {
-            let result = config_manager::load_tunnel().and_then(|mut tunnel| {
-                file_share::stop();
-                let previous_share_state = tunnel.file_share.as_mut().and_then(|share| {
-                    if share.enabled {
-                        share.enabled = false;
-                        Some((share.hostname.clone(), share.port))
-                    } else {
-                        None
-                    }
-                });
-                if let Some((hostname, port)) = previous_share_state {
-                    set_file_share_route(&mut tunnel, &hostname, port, false)?;
-                    config_manager::save_tunnel(&tunnel)?;
-                }
-                Ok(())
-            });
-            if let Err(message) = result {
-                return PluginResponse {
-                    request_id: request.request_id,
-                    plugin_id: request.plugin_id,
-                    ok: false,
-                    result: Value::Null,
-                    error: Some(PluginError {
-                        code: ErrorCode::Internal,
-                        message,
-                    }),
-                };
-            }
-            return success_response(&request, Value::Null);
-        }
-
         if matches!(
             request.kind,
             PluginRequestKind::Deactivate | PluginRequestKind::Shutdown
         ) {
             let _ = process_manager::stop_tunnel();
-            file_share::stop();
             return success_response(&request, Value::Null);
         }
 
@@ -682,258 +383,6 @@ impl Plugin for CloudflareTunnelPlugin {
             },
         }
     }
-}
-
-fn pick_file_share_directory(title: &str) -> Result<Option<String>, String> {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        use std::process::Command;
-
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        let title = title.replace('\'', "''");
-        let script = format!(
-            r#"
-Add-Type -AssemblyName System.Windows.Forms
-$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
-$dialog.Description = '{title}'
-$dialog.ShowNewFolderButton = $true
-if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{
-    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-    Write-Output $dialog.SelectedPath
-}}
-"#
-        );
-        let output = Command::new("powershell")
-            .creation_flags(CREATE_NO_WINDOW)
-            .args(["-NoProfile", "-NonInteractive", "-Command"])
-            .arg(script)
-            .output()
-            .map_err(|error| format!("启动文件夹选择器失败：{error}"))?;
-        if !output.status.success() {
-            let message = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            return Err(if message.is_empty() {
-                "文件夹选择器启动失败".into()
-            } else {
-                message
-            });
-        }
-        let selected = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        Ok((!selected.is_empty()).then_some(selected))
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = title;
-        Err("当前系统暂不支持文件夹选择器".into())
-    }
-}
-
-fn normalize_file_share_hostname(
-    hostname: &str,
-    tunnel_domain: &str,
-) -> Result<(String, String), String> {
-    let hostname = hostname.trim().trim_matches('.').to_ascii_lowercase();
-    let tunnel_domain = tunnel_domain.trim().trim_matches('.').to_ascii_lowercase();
-    if hostname.is_empty() || tunnel_domain.is_empty() {
-        return Err("请填写当前 Tunnel 根域名下的完整转发域名".into());
-    }
-
-    let suffix = format!(".{tunnel_domain}");
-    let subdomain = hostname
-        .strip_suffix(&suffix)
-        .ok_or_else(|| format!("转发域名必须位于 Tunnel 根域名 {tunnel_domain} 之下"))?
-        .to_string();
-    if hostname.len() > 253
-        || hostname.split('.').any(|label| {
-            label.is_empty()
-                || label.len() > 63
-                || label.starts_with('-')
-                || label.ends_with('-')
-                || !label
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-        })
-    {
-        return Err("转发域名格式无效，请填写完整的 DNS 域名".into());
-    }
-
-    Ok((hostname, subdomain))
-}
-
-fn same_tunnel_hostname(first: &str, second: &str, tunnel_domain: &str) -> bool {
-    match (
-        normalize_file_share_hostname(first, tunnel_domain),
-        normalize_file_share_hostname(second, tunnel_domain),
-    ) {
-        (Ok((first, _)), Ok((second, _))) => first == second,
-        _ => first.trim().eq_ignore_ascii_case(second.trim()),
-    }
-}
-
-fn file_share_route_is_enabled(tunnel: &TunnelRecord, hostname: &str, port: u16) -> bool {
-    let Ok((full_hostname, _)) = normalize_file_share_hostname(hostname, &tunnel.domain) else {
-        return false;
-    };
-    tunnel.services.iter().any(|service| {
-        service.enabled
-            && config_manager::full_hostname(&service.hostname, &tunnel.domain)
-                .trim_matches('.')
-                .eq_ignore_ascii_case(&full_hostname)
-            && config_manager::extract_port(&service.service) == port
-    })
-}
-
-fn set_file_share_route(
-    tunnel: &mut TunnelRecord,
-    hostname: &str,
-    port: u16,
-    enabled: bool,
-) -> Result<(), String> {
-    if !enabled && hostname.trim().is_empty() {
-        return Ok(());
-    }
-    let (full_hostname, subdomain) = normalize_file_share_hostname(hostname, &tunnel.domain)?;
-    let matching_indices: Vec<usize> = tunnel
-        .services
-        .iter()
-        .enumerate()
-        .filter_map(|(index, service)| {
-            let candidate = service
-                .hostname
-                .trim()
-                .trim_matches('.')
-                .to_ascii_lowercase();
-            let domain = tunnel.domain.trim().trim_matches('.').to_ascii_lowercase();
-            let suffix = format!(".{domain}");
-            let candidate_full = if candidate.ends_with(&suffix) {
-                candidate
-            } else {
-                format!("{candidate}.{domain}")
-            };
-            (candidate_full == full_hostname).then_some(index)
-        })
-        .collect();
-
-    if !enabled {
-        for index in matching_indices {
-            tunnel.services[index].enabled = false;
-        }
-        return Ok(());
-    }
-
-    let target = format!("http://127.0.0.1:{port}");
-    if let Some(&primary_index) = matching_indices.first() {
-        for index in matching_indices {
-            let service = &mut tunnel.services[index];
-            if index == primary_index {
-                service.hostname = subdomain.clone();
-                service.service = target.clone();
-                service.enabled = true;
-                if service.name.trim().is_empty() {
-                    service.name = "文件服务".into();
-                }
-            } else {
-                service.enabled = false;
-            }
-        }
-    } else {
-        tunnel.services.push(ServiceRule {
-            id: uuid::Uuid::new_v4().to_string(),
-            name: "文件服务".into(),
-            hostname: subdomain,
-            service: target,
-            enabled: true,
-        });
-    }
-    Ok(())
-}
-
-fn start_file_share() -> Result<(), String> {
-    let mut tunnel = config_manager::load_tunnel()?;
-    let previous_tunnel = tunnel.clone();
-    let previous_config = fs::read(config_manager::config_yaml_path()).ok();
-    let previous_share = tunnel.file_share.clone();
-    let mut share = previous_share.clone().unwrap_or_default();
-    share.enabled = true;
-    if !share.hostname.trim().is_empty() {
-        normalize_file_share_hostname(&share.hostname, &tunnel.domain)?;
-    }
-
-    if let Err(error) = file_share::start(&mut share) {
-        if let Some(mut previous) = previous_share {
-            if previous.enabled {
-                let _ = file_share::start(&mut previous);
-            }
-        }
-        return Err(error);
-    }
-    let hostname = share.hostname.clone();
-    let port = share.port;
-    tunnel.file_share = Some(share);
-    if !hostname.is_empty() {
-        if let Err(error) = set_file_share_route(&mut tunnel, &hostname, port, true) {
-            if let Some(mut previous) = previous_share {
-                if previous.enabled {
-                    let _ = file_share::start(&mut previous);
-                } else {
-                    file_share::stop();
-                }
-            } else {
-                file_share::stop();
-            }
-            return Err(error);
-        }
-    }
-    if let Err(error) = config_manager::save_tunnel(&tunnel) {
-        if let Some(mut previous) = previous_share {
-            if previous.enabled {
-                let _ = file_share::start(&mut previous);
-            } else {
-                file_share::stop();
-            }
-        } else {
-            file_share::stop();
-        }
-        let _ = config_manager::save_tunnel(&previous_tunnel);
-        return Err(error);
-    }
-    if (tunnel.services != previous_tunnel.services
-        || active_tunnel_config_changed(previous_config))
-        && process_manager::is_cloudflared_running_globally()
-    {
-        process_manager::restart_tunnel()?;
-    }
-    Ok(())
-}
-
-fn stop_file_share() -> Result<(), String> {
-    let mut tunnel = config_manager::load_tunnel()?;
-    let previous_services = tunnel.services.clone();
-    let previous_config = fs::read(config_manager::config_yaml_path()).ok();
-    file_share::stop();
-    let route = if let Some(share) = tunnel.file_share.as_mut() {
-        share.enabled = false;
-        Some((share.hostname.clone(), share.port))
-    } else {
-        None
-    };
-    if let Some((hostname, port)) = route {
-        if let Err(error) = set_file_share_route(&mut tunnel, &hostname, port, false) {
-            let _ = config_manager::save_tunnel_record_only(&tunnel);
-            return Err(error);
-        }
-        config_manager::save_tunnel(&tunnel)?;
-    }
-    if (tunnel.services != previous_services || active_tunnel_config_changed(previous_config))
-        && process_manager::is_cloudflared_running_globally()
-    {
-        process_manager::restart_tunnel()?;
-    }
-    Ok(())
-}
-
-fn active_tunnel_config_changed(previous_config: Option<Vec<u8>>) -> bool {
-    fs::read(config_manager::config_yaml_path()).ok() != previous_config
 }
 
 fn string_field(payload: &Value, key: &str) -> Result<String, String> {

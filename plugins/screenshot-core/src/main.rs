@@ -12,6 +12,8 @@ use std::sync::{Arc, Mutex};
 #[cfg(windows)]
 mod capture;
 #[cfg(windows)]
+mod hdr_capture;
+#[cfg(windows)]
 mod export;
 mod host_services;
 mod model;
