@@ -1,4 +1,8 @@
 use crate::models::FileShareConfig;
+use chrono::Local;
+use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream, UdpSocket};
@@ -6,9 +10,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const MAX_ACTIVE_REQUESTS: usize = 32;
+const MAX_ACCESS_LOG_ENTRIES: usize = 100;
 const MAX_HEADER_BYTES: usize = 16 * 1024;
 const MAX_UPLOAD_BYTES: u64 = 1024 * 1024 * 1024;
 const CLIENT_READ_TIMEOUT: Duration = Duration::from_secs(5);
@@ -55,6 +60,209 @@ impl UploadQuota {
 
 static SERVER: OnceLock<Mutex<Option<RunningServer>>> = OnceLock::new();
 static LIFECYCLE: OnceLock<Mutex<()>> = OnceLock::new();
+static ACCESS_LOGS: OnceLock<Mutex<VecDeque<FileShareAccessLog>>> = OnceLock::new();
+
+thread_local! {
+    static ACTIVE_ACCESS_LOG: RefCell<Option<AccessLogDraft>> = const { RefCell::new(None) };
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileShareAccessLog {
+    pub request_id: String,
+    pub timestamp: String,
+    pub client_ip: String,
+    pub method: String,
+    pub path: String,
+    pub protocol: String,
+    pub host: String,
+    pub status_code: u16,
+    pub status_text: String,
+    pub request_content_length: Option<u64>,
+    pub content_type: String,
+    pub user_agent: String,
+    pub referer: String,
+    pub response_content_type: String,
+    pub error: String,
+    pub expected_bytes: Option<u64>,
+    pub received_bytes: u64,
+    pub sent_bytes: u64,
+    pub duration_ms: u64,
+}
+
+struct AccessLogDraft {
+    entry: FileShareAccessLog,
+    started: Instant,
+    should_record: bool,
+}
+
+struct AccessLogScope;
+
+impl AccessLogScope {
+    fn begin(peer_addr: SocketAddr) -> Self {
+        let entry = FileShareAccessLog {
+            request_id: uuid::Uuid::new_v4().simple().to_string()[..12].to_string(),
+            timestamp: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+            client_ip: peer_addr.ip().to_string(),
+            method: String::new(),
+            path: String::new(),
+            protocol: String::new(),
+            host: String::new(),
+            status_code: 0,
+            status_text: String::new(),
+            request_content_length: None,
+            content_type: String::new(),
+            user_agent: String::new(),
+            referer: String::new(),
+            response_content_type: String::new(),
+            error: String::new(),
+            expected_bytes: None,
+            received_bytes: 0,
+            sent_bytes: 0,
+            duration_ms: 0,
+        };
+        ACTIVE_ACCESS_LOG.with(|active| {
+            *active.borrow_mut() = Some(AccessLogDraft {
+                entry,
+                started: Instant::now(),
+                should_record: false,
+            });
+        });
+        Self
+    }
+}
+
+impl Drop for AccessLogScope {
+    fn drop(&mut self) {
+        let draft = ACTIVE_ACCESS_LOG.with(|active| active.borrow_mut().take());
+        if let Some(mut draft) = draft.filter(|draft| draft.should_record) {
+            draft.entry.duration_ms = draft
+                .started
+                .elapsed()
+                .as_millis()
+                .min(u128::from(u64::MAX)) as u64;
+            let logs = ACCESS_LOGS.get_or_init(|| Mutex::new(VecDeque::new()));
+            let mut logs = logs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            while logs.len() >= MAX_ACCESS_LOG_ENTRIES {
+                logs.pop_front();
+            }
+            logs.push_back(draft.entry);
+        }
+    }
+}
+
+pub fn get_access_logs(limit: usize) -> Vec<FileShareAccessLog> {
+    let Some(logs) = ACCESS_LOGS.get() else {
+        return Vec::new();
+    };
+    let logs = logs
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    logs.iter()
+        .rev()
+        .take(limit.min(MAX_ACCESS_LOG_ENTRIES))
+        .cloned()
+        .collect()
+}
+
+fn update_active_access_log(update: impl FnOnce(&mut AccessLogDraft)) {
+    ACTIVE_ACCESS_LOG.with(|active| {
+        if let Some(draft) = active.borrow_mut().as_mut() {
+            update(draft);
+        }
+    });
+}
+
+fn set_access_request(request: &RequestHead, target: &str, token: &str, client_ip: IpAddr) {
+    update_active_access_log(|draft| {
+        draft.should_record = true;
+        draft.entry.client_ip = client_ip.to_string();
+        draft.entry.method = request.method.clone();
+        draft.entry.path = redact_share_path(target, token);
+        draft.entry.protocol = request.protocol.clone();
+        draft.entry.host = sanitize_access_value(&request.host, token, 256);
+        draft.entry.request_content_length = request.content_length.map(|length| length as u64);
+        draft.entry.content_type = sanitize_access_value(&request.content_type, token, 256);
+        draft.entry.user_agent = sanitize_access_value(&request.user_agent, token, 512);
+        draft.entry.referer = sanitize_access_value(&request.referer, token, 1024);
+    });
+}
+
+fn redact_share_path(target: &str, token: &str) -> String {
+    let path = target.split('?').next().unwrap_or_default();
+    let Some(path_without_slash) = path.strip_prefix('/') else {
+        return sanitize_access_value(path, token, 2048);
+    };
+    let (first_segment, rest) = path_without_slash
+        .split_once('/')
+        .unwrap_or((path_without_slash, ""));
+    if first_segment == token {
+        format!("/{}", sanitize_access_value(rest, token, 2048))
+    } else {
+        sanitize_access_value(path, token, 2048)
+    }
+}
+
+fn sanitize_access_value(value: &str, token: &str, max_chars: usize) -> String {
+    let value: String = value
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(max_chars)
+        .collect();
+    if token.is_empty() {
+        value
+    } else {
+        value.replace(token, "[redacted]")
+    }
+}
+
+fn set_access_expected_bytes(bytes: Option<u64>) {
+    update_active_access_log(|draft| draft.entry.expected_bytes = bytes);
+}
+
+fn set_access_status(status: &str) {
+    let (code, status_text) = status.split_once(' ').unwrap_or((status, ""));
+    let code = code.parse::<u16>().unwrap_or_default();
+    update_active_access_log(|draft| {
+        draft.should_record = true;
+        draft.entry.status_code = code;
+        draft.entry.status_text = status_text.to_string();
+    });
+}
+
+fn set_access_response_content_type(content_type: &str) {
+    update_active_access_log(|draft| draft.entry.response_content_type = content_type.to_string());
+}
+
+fn set_access_error(error: &str) {
+    update_active_access_log(|draft| {
+        draft.should_record = true;
+        draft.entry.error = sanitize_access_value(error, "", 1024)
+    });
+}
+
+fn add_access_received_bytes(bytes: usize) {
+    update_active_access_log(|draft| {
+        draft.entry.received_bytes = draft.entry.received_bytes.saturating_add(bytes as u64)
+    });
+}
+
+fn current_access_received_bytes() -> u64 {
+    ACTIVE_ACCESS_LOG.with(|active| {
+        active
+            .borrow()
+            .as_ref()
+            .map(|draft| draft.entry.received_bytes)
+            .unwrap_or_default()
+    })
+}
+
+fn add_access_sent_bytes(bytes: usize) {
+    update_active_access_log(|draft| {
+        draft.entry.sent_bytes = draft.entry.sent_bytes.saturating_add(bytes as u64)
+    });
+}
 
 fn server_state() -> MutexGuard<'static, Option<RunningServer>> {
     SERVER
@@ -368,6 +576,14 @@ fn serve_loop(
         };
 
         if let Some((stream, peer_addr)) = accepted {
+            // On Windows, accepted sockets can inherit the listener's nonblocking
+            // mode. Request body reads then fail with WSAEWOULDBLOCK (10035) as
+            // soon as the currently buffered data has been consumed. Keep the
+            // accept loop nonblocking, but handle each client with blocking I/O.
+            if stream.set_nonblocking(false).is_err() {
+                continue;
+            }
+
             if active.fetch_add(1, Ordering::Relaxed) >= MAX_ACTIVE_REQUESTS {
                 active.fetch_sub(1, Ordering::Relaxed);
                 let _ = stream.set_write_timeout(Some(CLIENT_READ_TIMEOUT));
@@ -479,12 +695,14 @@ fn serve_request(
     lan_networks: &[IpNetwork],
     stop: &AtomicBool,
 ) -> io::Result<()> {
+    let _access_log = AccessLogScope::begin(peer_addr);
     stream.set_read_timeout(Some(CLIENT_READ_TIMEOUT))?;
     stream.set_write_timeout(Some(CLIENT_WRITE_TIMEOUT))?;
 
     let request = match read_request_head(&mut stream) {
         Ok(request) => request,
         Err(RequestReadError::TooLarge) => {
+            set_access_error("Request headers exceeded the 16 KiB limit");
             return send_response(
                 stream,
                 "431 Request Header Fields Too Large",
@@ -494,8 +712,13 @@ fn serve_request(
                 stop,
             );
         }
-        Err(RequestReadError::Io(error)) => return Err(error),
+        Err(RequestReadError::Io(error)) => {
+            set_access_error(&format!("Request read failed: {error}"));
+            return Err(error);
+        }
+        Err(RequestReadError::ConnectionClosed) => return Ok(()),
         Err(RequestReadError::Malformed) => {
+            set_access_error("Malformed HTTP request line or headers");
             return send_response(
                 stream,
                 "400 Bad Request",
@@ -513,6 +736,7 @@ fn serve_request(
     } else {
         peer_addr.ip()
     };
+    set_access_request(&request, &request.target, token, client_ip);
     let explicitly_allowed = !allowed_ips.is_empty()
         && allowed_ips
             .iter()
@@ -672,6 +896,8 @@ fn serve_request(
         .file_name()
         .map(|value| safe_filename(&value.to_string_lossy()))
         .unwrap_or_else(|| "download".into());
+    set_access_status("200 OK");
+    set_access_response_content_type(content_type);
     write!(
         stream,
         "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: {}\r\nContent-Disposition: attachment; filename=\"{}\"\r\nConnection: close\r\nX-Content-Type-Options: nosniff\r\nCache-Control: no-store\r\n\r\n",
@@ -693,6 +919,7 @@ fn serve_request(
             break;
         }
         stream.write_all(&buffer[..read])?;
+        add_access_sent_bytes(read);
     }
     Ok(())
 }
@@ -764,6 +991,10 @@ fn serve_upload_request(
             stop,
         );
     };
+    set_access_expected_bytes(match body {
+        UploadBody::Fixed(bytes) => Some(bytes),
+        UploadBody::Chunked => None,
+    });
     if matches!(body, UploadBody::Fixed(size) if size > max_upload_bytes || size > MAX_UPLOAD_BYTES)
     {
         return send_response(
@@ -903,27 +1134,41 @@ fn save_upload(
         if matches!(error, UploadBodyError::Stopped) || stop.load(Ordering::Relaxed) {
             return Ok(());
         }
-        let (status, message) = match error {
+        let received_bytes = current_access_received_bytes();
+        let (status, message): (&str, String) = match error {
             UploadBodyError::Request(error) if error.kind() == io::ErrorKind::TimedOut => {
-                ("408 Request Timeout", "Upload timed out")
+                ("408 Request Timeout", "Upload timed out".into())
             }
-            UploadBodyError::Request(_) | UploadBodyError::InvalidFraming => {
-                ("400 Bad Request", "Invalid or incomplete upload body")
+            UploadBodyError::Request(error) => (
+                "400 Bad Request",
+                format!("Upload body read failed after {received_bytes} bytes: {error}"),
+            ),
+            UploadBodyError::InvalidFraming => {
+                let message = match body {
+                    UploadBody::Fixed(expected_bytes) => format!(
+                        "Invalid or incomplete upload body: received {received_bytes} of {expected_bytes} bytes"
+                    ),
+                    UploadBody::Chunked => format!(
+                        "Invalid or incomplete chunked upload body after {received_bytes} bytes"
+                    ),
+                };
+                ("400 Bad Request", message)
             }
             UploadBodyError::TooLarge => (
                 "413 Content Too Large",
-                "File exceeds the configured upload limit",
+                "File exceeds the configured upload limit".into(),
             ),
             UploadBodyError::QuotaExceeded => (
                 "507 Insufficient Storage",
-                "The upload directory has reached its configured size limit",
+                "The upload directory has reached its configured size limit".into(),
             ),
             UploadBodyError::Storage => (
                 "507 Insufficient Storage",
-                "Could not write the uploaded file",
+                "Could not write the uploaded file".into(),
             ),
             UploadBodyError::Stopped => return Ok(()),
         };
+        set_access_error(&message);
         return send_response(
             stream,
             status,
@@ -988,14 +1233,14 @@ fn copy_fixed_upload(
     let mut buffer = [0u8; 32 * 1024];
     while remaining > 0 && !stop.load(Ordering::Relaxed) {
         let read_limit = buffer.len().min(remaining as usize);
-        let count = stream
-            .read(&mut buffer[..read_limit])
+        let count = read_retry_interrupted(stream, &mut buffer[..read_limit])
             .map_err(UploadBodyError::Request)?;
         if count == 0 {
             return Err(UploadBodyError::InvalidFraming);
         }
         file.write_all(&buffer[..count])
             .map_err(|_| UploadBodyError::Storage)?;
+        add_access_received_bytes(count);
         remaining -= count as u64;
     }
     if stop.load(Ordering::Relaxed) {
@@ -1065,14 +1310,14 @@ fn copy_chunked_upload(
                 return Err(UploadBodyError::Stopped);
             }
             let read_limit = buffer.len().min(remaining as usize);
-            let count = stream
-                .read(&mut buffer[..read_limit])
+            let count = read_retry_interrupted(stream, &mut buffer[..read_limit])
                 .map_err(UploadBodyError::Request)?;
             if count == 0 {
                 return Err(UploadBodyError::InvalidFraming);
             }
             file.write_all(&buffer[..count])
                 .map_err(|_| UploadBodyError::Storage)?;
+            add_access_received_bytes(count);
             remaining -= count as u64;
         }
         let mut crlf = [0u8; 2];
@@ -1081,6 +1326,15 @@ fn copy_chunked_upload(
             .map_err(UploadBodyError::Request)?;
         if crlf != *b"\r\n" {
             return Err(UploadBodyError::InvalidFraming);
+        }
+    }
+}
+
+fn read_retry_interrupted(stream: &mut TcpStream, buffer: &mut [u8]) -> io::Result<usize> {
+    loop {
+        match stream.read(buffer) {
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            result => return result,
         }
     }
 }
@@ -1172,6 +1426,11 @@ h1 { margin: 0; font-size: clamp(26px, 4vw, 36px); line-height: 1.2; letter-spac
 .upload-result.success { background: #eaf8f1; color: #146b49; }
 .upload-result.error { background: #fff0f0; color: #a23131; }
 .upload-result.progress { background: var(--accent-soft); color: #274cc0; }
+.upload-progress-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.upload-progress-name { min-width: 0; overflow-wrap: anywhere; font-weight: 650; }
+.upload-progress-meta { flex: none; color: var(--muted); font-size: 11px; text-align: right; }
+.upload-progress-track { height: 7px; margin-top: 8px; overflow: hidden; border-radius: 999px; background: color-mix(in srgb, var(--text) 12%, transparent); }
+.upload-progress-fill { width: 0; height: 100%; border-radius: inherit; background: var(--accent); transition: width .12s linear; }
 .list-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 17px 20px; border-bottom: 1px solid var(--line); }
 .item-count { color: var(--muted); font-size: 11px; }
 .file-list { padding: 7px; }
@@ -1200,6 +1459,7 @@ h1 { margin: 0; font-size: clamp(26px, 4vw, 36px); line-height: 1.2; letter-spac
   .upload-result.success { background: #18372c; color: #8be0b7; }
   .upload-result.error { background: #3c2529; color: #ffaaaa; }
   .upload-result.progress { background: #222f4b; color: #b7c8ff; }
+  .upload-progress-track { background: rgba(255,255,255,.12); }
   .primary-button:disabled { border-color: #445168; background: #445168; color: #bbc5d4; }
 }
 @media (max-width: 620px) {
@@ -1211,6 +1471,8 @@ h1 { margin: 0; font-size: clamp(26px, 4vw, 36px); line-height: 1.2; letter-spac
   .upload-heading { flex-direction: column; gap: 9px; }
   .upload-limit { align-self: flex-start; }
   .upload-controls { grid-template-columns: 1fr; }
+  .upload-progress-head { flex-direction: column; gap: 4px; }
+  .upload-progress-meta { text-align: left; }
   .primary-button { width: 100%; }
   .list-heading { padding: 15px 16px; }
   .file-list { padding: 6px; }
@@ -1238,8 +1500,12 @@ const button=document.getElementById('upload');
 const status=document.getElementById('status');
 const maxUploadBytes=MAX_UPLOAD_BYTES;
 function report(message,state=''){const row=document.createElement('p');row.className='upload-result '+state;row.textContent=message;status.appendChild(row)}
+function formatBytes(value){if(!Number.isFinite(value)||value<=0)return '0 B';const units=['B','KB','MB','GB','TB'];const tier=Math.min(Math.floor(Math.log(value)/Math.log(1024)),units.length-1);const amount=value/Math.pow(1024,tier);return amount.toFixed(tier===0||amount>=100?0:1)+' '+units[tier]}
+function formatRemaining(seconds){if(!Number.isFinite(seconds)||seconds<0)return '计算中';if(seconds<60)return Math.ceil(seconds)+' 秒';const minutes=Math.floor(seconds/60);const rest=Math.ceil(seconds%60);if(minutes<60)return minutes+' 分 '+rest+' 秒';return Math.floor(minutes/60)+' 小时 '+(minutes%60)+' 分'}
+function createProgressRow(file,index,count){const row=document.createElement('div');row.className='upload-result progress';const head=document.createElement('div');head.className='upload-progress-head';const name=document.createElement('span');name.className='upload-progress-name';name.textContent='上传中（'+(index+1)+'/'+count+'）：'+file.name;const meta=document.createElement('span');meta.className='upload-progress-meta';meta.textContent='等待发送 · 0 B / '+formatBytes(file.size);head.append(name,meta);const track=document.createElement('div');track.className='upload-progress-track';track.setAttribute('role','progressbar');track.setAttribute('aria-label','上传 '+file.name);track.setAttribute('aria-valuemin','0');track.setAttribute('aria-valuemax','100');track.setAttribute('aria-valuenow','0');const fill=document.createElement('div');fill.className='upload-progress-fill';track.append(fill);row.append(head,track);status.appendChild(row);return{row,name,meta,track,fill}}
+function uploadFile(file,url,onProgress){return new Promise((resolve,reject)=>{const request=new XMLHttpRequest();request.open('PUT',url);request.upload.addEventListener('progress',onProgress);request.addEventListener('load',()=>resolve({status:request.status,body:request.responseText}));request.addEventListener('error',()=>reject(new Error('网络连接中断，未收到服务器响应')));request.addEventListener('abort',()=>reject(new Error('上传已取消')));request.send(file)})}
 input.addEventListener('change',()=>{const files=Array.from(input.files||[]);fileLabel.textContent=files.length?files.map(file=>file.name).join('、'):'点击选择文件或从手机中选取';button.disabled=files.length===0;status.replaceChildren()});
-button.addEventListener('click',async()=>{const files=Array.from(input.files||[]);if(!files.length){report('请先选择文件。','error');return}status.replaceChildren();button.disabled=true;button.textContent='正在上传…';const token=location.pathname.split('/').filter(Boolean)[0];const base='/'+token+'/';try{for(let index=0;index<files.length;index++){const file=files[index];if(file.size>maxUploadBytes){report('已跳过 '+file.name+'：超过单文件上限。','error');continue}report('上传中（'+(index+1)+'/'+files.length+'）：'+file.name,'progress');try{const response=await fetch(new URL(base+encodeURIComponent(file.name),location.origin),{method:'PUT',body:file});const message=await response.text();let detail=message.trim();if(!response.ok&&/<!doctype html/i.test(message)){const page=new DOMParser().parseFromString(message,'text/html');const code=page.querySelector('.code-label')?.textContent?.trim()||('HTTP '+response.status);const ray=message.match(/Cloudflare Ray ID:\s*(?:<strong[^>]*>)?([^<\s]+)/i)?.[1];detail=[code,page.title?.trim(),ray?'Ray ID '+ray:''].filter(Boolean).join(' · ')}report((response.ok?'上传完成：':'上传失败：')+file.name+(detail?' · '+detail:''),response.ok?'success':'error')}catch(error){report('上传失败：'+file.name+' · '+String(error),'error')}}}finally{button.disabled=false;button.textContent='重新上传'}});
+button.addEventListener('click',async()=>{const files=Array.from(input.files||[]);if(!files.length){report('请先选择文件。','error');return}status.replaceChildren();button.disabled=true;input.disabled=true;button.textContent='正在上传…';const token=location.pathname.split('/').filter(Boolean)[0];const base='/'+token+'/';try{for(let index=0;index<files.length;index++){const file=files[index];if(file.size>maxUploadBytes){report('已跳过 '+file.name+'：超过单文件上限。','error');continue}const progress=createProgressRow(file,index,files.length);const startedAt=performance.now();try{const response=await uploadFile(file,new URL(base+encodeURIComponent(file.name),location.origin),event=>{const loaded=Math.min(event.loaded,file.size);const total=event.lengthComputable?event.total:file.size;const percent=total>0?Math.min(100,Math.floor(loaded/total*100)):0;const elapsed=Math.max((performance.now()-startedAt)/1000,0.001);const speed=loaded/elapsed;const remaining=speed>0&&total>loaded?(total-loaded)/speed:0;progress.fill.style.width=percent+'%';progress.track.setAttribute('aria-valuenow',String(percent));progress.meta.textContent='已发送 '+formatBytes(loaded)+' / '+formatBytes(total)+' · '+percent+'% · '+formatBytes(speed)+'/秒 · 剩余 '+formatRemaining(remaining)});let detail=response.body.trim();if(response.status<200||response.status>=300){if(/<!doctype html/i.test(response.body)){const page=new DOMParser().parseFromString(response.body,'text/html');const code=page.querySelector('.code-label')?.textContent?.trim()||('HTTP '+response.status);const ray=response.body.match(/Cloudflare Ray ID:\s*(?:<strong[^>]*>)?([^<\s]+)/i)?.[1];detail=[code,page.title?.trim(),ray?'Ray ID '+ray:''].filter(Boolean).join(' · ')}else if(!detail){detail='HTTP '+response.status}progress.row.className='upload-result error';progress.meta.textContent='上传失败 · '+detail}else{progress.row.className='upload-result success';progress.name.textContent='上传完成：'+file.name;progress.fill.style.width='100%';progress.track.setAttribute('aria-valuenow','100');progress.meta.textContent='完成 · '+formatBytes(file.size)}}catch(error){progress.row.className='upload-result error';progress.meta.textContent='上传失败 · '+String(error)}}}finally{button.disabled=false;input.disabled=false;button.textContent='重新上传'}});
 </script></section>"#;
 
 fn upload_panel(max_upload_bytes: u64, max_total_bytes: u64) -> String {
@@ -1258,14 +1524,20 @@ fn upload_panel(max_upload_bytes: u64, max_total_bytes: u64) -> String {
 struct RequestHead {
     method: String,
     target: String,
+    protocol: String,
+    host: String,
     content_length: Option<usize>,
     transfer_encoding: bool,
+    content_type: String,
+    user_agent: String,
+    referer: String,
     cf_connecting_ip: Option<IpAddr>,
 }
 
 enum RequestReadError {
     TooLarge,
     Malformed,
+    ConnectionClosed,
     Io(io::Error),
 }
 
@@ -1275,7 +1547,11 @@ fn read_request_head(stream: &mut TcpStream) -> Result<RequestHead, RequestReadE
     loop {
         let count = stream.read(&mut byte).map_err(RequestReadError::Io)?;
         if count == 0 {
-            return Err(RequestReadError::Malformed);
+            return Err(if bytes.is_empty() {
+                RequestReadError::ConnectionClosed
+            } else {
+                RequestReadError::Malformed
+            });
         }
         bytes.push(byte[0]);
         if let Some(end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
@@ -1293,9 +1569,11 @@ fn read_request_head(stream: &mut TcpStream) -> Result<RequestHead, RequestReadE
     let method = request.next().unwrap_or_default();
     let target = request.next().unwrap_or_default();
     let version = request.next().unwrap_or_default();
+    let extra = request.next();
     if method.is_empty()
         || target.is_empty()
         || !(version == "HTTP/1.0" || version == "HTTP/1.1")
+        || extra.is_some()
         || method.bytes().any(|byte| !byte.is_ascii_uppercase())
     {
         return Err(RequestReadError::Malformed);
@@ -1303,6 +1581,10 @@ fn read_request_head(stream: &mut TcpStream) -> Result<RequestHead, RequestReadE
     let mut content_length = None;
     let mut transfer_encoding = false;
     let mut cf_connecting_ip = None;
+    let mut host = String::new();
+    let mut content_type = String::new();
+    let mut user_agent = String::new();
+    let mut referer = String::new();
     for line in lines {
         let Some((name, value)) = line.split_once(':') else {
             return Err(RequestReadError::Malformed);
@@ -1329,6 +1611,14 @@ fn read_request_head(stream: &mut TcpStream) -> Result<RequestHead, RequestReadE
                     .parse::<IpAddr>()
                     .map_err(|_| RequestReadError::Malformed)?,
             );
+        } else if name.eq_ignore_ascii_case("host") {
+            host = value.to_string();
+        } else if name.eq_ignore_ascii_case("content-type") {
+            content_type = value.to_string();
+        } else if name.eq_ignore_ascii_case("user-agent") {
+            user_agent = value.to_string();
+        } else if name.eq_ignore_ascii_case("referer") {
+            referer = value.to_string();
         }
     }
     if transfer_encoding && content_length.is_some() {
@@ -1337,8 +1627,13 @@ fn read_request_head(stream: &mut TcpStream) -> Result<RequestHead, RequestReadE
     Ok(RequestHead {
         method: method.to_string(),
         target: target.to_string(),
+        protocol: version.to_string(),
+        host,
         content_length,
         transfer_encoding,
+        content_type,
+        user_agent,
+        referer,
         cf_connecting_ip,
     })
 }
@@ -1742,6 +2037,8 @@ fn send_response(
     head_only: bool,
     stop: &AtomicBool,
 ) -> io::Result<()> {
+    set_access_status(status);
+    set_access_response_content_type(content_type);
     write!(
         stream,
         "HTTP/1.1 {status}\r\nContent-Length: {}\r\nContent-Type: {content_type}\r\nConnection: close\r\nX-Content-Type-Options: nosniff\r\nCache-Control: no-store, no-transform\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'\r\n\r\n",
@@ -1749,6 +2046,7 @@ fn send_response(
     )?;
     if !head_only && !stop.load(Ordering::Relaxed) {
         stream.write_all(body)?;
+        add_access_sent_bytes(body.len());
     }
     Ok(())
 }

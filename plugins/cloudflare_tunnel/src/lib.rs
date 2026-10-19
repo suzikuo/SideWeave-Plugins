@@ -50,6 +50,7 @@ impl CloudflareTunnelPlugin {
                     "filesystem.read".into(),
                     "filesystem.write".into(),
                     "filesystem.external_read".into(),
+                    "system.file_picker".into(),
                     "process.spawn".into(),
                     "system.open_external".into(),
                     "network.connect".into(),
@@ -141,8 +142,20 @@ impl CloudflareTunnelPlugin {
                 let mut service_views = Vec::new();
                 for s in &tunnel.services {
                     let port = config_manager::extract_port(&s.service);
-                    let is_online = checker::is_local_port_listening(port);
                     let full_host = config_manager::full_hostname(&s.hostname, &tunnel.domain);
+                    let is_file_share_route = s.enabled
+                        && tunnel.file_share.as_ref().is_some_and(|share| {
+                            share.enabled
+                                && share.port == port
+                                && !share.hostname.trim().is_empty()
+                                && config_manager::full_hostname(&share.hostname, &tunnel.domain)
+                                    .eq_ignore_ascii_case(&full_host)
+                        });
+                    let is_online = if is_file_share_route {
+                        file_share::is_running()
+                    } else {
+                        checker::is_local_port_listening(port)
+                    };
                     service_views.push(ServiceView {
                         id: s.id.clone(),
                         name: s.name.clone(),
@@ -196,6 +209,7 @@ impl CloudflareTunnelPlugin {
                         max_upload_mb: share.max_upload_mb,
                         max_total_upload_mb: share.max_total_upload_mb,
                         allowed_ips: share.allowed_ips.clone(),
+                        access_logs: file_share::get_access_logs(100),
                     }
                 });
                 let mut tunnel_view = tunnel.clone();
@@ -278,6 +292,20 @@ impl CloudflareTunnelPlugin {
                 Ok(Value::Null)
             }
 
+            Some("pick_file_share_directory") => {
+                let kind = request
+                    .payload
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .unwrap_or("share");
+                let title = match kind {
+                    "share" => "选择共享文件夹",
+                    "upload" => "选择上传文件夹",
+                    _ => return Err("未知的文件夹选择类型".into()),
+                };
+                Ok(json!(pick_file_share_directory(title)?))
+            }
+
             Some("scan_credentials") => {
                 let list = scan_user_cloudflared_credentials();
                 Ok(serde_json::to_value(list).unwrap_or(Value::Array(Vec::new())))
@@ -352,6 +380,7 @@ impl CloudflareTunnelPlugin {
                 let was_running = file_share::is_running();
                 let previous_tunnel = tunnel.clone();
                 let previous_share = tunnel.file_share.clone();
+                let previous_config = fs::read(config_manager::config_yaml_path()).ok();
                 let mut share = previous_share.clone().unwrap_or_default();
                 share.enabled = was_running;
                 if let Some(port) = request.payload.get("port").and_then(Value::as_u64) {
@@ -497,7 +526,8 @@ impl CloudflareTunnelPlugin {
                     return Err(error);
                 }
                 if was_running
-                    && tunnel.services != previous_tunnel.services
+                    && (tunnel.services != previous_tunnel.services
+                        || active_tunnel_config_changed(previous_config))
                     && process_manager::is_cloudflared_running_globally()
                 {
                     process_manager::restart_tunnel()?;
@@ -595,10 +625,19 @@ impl Plugin for CloudflareTunnelPlugin {
     fn handle(&mut self, request: PluginRequest, context: &PluginContext) -> PluginResponse {
         if matches!(request.kind, PluginRequestKind::Activate) && config_manager::has_tunnel() {
             let result = config_manager::load_tunnel().and_then(|mut tunnel| {
-                if let Some(share) = tunnel.file_share.as_mut() {
-                    file_share::start(share)?;
+                file_share::stop();
+                let previous_share_state = tunnel.file_share.as_mut().and_then(|share| {
+                    if share.enabled {
+                        share.enabled = false;
+                        Some((share.hostname.clone(), share.port))
+                    } else {
+                        None
+                    }
+                });
+                if let Some((hostname, port)) = previous_share_state {
+                    set_file_share_route(&mut tunnel, &hostname, port, false)?;
+                    config_manager::save_tunnel(&tunnel)?;
                 }
-                config_manager::save_tunnel_record_only(&tunnel)?;
                 Ok(())
             });
             if let Err(message) = result {
@@ -642,6 +681,50 @@ impl Plugin for CloudflareTunnelPlugin {
                 }),
             },
         }
+    }
+}
+
+fn pick_file_share_directory(title: &str) -> Result<Option<String>, String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        use std::process::Command;
+
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        let title = title.replace('\'', "''");
+        let script = format!(
+            r#"
+Add-Type -AssemblyName System.Windows.Forms
+$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+$dialog.Description = '{title}'
+$dialog.ShowNewFolderButton = $true
+if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    Write-Output $dialog.SelectedPath
+}}
+"#
+        );
+        let output = Command::new("powershell")
+            .creation_flags(CREATE_NO_WINDOW)
+            .args(["-NoProfile", "-NonInteractive", "-Command"])
+            .arg(script)
+            .output()
+            .map_err(|error| format!("启动文件夹选择器失败：{error}"))?;
+        if !output.status.success() {
+            let message = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(if message.is_empty() {
+                "文件夹选择器启动失败".into()
+            } else {
+                message
+            });
+        }
+        let selected = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        Ok((!selected.is_empty()).then_some(selected))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = title;
+        Err("当前系统暂不支持文件夹选择器".into())
     }
 }
 
@@ -768,6 +851,7 @@ fn set_file_share_route(
 fn start_file_share() -> Result<(), String> {
     let mut tunnel = config_manager::load_tunnel()?;
     let previous_tunnel = tunnel.clone();
+    let previous_config = fs::read(config_manager::config_yaml_path()).ok();
     let previous_share = tunnel.file_share.clone();
     let mut share = previous_share.clone().unwrap_or_default();
     share.enabled = true;
@@ -813,7 +897,8 @@ fn start_file_share() -> Result<(), String> {
         let _ = config_manager::save_tunnel(&previous_tunnel);
         return Err(error);
     }
-    if tunnel.services != previous_tunnel.services
+    if (tunnel.services != previous_tunnel.services
+        || active_tunnel_config_changed(previous_config))
         && process_manager::is_cloudflared_running_globally()
     {
         process_manager::restart_tunnel()?;
@@ -824,6 +909,7 @@ fn start_file_share() -> Result<(), String> {
 fn stop_file_share() -> Result<(), String> {
     let mut tunnel = config_manager::load_tunnel()?;
     let previous_services = tunnel.services.clone();
+    let previous_config = fs::read(config_manager::config_yaml_path()).ok();
     file_share::stop();
     let route = if let Some(share) = tunnel.file_share.as_mut() {
         share.enabled = false;
@@ -838,10 +924,16 @@ fn stop_file_share() -> Result<(), String> {
         }
         config_manager::save_tunnel(&tunnel)?;
     }
-    if tunnel.services != previous_services && process_manager::is_cloudflared_running_globally() {
+    if (tunnel.services != previous_services || active_tunnel_config_changed(previous_config))
+        && process_manager::is_cloudflared_running_globally()
+    {
         process_manager::restart_tunnel()?;
     }
     Ok(())
+}
+
+fn active_tunnel_config_changed(previous_config: Option<Vec<u8>>) -> bool {
+    fs::read(config_manager::config_yaml_path()).ok() != previous_config
 }
 
 fn string_field(payload: &Value, key: &str) -> Result<String, String> {

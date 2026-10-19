@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import Button from '@ui-sdk/Button.vue'
-import { onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { onPluginLifecycle } from '../../../ui-sdk/runtime'
 import Icon from '../../../ui-sdk/Icon.vue'
 import Toast from '../../../ui-sdk/Toast.vue'
@@ -10,6 +10,7 @@ import {
   cfGetLogs,
   cfGetTunnel,
   cfOpenUrl,
+  cfPickFileShareDirectory,
   cfResetTunnel,
   cfRestartTunnel,
   cfSaveFileShare,
@@ -28,6 +29,8 @@ import {
 
 // ---------- 状态 ----------
 const detail = ref<TunnelDetailView | null>(null)
+const recentAccessLogs = computed(() => detail.value?.file_share?.access_logs ?? [])
+const showAccessLogConsole = ref(false)
 const configured = ref(false)
 const actionLoading = ref(false)
 const fileShareSaving = ref(false)
@@ -54,6 +57,29 @@ function showToast(message: string, kind: 'info' | 'error' | 'success' = 'info')
   requestAnimationFrame(() => {
     toast.value = message
   })
+}
+
+function formatAccessBytes(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+async function pickFileShareDirectory(kind: 'share' | 'upload') {
+  try {
+    const directory = await cfPickFileShareDirectory(kind)
+    if (!directory) return
+    if (kind === 'share') fileShareForm.value.directory = directory
+    else fileShareForm.value.upload_directory = directory
+    fileShareDirty.value = true
+  } catch (e: any) {
+    showToast(String(e?.message || e), 'error')
+  }
+}
+
+function clearUploadDirectory() {
+  fileShareForm.value.upload_directory = ''
+  fileShareDirty.value = true
 }
 
 // ---------- 数据刷新 ----------
@@ -444,6 +470,15 @@ function closeLogs() {
   syncPollingTimers()
 }
 
+function openAccessLogConsole() {
+  showAccessLogConsole.value = true
+  void loadData(true)
+}
+
+function closeAccessLogConsole() {
+  showAccessLogConsole.value = false
+}
+
 function syncPollingTimers() {
   window.clearInterval(refreshTimer)
   window.clearInterval(logTimer)
@@ -626,29 +661,34 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <section class="share-panel share-dashboard">
+        <details class="share-panel share-dashboard file-share-collapsible">
+          <summary class="file-share-summary">
+            <span class="file-share-summary-title">本机文件共享</span>
+            <span class="chip" :class="detail.file_share?.local_running ? 'live' : 'paused'">
+              <span class="dot-status" :class="detail.file_share?.local_running ? 'online' : 'paused'" />
+              {{ detail.file_share?.local_running ? '运行中' : '已停止' }}
+            </span>
+            <span class="file-share-chevron" aria-hidden="true">›</span>
+          </summary>
+          <div class="file-share-content">
           <div class="share-hero">
             <div class="share-hero-copy">
               <span class="share-eyebrow">LOCAL FILE SHARING</span>
-              <div class="share-header">
-                <div>
-                  <div class="sb-title">本机文件共享</div>
-                  <div class="share-description">浏览和下载本机文件，也可按需开放上传或远程访问。</div>
-                </div>
-                <span class="chip" :class="detail.file_share?.local_running ? 'live' : 'paused'">
-                  <span class="dot-status" :class="detail.file_share?.local_running ? 'online' : 'paused'" />
-                  {{ detail.file_share?.local_running ? '运行中' : '已停止' }}
-                </span>
-              </div>
+              <div class="share-description">浏览和下载本机文件，也可按需开放上传或远程访问。</div>
             </div>
-            <Button
-              variant="outline"
-              size="sm"
-              :disabled="fileShareToggleLoading || fileShareSaving"
-              @click="toggleFileShare"
-            >
-              {{ fileShareToggleLoading ? '正在处理…' : (detail.file_share?.local_running ? '停止服务' : '启动服务') }}
-            </Button>
+            <div class="share-hero-actions">
+              <Button variant="outline" size="sm" @click="openAccessLogConsole">
+                访问日志 <span class="access-log-count">{{ recentAccessLogs.length }}</span>
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                :disabled="fileShareToggleLoading || fileShareSaving"
+                @click="toggleFileShare"
+              >
+                {{ fileShareToggleLoading ? '正在处理…' : (detail.file_share?.local_running ? '停止服务' : '启动服务') }}
+              </Button>
+            </div>
           </div>
 
           <div v-if="detail.file_share" class="share-overview">
@@ -669,21 +709,29 @@ onUnmounted(() => {
             </div>
           </div>
 
+          <div class="share-settings-panel">
+            <form class="share-settings-content" @submit.prevent="saveFileShare()">
           <div class="share-section">
-            <div class="share-section-heading">
+            <div class="share-section-heading compact-heading">
               <span class="section-index">01</span>
-              <div><strong>服务设置</strong><small>选择目录、端口和外部访问域名</small></div>
+              <div><strong>基本设置</strong><small>共享目录与访问地址</small></div>
             </div>
-            <div class="share-form">
-              <label class="field field-wide">
+            <div class="share-form main-settings">
+              <label class="field">
                 <span class="label">共享文件夹路径</span>
-                <input
+                <div class="directory-picker-control">
+                  <input
                   v-model="fileShareForm.directory"
                   type="text"
                   class="mono"
-                  placeholder="C:\Users\you\Public"
-                  @input="fileShareDirty = true"
-                />
+                    readonly
+                    placeholder="请选择要共享的文件夹"
+                    :title="fileShareForm.directory"
+                  />
+                  <div class="directory-picker-actions">
+                    <Button type="button" variant="outline" size="sm" @click="pickFileShareDirectory('share')">选择文件夹</Button>
+                  </div>
+                </div>
               </label>
               <label class="field">
                 <span class="label">本机与局域网共用端口</span>
@@ -694,7 +742,6 @@ onUnmounted(() => {
                   max="65535"
                   @input="fileShareDirty = true"
                 />
-                <span class="field-hint">端口占用时，可改为 1024–65535 之间的其他端口。</span>
               </label>
               <label class="field">
                 <span class="label">Cloudflare 转发域名 <span class="optional-tag">可选</span></span>
@@ -705,7 +752,6 @@ onUnmounted(() => {
                   placeholder="file.example.com"
                   @input="fileShareDirty = true"
                 />
-                <span class="field-hint">仅填写当前 Tunnel 根域名下的完整域名。</span>
               </label>
             </div>
             <div class="route-preview">
@@ -717,68 +763,86 @@ onUnmounted(() => {
             </div>
           </div>
 
-          <div class="share-section share-access-section">
-            <div class="share-section-heading">
+          <div class="share-section">
+            <div class="share-section-heading compact-heading">
               <span class="section-index">02</span>
-              <div><strong>访问控制</strong><small>局域网监听与来源地址限制</small></div>
+              <div><strong>访问方式</strong><small>选择可访问范围和传输能力</small></div>
             </div>
+            <div class="share-options-row">
             <label class="option-card">
               <input v-model="fileShareForm.lan_enabled" type="checkbox" @change="fileShareDirty = true" />
               <span class="option-check" />
-              <span class="option-copy"><strong>允许局域网访问</strong><small>监听 0.0.0.0，并使用本机局域网 IPv4 地址分享</small></span>
+              <span class="option-copy"><strong>局域网访问</strong><small>监听所有网卡</small></span>
               <code v-if="fileShareForm.lan_enabled" class="option-port">:{{ fileShareForm.port }}</code>
             </label>
-            <div v-if="fileShareForm.lan_enabled" class="lan-address-note">
-              <span class="lan-address-icon">↗</span>
-              <span v-if="detail.file_share?.lan_host">当前局域网地址：<code>http://{{ detail.file_share.lan_host }}:{{ detail.file_share.port }}</code></span>
-              <span v-else>尚未自动检测到局域网 IP；服务仍会监听所有网卡，可手动使用本机 IPv4 和端口 {{ detail.file_share?.port }}。</span>
-            </div>
-            <label class="field allowlist-field">
-              <span class="label">IP 白名单 <span class="optional-tag">每行一个 IP 或 CIDR，留空不限</span></span>
-              <textarea
-                v-model="fileShareForm.allowed_ips"
-                rows="3"
-                class="mono allowlist-input"
-                placeholder="192.168.1.20&#10;192.168.1.0/24&#10;2001:db8::/48"
-                @input="fileShareDirty = true"
-              />
-              <span class="field-hint">Tunnel 请求按访客 IP 校验；局域网请求按连接来源 IP 校验。</span>
-            </label>
-          </div>
-
-          <div class="share-section">
-            <div class="share-section-heading">
-              <span class="section-index">03</span>
-              <div><strong>上传选项</strong><small>上传仅写入单独的收件目录</small></div>
-            </div>
             <label class="option-card">
               <input v-model="fileShareForm.upload_enabled" type="checkbox" @change="fileShareDirty = true" />
               <span class="option-check" />
-              <span class="option-copy"><strong>允许通过共享页上传文件</strong><small>浏览列表和上传操作使用同一个分享链接</small></span>
-              <span class="option-state">{{ fileShareForm.upload_enabled ? '开启' : '关闭' }}</span>
+              <span class="option-copy"><strong>允许上传</strong><small>写入独立收件目录</small></span>
             </label>
-            <div v-if="fileShareForm.upload_enabled" class="share-form upload-form upload-settings">
-              <label class="field field-wide">
-                <span class="label">收件目录</span>
-                <input
-                  v-model="fileShareForm.upload_directory"
-                  type="text"
-                  class="mono"
-                  placeholder="留空则自动创建共享目录旁的同级上传目录"
-                  @input="fileShareDirty = true"
-                />
-                <span class="field-hint">必须与共享目录分开；上传文件不会出现在只读文件列表。</span>
-              </label>
-              <label class="field">
-                <span class="label">单文件上限（MB）</span>
-                <input v-model.number="fileShareForm.max_upload_mb" type="number" min="1" max="1024" @input="fileShareDirty = true" />
-              </label>
-              <label class="field">
-                <span class="label">收件目录总量（MB）</span>
-                <input v-model.number="fileShareForm.max_total_upload_mb" type="number" min="1" max="8192" @input="fileShareDirty = true" />
-              </label>
             </div>
-            <p v-if="fileShareForm.upload_enabled" class="inline-note">通过 Tunnel 上传还受 Cloudflare 区域的单次请求大小限制。</p>
+          </div>
+          <div v-if="fileShareForm.lan_enabled" class="lan-address-note compact-lan-note">
+            <span class="lan-address-icon">↗</span>
+            <span v-if="detail.file_share?.lan_host">局域网：<code>http://{{ detail.file_share.lan_host }}:{{ detail.file_share.port }}</code></span>
+            <span v-else>未检测到局域网 IP；可手动使用本机 IPv4 和端口 {{ detail.file_share?.port }}。</span>
+          </div>
+
+          <div class="share-section advanced-section">
+            <details class="share-advanced">
+              <summary><strong>访问限制与上传设置</strong><span>IP 白名单、收件目录和容量上限</span></summary>
+              <div class="advanced-settings">
+                <label class="field allowlist-field">
+                  <span class="label">IP 白名单 <span class="optional-tag">每行一个 IP 或 CIDR，留空不限</span></span>
+                  <textarea
+                    v-model="fileShareForm.allowed_ips"
+                    rows="2"
+                    class="mono allowlist-input"
+                    placeholder="192.168.1.20&#10;192.168.1.0/24"
+                    @input="fileShareDirty = true"
+                  />
+                  <span class="field-hint">Tunnel 按访客 IP 校验；局域网按连接来源 IP 校验。</span>
+                </label>
+                <template v-if="fileShareForm.upload_enabled">
+                  <label class="field field-wide">
+                    <span class="label">收件目录</span>
+                    <div class="directory-picker-control">
+                      <input
+                      v-model="fileShareForm.upload_directory"
+                      type="text"
+                      class="mono"
+                        readonly
+                        placeholder="留空则自动创建上传目录"
+                        :title="fileShareForm.upload_directory || '使用自动目录'"
+                      />
+                      <div class="directory-picker-actions">
+                        <Button type="button" variant="outline" size="sm" @click="pickFileShareDirectory('upload')">选择文件夹</Button>
+                        <Button v-if="fileShareForm.upload_directory" type="button" variant="outline" size="sm" @click="clearUploadDirectory">自动目录</Button>
+                      </div>
+                    </div>
+                    <span class="field-hint">必须与共享目录分开；上传文件不会显示在只读列表。</span>
+                  </label>
+                  <label class="field">
+                    <span class="label">单文件上限（MB）</span>
+                    <input v-model.number="fileShareForm.max_upload_mb" type="number" min="1" max="1024" @input="fileShareDirty = true" />
+                  </label>
+                  <label class="field">
+                    <span class="label">收件目录总量（MB）</span>
+                    <input v-model.number="fileShareForm.max_total_upload_mb" type="number" min="1" max="8192" @input="fileShareDirty = true" />
+                  </label>
+                  <p class="inline-note field-wide">通过 Tunnel 上传还受 Cloudflare 区域的单次请求大小限制。</p>
+                </template>
+              </div>
+            </details>
+          </div>
+
+              <div class="share-footer settings-footer">
+                <p class="share-warning">停止插件后，文件服务会关闭；再次打开插件时不会自动启动。</p>
+                <Button type="submit" variant="default" size="sm" :disabled="fileShareSaving || fileShareToggleLoading">
+                  {{ fileShareSaving ? '正在保存…' : (fileShareDirty ? '保存设置' : '设置已保存') }}
+                </Button>
+              </div>
+            </form>
           </div>
 
           <div class="share-section links-section">
@@ -815,13 +879,8 @@ onUnmounted(() => {
             </div>
           </div>
 
-          <div class="share-footer">
-            <p class="share-warning">文件服务可独立启停；停止时会同步停用关联转发。Tunnel 启停不会影响本机和局域网文件服务。</p>
-            <Button variant="default" size="sm" :disabled="fileShareSaving || fileShareToggleLoading" @click="saveFileShare()">
-              {{ fileShareSaving ? '正在保存…' : (fileShareDirty ? '保存设置' : '设置已保存') }}
-            </Button>
           </div>
-        </section>
+        </details>
 
         <div class="services-box">
           <div class="services-bar">
@@ -980,6 +1039,58 @@ onUnmounted(() => {
       </div>
     </Teleport>
 
+    <!-- 模态框：文件服务访问日志 -->
+    <Teleport to="body">
+      <div v-if="showAccessLogConsole" class="mask" @click.self="closeAccessLogConsole">
+        <div class="dialog access-log-dialog">
+          <div class="dialog-head">
+            <div class="log-title">
+              <span class="dot-mini" :class="detail?.file_share?.local_running ? 'live' : 'paused'" />
+              <h3>文件服务访问日志</h3>
+              <span class="sub-tip">仅保存在内存，最多保留 100 条</span>
+            </div>
+            <div class="head-ops">
+              <Button variant="outline" size="sm" class="btn sm" @click="loadData(true)">刷新</Button>
+              <Button variant="outline" size="sm" class="icon-btn" @click="closeAccessLogConsole">
+                <Icon name="x" :size="14" />
+              </Button>
+            </div>
+          </div>
+
+          <div class="access-log-console-body">
+            <div v-if="recentAccessLogs.length" class="access-log-list">
+              <article v-for="(entry, index) in recentAccessLogs" :key="entry.request_id || `${entry.timestamp}-${index}`" class="access-log-row">
+                <div class="access-log-main">
+                  <span class="access-method">{{ entry.method || '无法解析' }}</span>
+                  <code class="access-path">{{ entry.path || '(请求行无法解析)' }}<span v-if="entry.protocol"> {{ entry.protocol }}</span></code>
+                  <span class="access-status" :class="{ 'access-status-error': !entry.status_code || entry.status_code >= 400 }">
+                    {{ entry.status_code || '中断' }}<span v-if="entry.status_text"> {{ entry.status_text }}</span>
+                  </span>
+                </div>
+                <div class="access-log-meta">
+                  <code>{{ entry.client_ip }}</code>
+                  <span>{{ entry.timestamp }}</span>
+                  <span>{{ entry.duration_ms }} ms</span>
+                  <code v-if="entry.request_id">#{{ entry.request_id }}</code>
+                </div>
+                <div class="access-log-details">
+                  <div><small>Host</small><span>{{ entry.host || '—' }}</span></div>
+                  <div><small>User-Agent</small><span>{{ entry.user_agent || '—' }}</span></div>
+                  <div><small>Referer</small><span>{{ entry.referer || '—' }}</span></div>
+                  <div><small>请求类型</small><span>{{ entry.content_type || '—' }}</span></div>
+                  <div><small>请求长度</small><span>{{ entry.request_content_length === null ? '—' : formatAccessBytes(entry.request_content_length) }}</span></div>
+                  <div><small>响应</small><span>{{ formatAccessBytes(entry.sent_bytes) }}<template v-if="entry.response_content_type"> · {{ entry.response_content_type }}</template></span></div>
+                  <div v-if="entry.method === 'PUT'"><small>已接收</small><span>{{ formatAccessBytes(entry.received_bytes) }}<template v-if="entry.expected_bytes !== null"> / {{ formatAccessBytes(entry.expected_bytes) }}</template></span></div>
+                </div>
+                <div v-if="entry.error" class="access-log-error">{{ entry.error }}</div>
+              </article>
+            </div>
+            <div v-else class="access-log-empty">文件服务收到浏览、下载或上传请求后，会在这里显示来源 IP、路径和结果。</div>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
     <!-- 模态框：实时控制台 -->
     <Teleport to="body">
       <div v-if="showLogDrawer" class="mask" @click.self="closeLogs">
@@ -1023,7 +1134,8 @@ onUnmounted(() => {
 .cf {
   display: flex;
   flex-direction: column;
-  height: 100%;
+  min-height: 100%;
+  height: auto;
   background: color-mix(in srgb, var(--bg) calc(var(--detail-panel-opacity, 1) * 100%), transparent);
   color: var(--text);
   font-family: var(--font-ui, system-ui, -apple-system, sans-serif);
@@ -1125,9 +1237,9 @@ onUnmounted(() => {
 
 /* 容器布局 */
 .body {
-  flex: 1;
+  flex: none;
   padding: 12px 16px;
-  overflow-y: auto;
+  overflow: visible;
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -1807,6 +1919,19 @@ input:focus {
   height: 420px;
 }
 
+.access-log-dialog {
+  width: 760px;
+  max-width: calc(100vw - 28px);
+  height: min(680px, calc(100vh - 36px));
+}
+
+.access-log-console-body {
+  min-height: 0;
+  flex: 1;
+  padding: 10px 12px;
+  overflow-y: auto;
+}
+
 .log-title {
   display: flex;
   align-items: center;
@@ -1861,6 +1986,17 @@ input:focus {
   box-shadow: 0 8px 24px color-mix(in srgb, var(--text) 5%, transparent);
 }
 
+.file-share-collapsible { display: block; }
+.file-share-summary { display: flex; min-height: 62px; align-items: center; gap: 10px; padding: 12px 18px; cursor: pointer; list-style: none; background: radial-gradient(circle at 85% 10%, color-mix(in srgb, var(--primary) 13%, transparent), transparent 40%), color-mix(in srgb, var(--surface-subtle) 68%, var(--surface)); }
+.file-share-summary::-webkit-details-marker { display: none; }
+.file-share-summary-title { color: var(--text); font-size: 13px; font-weight: 650; }
+.file-share-summary .chip { display: inline-flex; align-items: center; gap: 6px; padding: 5px 9px; border-radius: 999px; font-size: 10px; white-space: nowrap; }
+.file-share-summary .dot-status { width: 6px; height: 6px; }
+.file-share-chevron { display: grid; width: 24px; height: 24px; place-items: center; margin-left: auto; border: 1px solid var(--border); border-radius: 7px; color: var(--primary); font-size: 18px; transition: transform .15s; }
+.file-share-collapsible[open] > .file-share-summary { border-bottom: 1px solid var(--border); }
+.file-share-collapsible[open] .file-share-chevron { transform: rotate(90deg); }
+.file-share-content { display: flex; flex-direction: column; gap: 0; }
+
 .share-hero {
   display: flex;
   align-items: center;
@@ -1872,6 +2008,9 @@ input:focus {
     color-mix(in srgb, var(--surface-subtle) 68%, var(--surface));
   border-bottom: 1px solid var(--border);
 }
+
+.share-hero-actions { display: flex; flex: none; align-items: center; gap: 8px; }
+.access-log-count { min-width: 18px; padding: 1px 5px; border-radius: 999px; background: color-mix(in srgb, var(--primary) 12%, transparent); color: var(--primary); font-size: 9px; text-align: center; }
 
 .share-hero-copy { min-width: 0; }
 .share-eyebrow { display: block; margin-bottom: 5px; color: var(--primary); font-size: 9px; font-weight: 750; letter-spacing: .16em; }
@@ -1903,7 +2042,7 @@ input:focus {
 .share-stat strong { overflow: hidden; color: var(--text); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
 .share-stat small { overflow: hidden; color: var(--text-muted); font-size: 9.5px; text-overflow: ellipsis; white-space: nowrap; }
 
-.share-section { display: flex; flex-direction: column; gap: 12px; padding: 16px 18px; border-top: 1px solid var(--border); }
+.share-section { display: flex; flex-direction: column; gap: 9px; padding: 12px 16px; border-top: 1px solid var(--border); }
 .share-section-heading { display: flex; align-items: center; gap: 10px; }
 .share-section-heading > div { display: flex; flex-direction: column; gap: 2px; }
 .share-section-heading strong { color: var(--text); font-size: 12px; }
@@ -1911,6 +2050,50 @@ input:focus {
 .section-index { display: grid; width: 27px; height: 27px; place-items: center; flex: none; border: 1px solid color-mix(in srgb, var(--primary) 25%, var(--border)); border-radius: 8px; background: color-mix(in srgb, var(--primary) 9%, transparent); color: var(--primary); font-family: var(--font-mono, monospace); font-size: 10px; font-weight: 700; }
 .field-wide { grid-column: 1 / -1; }
 .field .label { display: flex; align-items: center; gap: 7px; }
+.main-settings { grid-template-columns: minmax(0, 2fr) minmax(96px, .75fr) minmax(0, 1.4fr); gap: 8px; }
+.main-settings .field { gap: 4px; }
+.main-settings .label { font-size: 10px; }
+.main-settings input { min-width: 0; padding: 5px 8px; font-size: 11.5px; }
+.directory-picker-control { display: flex; min-width: 0; align-items: stretch; gap: 6px; }
+.directory-picker-control > input { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; }
+.directory-picker-actions { display: flex; flex: none; gap: 5px; }
+.compact-heading { margin-bottom: -2px; }
+.share-options-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.share-options-row .option-card { min-height: 40px; padding: 7px 10px; }
+.share-options-row .option-copy { flex-direction: row; align-items: center; justify-content: space-between; }
+.compact-lan-note { margin: -5px 16px 0; padding-left: 3px; }
+.advanced-section { padding-top: 0; border-top: 0; }
+.share-advanced { border: 1px solid var(--border); border-radius: 9px; background: color-mix(in srgb, var(--surface-container) 34%, transparent); }
+.share-advanced summary { display: flex; align-items: center; gap: 8px; min-height: 38px; padding: 7px 11px; cursor: pointer; list-style: none; }
+.share-advanced summary::-webkit-details-marker { display: none; }
+.share-advanced summary::before { color: var(--primary); content: '›'; font-size: 17px; line-height: 1; transition: transform .15s; }
+.share-advanced[open] summary::before { transform: rotate(90deg); }
+.share-advanced summary strong { color: var(--text); font-size: 10.5px; }
+.share-advanced summary span { color: var(--text-muted); font-size: 9.5px; }
+.advanced-settings { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; padding: 0 11px 11px; }
+.advanced-settings .field-wide { grid-column: 1 / -1; }
+.advanced-settings .field { gap: 4px; }
+.advanced-settings .field-hint { font-size: 9.5px; }
+.advanced-settings .inline-note { grid-column: 1 / -1; }
+.access-log-list { display: grid; gap: 6px; }
+.access-log-row { display: grid; gap: 4px; min-width: 0; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: color-mix(in srgb, var(--surface-container) 38%, transparent); }
+.access-log-main { display: grid; grid-template-columns: 42px minmax(0, 1fr) auto; align-items: center; gap: 8px; min-width: 0; }
+.access-method { color: var(--text-muted); font-family: var(--font-mono, monospace); font-size: 9.5px; font-weight: 700; }
+.access-path { min-width: 0; overflow: hidden; color: var(--text); font-family: var(--font-mono, monospace); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.access-status { padding: 2px 6px; border-radius: 5px; background: color-mix(in srgb, var(--success, #10b981) 12%, transparent); color: var(--success, #10b981); font-size: 9px; font-weight: 700; }
+.access-status-error { background: color-mix(in srgb, var(--danger, #ef4444) 12%, transparent); color: var(--danger, #ef4444); }
+.access-log-meta { display: flex; flex-wrap: wrap; gap: 5px 10px; color: var(--text-muted); font-size: 9px; }
+.access-log-meta code { color: var(--primary); font-family: var(--font-mono, monospace); }
+.access-log-details { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 12px; padding-top: 5px; border-top: 1px solid color-mix(in srgb, var(--border) 65%, transparent); }
+.access-log-details > div { display: grid; min-width: 0; grid-template-columns: 76px minmax(0, 1fr); gap: 7px; font-size: 9px; }
+.access-log-details small { color: var(--text-muted); }
+.access-log-details span { overflow-wrap: anywhere; color: var(--text); }
+.access-log-error { padding: 6px 8px; border-radius: 6px; background: color-mix(in srgb, var(--danger, #ef4444) 9%, transparent); color: var(--danger, #ef4444); font-size: 9px; line-height: 1.45; overflow-wrap: anywhere; }
+.access-log-empty { padding: 10px; border: 1px dashed var(--border-strong); border-radius: 8px; color: var(--text-muted); font-size: 10px; }
+.share-settings-panel { border-top: 1px solid var(--border); background: color-mix(in srgb, var(--surface-subtle) 28%, transparent); }
+.share-settings-content { display: flex; flex-direction: column; }
+.share-settings-content > .share-section:first-child { border-top: 1px solid var(--border); }
+.settings-footer { margin: 0; }
 .optional-tag { color: var(--text-muted); font-size: 9px; font-weight: 400; }
 .route-preview { display: flex; align-items: flex-start; gap: 8px; padding: 9px 11px; border: 1px solid color-mix(in srgb, var(--primary) 16%, var(--border)); border-radius: 8px; background: color-mix(in srgb, var(--primary) 4%, transparent); color: var(--text-muted); font-size: 10px; line-height: 1.55; overflow-wrap: anywhere; }
 .route-preview code, .lan-address-note code { color: var(--primary); font-family: var(--font-mono, monospace); }
@@ -1955,12 +2138,33 @@ input:focus {
 .share-footer .share-warning { max-width: 520px; color: var(--text-muted); font-size: 9.5px; }
 
 @media (max-width: 680px) {
-  .share-overview { grid-template-columns: 1fr; }
-  .share-stat { display: grid; grid-template-columns: 1fr auto; align-items: center; }
-  .share-stat small { grid-column: 1 / -1; }
+  .share-overview { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; padding: 10px 12px 2px; }
+  .share-stat { gap: 3px; padding: 8px; }
+  .share-stat small { display: none; }
   .share-links-grid { grid-template-columns: 1fr; }
+  .file-share-summary { padding: 10px 12px; }
   .share-hero { align-items: flex-start; }
+  .share-hero-actions { align-items: flex-end; flex-direction: column-reverse; }
+  .access-log-dialog { width: calc(100vw - 20px); max-width: none; height: calc(100dvh - 24px); }
+  .access-log-dialog .dialog-head { align-items: flex-start; gap: 8px; padding: 9px 10px; }
+  .access-log-dialog .log-title { align-items: flex-start; flex-wrap: wrap; }
+  .access-log-dialog .log-title .sub-tip { width: 100%; padding-left: 12px; }
+  .access-log-console-body { padding: 8px; }
+  .access-log-main { grid-template-columns: 36px minmax(0, 1fr) auto; gap: 6px; }
+  .access-log-meta { gap: 4px 8px; }
+  .access-log-details { grid-template-columns: 1fr; gap: 5px; }
+  .directory-picker-control { align-items: stretch; flex-direction: column; }
+  .directory-picker-actions { justify-content: flex-end; }
   .share-footer { align-items: flex-start; flex-direction: column; }
   .link-security-row { align-items: flex-start; flex-direction: column; }
+  .main-settings { grid-template-columns: minmax(0, 1fr) minmax(100px, .5fr); }
+  .main-settings .field:first-child { grid-column: 1 / -1; }
+}
+
+@media (max-width: 420px) {
+  .share-options-row { grid-template-columns: 1fr; }
+  .advanced-settings { grid-template-columns: 1fr; }
+  .advanced-settings .field-wide { grid-column: auto; }
+  .share-advanced summary { align-items: flex-start; flex-wrap: wrap; }
 }
 </style>

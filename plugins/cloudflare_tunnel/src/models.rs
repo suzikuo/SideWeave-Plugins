@@ -78,6 +78,7 @@ pub struct FileShareView {
     pub max_upload_mb: u32,
     pub max_total_upload_mb: u32,
     pub allowed_ips: Vec<String>,
+    pub access_logs: Vec<crate::file_share::FileShareAccessLog>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

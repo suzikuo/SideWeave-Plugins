@@ -110,12 +110,31 @@ pub fn full_hostname(subdomain: &str, domain: &str) -> String {
     }
 }
 
+#[cfg(test)]
 pub fn generate_config_yaml(
     tunnel_id: &str,
     credentials_abs_path: &Path,
     domain: &str,
     services: &[ServiceRule],
     only_enabled: bool,
+) -> Result<String, String> {
+    generate_config_yaml_with_file_share(
+        tunnel_id,
+        credentials_abs_path,
+        domain,
+        services,
+        only_enabled,
+        None,
+    )
+}
+
+fn generate_config_yaml_with_file_share(
+    tunnel_id: &str,
+    credentials_abs_path: &Path,
+    domain: &str,
+    services: &[ServiceRule],
+    only_enabled: bool,
+    file_share_hostname: Option<&str>,
 ) -> Result<String, String> {
     let cred_path_str = credentials_abs_path.to_string_lossy().replace('\\', "/");
     let mut yaml = String::new();
@@ -131,6 +150,12 @@ pub fn generate_config_yaml(
         let host = full_hostname(&s.hostname, domain);
         yaml.push_str(&format!("  - hostname: {host}\n"));
         yaml.push_str(&format!("    service: {norm_service}\n"));
+        let is_file_share = file_share_hostname
+            .is_some_and(|hostname| full_hostname(hostname, domain).eq_ignore_ascii_case(&host));
+        if is_file_share {
+            yaml.push_str("    originRequest:\n");
+            yaml.push_str("      disableChunkedEncoding: true\n");
+        }
     }
 
     // 强制追加 404 兜底规则，防止未授权暴露
@@ -158,23 +183,29 @@ pub fn save_tunnel(record: &TunnelRecord) -> Result<(), String> {
     let cred_path = credentials_path();
 
     // 1. 生成实际由 cloudflared 运行加载的 config.yaml（仅包含启用服务）
-    let active_yaml = generate_config_yaml(
+    let file_share_hostname = record
+        .file_share
+        .as_ref()
+        .map(|share| share.hostname.as_str());
+    let active_yaml = generate_config_yaml_with_file_share(
         &record.tunnel_id,
         &cred_path,
         &record.domain,
         &record.services,
         true,
+        file_share_hostname,
     )?;
     let yaml_path = config_yaml_path();
     fs::write(&yaml_path, active_yaml).map_err(|e| format!("保存 config.yaml 失败: {e}"))?;
 
     // 2. 同时生成包含所有配置的 all_config.yaml（便于对比与备份）
-    let all_yaml = generate_config_yaml(
+    let all_yaml = generate_config_yaml_with_file_share(
         &record.tunnel_id,
         &cred_path,
         &record.domain,
         &record.services,
         false,
+        file_share_hostname,
     )?;
     let all_yaml_path = all_config_yaml_path();
     fs::write(&all_yaml_path, all_yaml).map_err(|e| format!("保存 all_config.yaml 失败: {e}"))?;

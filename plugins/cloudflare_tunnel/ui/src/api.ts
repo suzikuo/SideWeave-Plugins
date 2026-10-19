@@ -51,6 +51,29 @@ export interface FileShareView {
   max_upload_mb: number
   max_total_upload_mb: number
   allowed_ips: string[]
+  access_logs: FileShareAccessLog[]
+}
+
+export interface FileShareAccessLog {
+  request_id: string
+  timestamp: string
+  client_ip: string
+  method: string
+  path: string
+  protocol: string
+  host: string
+  status_code: number
+  status_text: string
+  request_content_length: number | null
+  content_type: string
+  user_agent: string
+  referer: string
+  response_content_type: string
+  error: string
+  expected_bytes: number | null
+  received_bytes: number
+  sent_bytes: number
+  duration_ms: number
 }
 
 export interface TunnelRecord {
@@ -116,6 +139,9 @@ export const cfSaveFileShare = (
   },
   rotate_token = false
 ) => pluginCall<void>('save_file_share', { ...config, rotate_token })
+
+export const cfPickFileShareDirectory = (kind: 'share' | 'upload') =>
+  pluginCall<string | null>('pick_file_share_directory', { kind })
 
 export const cfStartFileShare = () => pluginCall<void>('start_file_share')
 export const cfStopFileShare = () => pluginCall<void>('stop_file_share')
