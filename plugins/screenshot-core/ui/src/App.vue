@@ -13,6 +13,7 @@ const settings = ref<ScreenshotSettings>({
   saveDirectory: '',
   autoCopy: true,
   scrollStep: 640,
+  hdrCaptureMode: 'auto',
   watermarkText: '',
   annotationColor: '#ff3a48',
   textSize: 18,
@@ -123,6 +124,15 @@ onMounted(() => {
         <label>全局快捷键<input v-model="settings.hotkey" spellcheck="false" /></label>
         <label>滚动步长<input v-model.number="settings.scrollStep" type="number" min="120" max="1600" step="40" /></label>
       </div>
+      <label>
+        HDR 采集模式
+        <select v-model="settings.hdrCaptureMode">
+          <option value="auto">自动（根据显示器状态判断）</option>
+          <option value="force_on">手动：开启 HDR</option>
+          <option value="force_off">手动：关闭 HDR</option>
+        </select>
+      </label>
+      <p class="hint">如果自动模式在某台电脑上出现黑屏或发白，可在这里手动切换；HDR 采集失败时仍会回退到普通截图。</p>
       <div class="dir-row">
         <span class="dir-label">保存目录</span>
         <div class="dir-control">

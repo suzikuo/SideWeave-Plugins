@@ -667,7 +667,12 @@ fn begin_capture(state: &mut UiState, scrolling: bool) {
     if state.capture.is_some() {
         return;
     }
-    let Some(screen) = ScreenCapture::grab_virtual_desktop() else {
+    let hdr_mode = state
+        .settings
+        .lock()
+        .map(|settings| settings.hdr_capture_mode)
+        .unwrap_or_default();
+    let Some(screen) = ScreenCapture::grab_virtual_desktop(hdr_mode) else {
         if state.recording_requested_fps.is_some() {
             state.recording.fail("\u{65e0}\u{6cd5}\u{8bfb}\u{53d6}\u{865a}\u{62df}\u{684c}\u{9762}\u{56fe}\u{50cf}".into());
             state.recording_requested_fps = None;

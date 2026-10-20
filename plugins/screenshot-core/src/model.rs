@@ -6,6 +6,15 @@ use std::path::PathBuf;
 pub const DEFAULT_HOTKEY: &str = "ctrl+shift+a";
 pub const RECORDING_FPS_OPTIONS: [u32; 8] = [5, 8, 10, 12, 15, 20, 24, 30];
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HdrCaptureMode {
+    #[default]
+    Auto,
+    ForceOn,
+    ForceOff,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[serde(default)]
@@ -14,6 +23,7 @@ pub struct Settings {
     pub save_directory: String,
     pub auto_copy: bool,
     pub scroll_step: i32,
+    pub hdr_capture_mode: HdrCaptureMode,
     pub watermark_text: String,
     pub annotation_color: String,
     pub text_size: u32,
@@ -33,6 +43,7 @@ impl Default for Settings {
             save_directory: String::new(),
             auto_copy: true,
             scroll_step: 640,
+            hdr_capture_mode: HdrCaptureMode::Auto,
             watermark_text: String::new(),
             annotation_color: "#ff3a48".into(),
             text_size: 18,

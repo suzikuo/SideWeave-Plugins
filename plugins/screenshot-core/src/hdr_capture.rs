@@ -1,4 +1,4 @@
-use crate::model::ScreenRect;
+use crate::model::{HdrCaptureMode, ScreenRect};
 use half::f16;
 use std::sync::OnceLock;
 use windows::core::Interface;
@@ -22,7 +22,13 @@ use windows::Win32::Graphics::Dxgi::{
 /// Captures all attached outputs using DXGI's high precision format when the
 /// driver offers it. The returned bytes stay in BGRA order to match the
 /// existing crop and overlay paths.
-pub(super) fn capture_virtual_desktop(bounds: ScreenRect) -> Option<Vec<u8>> {
+pub(super) fn capture_virtual_desktop(
+    bounds: ScreenRect,
+    hdr_mode: HdrCaptureMode,
+) -> Option<Vec<u8>> {
+    if hdr_mode == HdrCaptureMode::ForceOff {
+        return None;
+    }
     let width = usize::try_from(bounds.width()).ok()?;
     let height = usize::try_from(bounds.height()).ok()?;
     let byte_count = width.checked_mul(height)?.checked_mul(4)?;
@@ -71,6 +77,7 @@ pub(super) fn capture_virtual_desktop(bounds: ScreenRect) -> Option<Vec<u8>> {
                     bounds,
                     &mut pixels,
                     width,
+                    hdr_mode,
                 )?;
                 captured_outputs += 1;
             }
@@ -124,12 +131,17 @@ unsafe fn capture_output(
     desktop_bounds: ScreenRect,
     desktop_pixels: &mut [u8],
     desktop_width: usize,
+    hdr_mode: HdrCaptureMode,
 ) -> Option<()> {
-    let output6 = output.cast::<IDXGIOutput6>().ok()?;
-    let display_color_space = output6.GetDesc1().ok()?.ColorSpace;
-    // Keep SDR displays on the original GDI path; only use FP16 capture when
-    // Windows reports HDR as the active output color space.
-    if display_color_space != DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 {
+    let use_hdr_capture = match hdr_mode {
+        HdrCaptureMode::Auto => {
+            let output6 = output.cast::<IDXGIOutput6>().ok()?;
+            output6.GetDesc1().ok()?.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020
+        }
+        HdrCaptureMode::ForceOn => true,
+        HdrCaptureMode::ForceOff => false,
+    };
+    if !use_hdr_capture {
         return copy_sdr_output_with_gdi(
             output_bounds,
             desktop_bounds,
@@ -293,6 +305,7 @@ fn copy_output_to_desktop(
     let source_x_offset = (clipped.left - output_bounds.left) as usize;
     let source_y_offset = (clipped.top - output_bounds.top) as usize;
     let fp16_to_srgb = fp16_to_srgb_lut();
+    let mut has_visible_pixel = false;
 
     for y in 0..clipped.height() {
         for x in 0..clipped.width() {
@@ -327,13 +340,19 @@ fn copy_output_to_desktop(
             let red = u16::from_le_bytes([source[src], source[src + 1]]);
             let green = u16::from_le_bytes([source[src + 2], source[src + 3]]);
             let blue = u16::from_le_bytes([source[src + 4], source[src + 5]]);
-            desktop_pixels[dst] = fp16_to_srgb[blue as usize];
-            desktop_pixels[dst + 1] = fp16_to_srgb[green as usize];
-            desktop_pixels[dst + 2] = fp16_to_srgb[red as usize];
+            let blue = fp16_to_srgb[blue as usize];
+            let green = fp16_to_srgb[green as usize];
+            let red = fp16_to_srgb[red as usize];
+            has_visible_pixel |= red > 2 || green > 2 || blue > 2;
+            desktop_pixels[dst] = blue;
+            desktop_pixels[dst + 1] = green;
+            desktop_pixels[dst + 2] = red;
             desktop_pixels[dst + 3] = 255;
         }
     }
-    Some(())
+    // Treat an empty FP16 frame as a capture failure so the caller retries
+    // the complete desktop through the established GDI path.
+    has_visible_pixel.then_some(())
 }
 
 fn fp16_to_srgb_lut() -> &'static [u8; 65_536] {

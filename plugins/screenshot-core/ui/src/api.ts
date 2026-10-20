@@ -5,6 +5,7 @@ export interface ScreenshotSettings {
   saveDirectory: string
   autoCopy: boolean
   scrollStep: number
+  hdrCaptureMode: 'auto' | 'force_on' | 'force_off'
   watermarkText: string
   annotationColor: string
   textSize: number

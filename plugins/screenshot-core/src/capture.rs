@@ -1,4 +1,4 @@
-use crate::model::ScreenRect;
+use crate::model::{HdrCaptureMode, ScreenRect};
 use crate::scroll::{FrameProbe, SCROLL_PROBE_GRID};
 use std::ffi::c_void;
 use std::mem::{size_of, zeroed};
@@ -211,13 +211,13 @@ impl ScreenCapture {
         }
     }
 
-    pub(super) fn grab_virtual_desktop() -> Option<Self> {
+    pub(super) fn grab_virtual_desktop(hdr_mode: HdrCaptureMode) -> Option<Self> {
         let bounds = Self::virtual_desktop_rect()?;
         let x = bounds.left;
         let y = bounds.top;
         let width = bounds.width() as i32;
         let height = bounds.height() as i32;
-        let pixels = super::hdr_capture::capture_virtual_desktop(bounds)
+        let pixels = super::hdr_capture::capture_virtual_desktop(bounds, hdr_mode)
             .or_else(|| Self::grab_virtual_desktop_gdi(bounds))?;
         let dimmed_pixels = pixels
             .iter()
