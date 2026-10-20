@@ -4,7 +4,7 @@
   "id": "screenshot",
   "name": "快捷截图",
   "icon": "ui/icon.svg",
-  "version": "0.3.11",
+  "version": "0.3.12",
   "description": "桌面截图与区域录制：滚动长截图、标注、OCR 中文翻译、贴图、动画 WebP 与 GIF 导出",
   "author": "SideWeave",
   "type": "native",

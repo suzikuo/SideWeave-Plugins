@@ -1,6 +1,6 @@
 [package]
 name = "sideweave_plugin-screenshot-core"
-version = "0.3.11"
+version = "0.3.12"
 edition = "2021"
 description = "Native Windows screenshot core for SideWeave"
 
