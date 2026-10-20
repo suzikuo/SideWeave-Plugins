@@ -173,7 +173,10 @@ impl Plugin for FileSharePlugin {
                 plugin_id: request.plugin_id,
                 ok: false,
                 result: Value::Null,
-                error: Some(PluginError { code: ErrorCode::Internal, message }),
+                error: Some(PluginError {
+                    code: ErrorCode::Internal,
+                    message,
+                }),
             },
         }
     }
@@ -187,7 +190,10 @@ fn response(request: &PluginRequest, result: Result<(), String>) -> PluginRespon
             plugin_id: request.plugin_id.clone(),
             ok: false,
             result: Value::Null,
-            error: Some(PluginError { code: ErrorCode::Internal, message }),
+            error: Some(PluginError {
+                code: ErrorCode::Internal,
+                message,
+            }),
         },
     }
 }
@@ -221,7 +227,11 @@ fn file_share_view(share: &FileShareConfig) -> FileShareView {
         lan_enabled: share.lan_enabled,
         lan_running,
         lan_host: lan_host.clone(),
-        lan_share_url: if share.lan_enabled && !lan_host.is_empty() { format!("http://{lan_host}:{}/{suffix}", share.port) } else { String::new() },
+        lan_share_url: if share.lan_enabled && !lan_host.is_empty() {
+            format!("https://{lan_host}:{}/{suffix}", share.port)
+        } else {
+            String::new()
+        },
         allow_view: share.allow_view,
         allow_upload: share.allow_upload,
         require_login: share.require_login,
@@ -484,5 +494,5 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{
         let _ = title;
         Err("The folder picker is not supported on this platform".into())
     }
-}
 
+}

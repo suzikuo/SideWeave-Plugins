@@ -2,6 +2,7 @@ use crate::models::FileShareConfig;
 use chrono::Local;
 use ring::digest::{digest, SHA256};
 use ring::pbkdf2::{self, PBKDF2_HMAC_SHA256};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
@@ -13,6 +14,86 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+
+trait HttpStream: Read + Write {
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()>;
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()>;
+}
+
+impl HttpStream for TcpStream {
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        TcpStream::set_read_timeout(self, timeout)
+    }
+
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        TcpStream::set_write_timeout(self, timeout)
+    }
+}
+
+impl HttpStream for rustls::StreamOwned<rustls::ServerConnection, TcpStream> {
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        self.get_ref().set_read_timeout(timeout)
+    }
+
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        self.get_ref().set_write_timeout(timeout)
+    }
+}
+
+enum ClientStream {
+    Plain(TcpStream),
+    Tls(rustls::StreamOwned<rustls::ServerConnection, TcpStream>),
+}
+
+impl Read for ClientStream {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Self::Plain(stream) => stream.read(buffer),
+            Self::Tls(stream) => stream.read(buffer),
+        }
+    }
+}
+
+impl Write for ClientStream {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        match self {
+            Self::Plain(stream) => stream.write(buffer),
+            Self::Tls(stream) => stream.write(buffer),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Self::Plain(stream) => stream.flush(),
+            Self::Tls(stream) => stream.flush(),
+        }
+    }
+}
+
+impl HttpStream for ClientStream {
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        match self {
+            Self::Plain(stream) => stream.set_read_timeout(timeout),
+            Self::Tls(stream) => stream.get_ref().set_read_timeout(timeout),
+        }
+    }
+
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        match self {
+            Self::Plain(stream) => stream.set_write_timeout(timeout),
+            Self::Tls(stream) => stream.get_ref().set_write_timeout(timeout),
+        }
+    }
+}
+
+impl Drop for ClientStream {
+    fn drop(&mut self) {
+        if let Self::Tls(stream) = self {
+            stream.conn.send_close_notify();
+            let _ = stream.flush();
+        }
+    }
+}
 
 const MAX_ACTIVE_REQUESTS: usize = 32;
 const MAX_ACCESS_LOG_ENTRIES: usize = 100;
@@ -727,7 +808,13 @@ fn normalize_authority(authority: &str, default_port: &str) -> Option<String> {
         let port = if remainder.is_empty() {
             None
         } else {
-            Some(remainder.strip_prefix(':')?.parse::<u16>().ok()?.to_string())
+            Some(
+                remainder
+                    .strip_prefix(':')?
+                    .parse::<u16>()
+                    .ok()?
+                    .to_string(),
+            )
         };
         (host, port)
     } else {
@@ -786,14 +873,23 @@ fn path_prefix(token: &str, require_login: bool) -> String {
     }
 }
 
-fn send_login_page(
-    stream: TcpStream,
+fn secure_cookie_attribute(secure_transport: bool) -> &'static str {
+    if secure_transport {
+        "; Secure"
+    } else {
+        ""
+    }
+}
+
+fn send_login_page<S: HttpStream>(
+    stream: S,
     status: &str,
     message: &str,
     csrf_cookie_name: &str,
     client_ip: IpAddr,
     user_agent: &str,
     head_only: bool,
+    secure_transport: bool,
     stop: &AtomicBool,
 ) -> io::Result<()> {
     let mut body = String::from("<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta name=\"theme-color\" content=\"#0e1420\">");
@@ -815,7 +911,8 @@ fn send_login_page(
         ),
     );
     let cookie = format!(
-        "{csrf_cookie_name}={csrf_token}; Path=/; Max-Age=43200; HttpOnly; SameSite=Strict"
+        "{csrf_cookie_name}={csrf_token}; Path=/; Max-Age=43200; HttpOnly; SameSite=Strict{}",
+        secure_cookie_attribute(secure_transport)
     );
     send_response_with_headers(
         stream,
@@ -979,6 +1076,207 @@ fn stop_server(server: Option<RunningServer>) {
     }
 }
 
+fn der_wrap(tag: u8, value: &[u8]) -> Vec<u8> {
+    let mut output = vec![tag];
+    if value.len() < 128 {
+        output.push(value.len() as u8);
+    } else {
+        let length_bytes = value.len().to_be_bytes();
+        let first_nonzero = length_bytes
+            .iter()
+            .position(|byte| *byte != 0)
+            .unwrap_or(length_bytes.len() - 1);
+        let length_bytes = &length_bytes[first_nonzero..];
+        output.push(0x80 | length_bytes.len() as u8);
+        output.extend_from_slice(length_bytes);
+    }
+    output.extend_from_slice(value);
+    output
+}
+
+fn der_sequence(fields: &[Vec<u8>]) -> Vec<u8> {
+    let content = fields.concat();
+    der_wrap(0x30, &content)
+}
+
+fn der_oid(arcs: &[u64]) -> Vec<u8> {
+    let Some((&first, remainder)) = arcs.split_first() else {
+        return der_wrap(0x06, &[]);
+    };
+    if remainder.is_empty() {
+        return der_wrap(0x06, &[]);
+    }
+    let mut encoded = Vec::new();
+    for arc in std::iter::once(&(first * 40 + remainder[0])).chain(remainder.iter().skip(1)) {
+        let mut stack = [0u8; 10];
+        let mut index = stack.len();
+        let mut value = *arc;
+        index -= 1;
+        stack[index] = (value & 0x7f) as u8;
+        value >>= 7;
+        while value > 0 {
+            index -= 1;
+            stack[index] = ((value & 0x7f) as u8) | 0x80;
+            value >>= 7;
+        }
+        encoded.extend_from_slice(&stack[index..]);
+    }
+    der_wrap(0x06, &encoded)
+}
+
+fn algorithm_identifier(oid: &[u64], parameters: &[Vec<u8>]) -> Vec<u8> {
+    let mut fields = vec![der_oid(oid)];
+    fields.extend_from_slice(parameters);
+    der_sequence(&fields)
+}
+
+fn certificate_extension(oid: &[u64], value: &[u8]) -> Vec<u8> {
+    der_sequence(&[der_oid(oid), der_wrap(0x04, value)])
+}
+
+fn self_signed_lan_certificate(san: &str, private_key_bytes: &[u8]) -> Result<Vec<u8>, String> {
+    use ring::rand::SecureRandom;
+    use ring::signature::{EcdsaKeyPair, KeyPair, ECDSA_P256_SHA256_ASN1_SIGNING};
+
+    let rng = ring::rand::SystemRandom::new();
+    let key_pair =
+        EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, private_key_bytes, &rng)
+            .map_err(|_| "Unable to load LAN TLS private key".to_string())?;
+    let mut serial = [0u8; 20];
+    rng.fill(&mut serial)
+        .map_err(|_| "Unable to create LAN TLS certificate serial".to_string())?;
+    serial[0] &= 0x7f;
+    if serial.iter().all(|byte| *byte == 0) {
+        serial[19] = 1;
+    }
+
+    let common_name = der_sequence(&[der_set(&[der_sequence(&[
+        der_oid(&[2, 5, 4, 3]),
+        der_wrap(0x0c, b"SideWeave LAN File Service"),
+    ])])]);
+    let now = chrono::Utc::now();
+    let valid_until = now + chrono::Duration::days(3650);
+    let validity = der_sequence(&[
+        der_wrap(0x17, now.format("%y%m%d%H%M%SZ").to_string().as_bytes()),
+        der_wrap(
+            0x17,
+            valid_until.format("%y%m%d%H%M%SZ").to_string().as_bytes(),
+        ),
+    ]);
+
+    let san_value = if let Ok(address) = san.parse::<IpAddr>() {
+        match address {
+            IpAddr::V4(address) => der_wrap(0x87, &address.octets()),
+            IpAddr::V6(address) => der_wrap(0x87, &address.octets()),
+        }
+    } else {
+        der_wrap(0x82, san.as_bytes())
+    };
+    let subject_alt_names = der_sequence(&[san_value]);
+    let extensions = der_wrap(
+        0xa3,
+        &der_sequence(&[
+            certificate_extension(&[2, 5, 29, 17], &subject_alt_names),
+            certificate_extension(&[2, 5, 29, 19], &der_sequence(&[])),
+            certificate_extension(&[2, 5, 29, 15], &der_wrap(0x03, &[7, 0x80])),
+            certificate_extension(
+                &[2, 5, 29, 37],
+                &der_sequence(&[der_oid(&[1, 3, 6, 1, 5, 5, 7, 3, 1])]),
+            ),
+        ]),
+    );
+    let signature_algorithm = algorithm_identifier(&[1, 2, 840, 10045, 4, 3, 2], &[]);
+    let public_key_algorithm = algorithm_identifier(
+        &[1, 2, 840, 10045, 2, 1],
+        &[der_oid(&[1, 2, 840, 10045, 3, 1, 7])],
+    );
+    let subject_public_key_info = der_sequence(&[
+        public_key_algorithm,
+        der_wrap(0x03, &[&[0][..], key_pair.public_key().as_ref()].concat()),
+    ]);
+    let tbs_certificate = der_sequence(&[
+        der_wrap(0xa0, &der_wrap(0x02, &[2])),
+        der_wrap(0x02, &serial),
+        signature_algorithm.clone(),
+        common_name.clone(),
+        validity,
+        common_name,
+        subject_public_key_info,
+        extensions,
+    ]);
+    let signature = key_pair
+        .sign(&rng, &tbs_certificate)
+        .map_err(|_| "Unable to sign LAN TLS certificate".to_string())?;
+    Ok(der_sequence(&[
+        tbs_certificate,
+        signature_algorithm,
+        der_wrap(0x03, &[&[0][..], signature.as_ref()].concat()),
+    ]))
+}
+
+fn der_set(fields: &[Vec<u8>]) -> Vec<u8> {
+    let content = fields.concat();
+    der_wrap(0x31, &content)
+}
+
+fn lan_tls_config(
+    instance_id: &str,
+    lan_host: Option<&str>,
+) -> Result<Arc<rustls::ServerConfig>, String> {
+    let san = lan_host
+        .filter(|host| !host.is_empty())
+        .unwrap_or("localhost");
+    let identity = format!("{instance_id}\n{san}");
+    let digest = digest(&SHA256, identity.as_bytes());
+    let file_key = digest
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let directory = crate::config_manager::plugin_data_dir();
+    fs::create_dir_all(&directory)
+        .map_err(|error| format!("Unable to create TLS certificate directory: {error}"))?;
+    let certificate_path = directory.join(format!("lan-{file_key}.cert.der"));
+    let private_key_path = directory.join(format!("lan-{file_key}.key.der"));
+
+    let (certificate_bytes, private_key_bytes) =
+        if certificate_path.is_file() && private_key_path.is_file() {
+            (
+                fs::read(&certificate_path)
+                    .map_err(|error| format!("Unable to read LAN TLS certificate: {error}"))?,
+                fs::read(&private_key_path)
+                    .map_err(|error| format!("Unable to read LAN TLS private key: {error}"))?,
+            )
+        } else {
+            use ring::signature::{EcdsaKeyPair, ECDSA_P256_SHA256_ASN1_SIGNING};
+            let generated = EcdsaKeyPair::generate_pkcs8(
+                &ECDSA_P256_SHA256_ASN1_SIGNING,
+                &ring::rand::SystemRandom::new(),
+            )
+            .map_err(|_| "Unable to generate LAN TLS private key".to_string())?;
+            let private_key = generated.as_ref().to_vec();
+            let certificate = self_signed_lan_certificate(san, &private_key)?;
+            fs::write(&certificate_path, &certificate)
+                .map_err(|error| format!("Unable to save LAN TLS certificate: {error}"))?;
+            fs::write(&private_key_path, &private_key)
+                .map_err(|error| format!("Unable to save LAN TLS private key: {error}"))?;
+            (certificate, private_key)
+        };
+
+    let certificate = CertificateDer::from(certificate_bytes);
+    let private_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(private_key_bytes));
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let builder = rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|error| format!("Unable to configure LAN TLS: {error}"))?;
+    let mut config = builder
+        .with_no_client_auth()
+        .with_single_cert(vec![certificate], private_key)
+        .map_err(|error| format!("Unable to configure LAN TLS certificate: {error}"))?;
+    config.alpn_protocols.push(b"http/1.1".to_vec());
+    Ok(Arc::new(config))
+}
+
 pub fn start(config: &mut FileShareConfig) -> Result<(), String> {
     let _lifecycle = lifecycle_lock();
     if !config.enabled {
@@ -1069,6 +1367,11 @@ pub fn start(config: &mut FileShareConfig) -> Result<(), String> {
     } else {
         None
     };
+    let lan_tls = if config.lan_enabled {
+        Some(lan_tls_config(&config.id, lan_host.as_deref())?)
+    } else {
+        None
+    };
     let lan_networks = if config.lan_enabled {
         detect_lan_networks()
     } else {
@@ -1120,6 +1423,7 @@ pub fn start(config: &mut FileShareConfig) -> Result<(), String> {
                 media_rate_limiter,
                 thread_allowed_ips,
                 lan_networks,
+                lan_tls,
                 thread_stop,
                 thread_clients,
                 Arc::new(AtomicUsize::new(1)),
@@ -1156,6 +1460,7 @@ fn serve_loop(
     media_rate_limiter: Arc<MediaRateLimiter>,
     allowed_ips: Vec<IpNetwork>,
     lan_networks: Vec<IpNetwork>,
+    lan_tls_config: Option<Arc<rustls::ServerConfig>>,
     stop: Arc<AtomicBool>,
     clients: Arc<Mutex<Vec<(usize, TcpStream)>>>,
     client_ids: Arc<AtomicUsize>,
@@ -1194,11 +1499,26 @@ fn serve_loop(
                 continue;
             }
 
+            let request_stream = if !peer_addr.ip().is_loopback() {
+                let Some(tls_config) = lan_tls_config.as_ref() else {
+                    let _ = stream.shutdown(Shutdown::Both);
+                    continue;
+                };
+                let Ok(connection) = rustls::ServerConnection::new(tls_config.clone()) else {
+                    let _ = stream.shutdown(Shutdown::Both);
+                    continue;
+                };
+                ClientStream::Tls(rustls::StreamOwned::new(connection, stream))
+            } else {
+                ClientStream::Plain(stream)
+            };
+            let secure_transport = matches!(&request_stream, ClientStream::Tls(_));
+
             if active.fetch_add(1, Ordering::Relaxed) >= MAX_ACTIVE_REQUESTS {
                 active.fetch_sub(1, Ordering::Relaxed);
-                let _ = stream.set_write_timeout(Some(CLIENT_READ_TIMEOUT));
+                let _ = request_stream.set_write_timeout(Some(CLIENT_READ_TIMEOUT));
                 let _ = send_response(
-                    stream,
+                    request_stream,
                     "503 Service Unavailable",
                     "text/plain; charset=utf-8",
                     b"Too many requests",
@@ -1209,7 +1529,11 @@ fn serve_loop(
             }
 
             let client_id = client_ids.fetch_add(1, Ordering::Relaxed);
-            let Ok(shutdown_stream) = stream.try_clone() else {
+            let client_socket = match &request_stream {
+                ClientStream::Plain(stream) => stream,
+                ClientStream::Tls(stream) => stream.get_ref(),
+            };
+            let Ok(shutdown_stream) = client_socket.try_clone() else {
                 active.fetch_sub(1, Ordering::Relaxed);
                 continue;
             };
@@ -1247,8 +1571,9 @@ fn serve_loop(
                         client_id,
                     };
                     let _ = serve_request(
-                        stream,
+                        request_stream,
                         peer_addr,
+                        secure_transport,
                         &request_instance_id,
                         request_root.as_deref(),
                         &request_token,
@@ -1302,9 +1627,10 @@ fn remove_client(clients: &Mutex<Vec<(usize, TcpStream)>>, client_id: usize) {
         .retain(|(registered_id, _)| *registered_id != client_id);
 }
 
-fn serve_request(
-    mut stream: TcpStream,
+fn serve_request<S: HttpStream>(
+    mut stream: S,
     peer_addr: SocketAddr,
+    secure_transport: bool,
     instance_id: &str,
     root: Option<&Path>,
     token: &str,
@@ -1485,9 +1811,13 @@ fn serve_request(
                     },
                 );
             let cookie = format!(
-                "{cookie_name}={session_token}; Path=/; Max-Age=43200; HttpOnly; SameSite=Strict"
+                "{cookie_name}={session_token}; Path=/; Max-Age=43200; HttpOnly; SameSite=Strict{}",
+                secure_cookie_attribute(secure_transport)
             );
-            let csrf_cookie = format!("{csrf_name}=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict");
+            let csrf_cookie = format!(
+                "{csrf_name}=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict{}",
+                secure_cookie_attribute(secure_transport)
+            );
             return send_response_with_headers(
                 stream,
                 "303 See Other",
@@ -1511,6 +1841,7 @@ fn serve_request(
             client_ip,
             &request.user_agent,
             false,
+            secure_transport,
             stop,
         );
     }
@@ -1567,8 +1898,14 @@ fn serve_request(
                     .remove(token);
             }
         }
-        let cookie = format!("{cookie_name}=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict");
-        let csrf_cookie = format!("{csrf_name}=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict");
+        let cookie = format!(
+            "{cookie_name}=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict{}",
+            secure_cookie_attribute(secure_transport)
+        );
+        let csrf_cookie = format!(
+            "{csrf_name}=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict{}",
+            secure_cookie_attribute(secure_transport)
+        );
         return send_response_with_headers(
             stream,
             "303 See Other",
@@ -1592,6 +1929,7 @@ fn serve_request(
             client_ip,
             &request.user_agent,
             false,
+            secure_transport,
             stop,
         );
     }
@@ -1601,7 +1939,8 @@ fn serve_request(
         String::new()
     };
     let csrf_cookie = format!(
-        "{csrf_name}={csrf_token}; Path=/; Max-Age=43200; HttpOnly; SameSite=Strict"
+        "{csrf_name}={csrf_token}; Path=/; Max-Age=43200; HttpOnly; SameSite=Strict{}",
+        secure_cookie_attribute(secure_transport)
     );
 
     let relative = match decode_share_path(&request.target, token, !require_login) {
@@ -1884,9 +2223,8 @@ fn serve_request(
     let (status, content_length, content_range) = match byte_range {
         Some((start, requested_end)) => {
             let end = if limited_media_preview {
-                requested_end.min(
-                    start.saturating_add(MAX_MEDIA_PREVIEW_RANGE_BYTES.saturating_sub(1)),
-                )
+                requested_end
+                    .min(start.saturating_add(MAX_MEDIA_PREVIEW_RANGE_BYTES.saturating_sub(1)))
             } else {
                 requested_end
             };
@@ -1897,16 +2235,14 @@ fn serve_request(
                 Some(format!("bytes {start}-{end}/{}", metadata.len())),
             )
         }
-        None if limited_media_preview => {
-            return send_response(
-                stream,
-                "400 Bad Request",
-                "text/plain; charset=utf-8",
-                b"Media preview requires a Range request. Use the download action for the full file.",
-                method == "HEAD",
-                stop,
-            )
-        }
+        None if limited_media_preview => return send_response(
+            stream,
+            "400 Bad Request",
+            "text/plain; charset=utf-8",
+            b"Media preview requires a Range request. Use the download action for the full file.",
+            method == "HEAD",
+            stop,
+        ),
         None => ("200 OK", metadata.len(), None),
     };
     set_access_status(status);
@@ -1946,8 +2282,8 @@ fn serve_request(
     Ok(())
 }
 
-fn serve_upload_request(
-    stream: TcpStream,
+fn serve_upload_request<S: HttpStream>(
+    stream: S,
     request: RequestHead,
     relative: PathBuf,
     upload_directory: Option<&Path>,
@@ -2076,8 +2412,8 @@ enum UploadBodyError {
     Stopped,
 }
 
-fn save_upload(
-    mut stream: TcpStream,
+fn save_upload<S: HttpStream>(
+    mut stream: S,
     directory: &Path,
     filename: &str,
     body: UploadBody,
@@ -2245,8 +2581,8 @@ fn save_upload(
     }
 }
 
-fn copy_fixed_upload(
-    stream: &mut TcpStream,
+fn copy_fixed_upload<S: HttpStream>(
+    stream: &mut S,
     file: &mut File,
     content_length: u64,
     stop: &AtomicBool,
@@ -2272,8 +2608,8 @@ fn copy_fixed_upload(
     }
 }
 
-fn copy_chunked_upload(
-    stream: &mut TcpStream,
+fn copy_chunked_upload<S: HttpStream>(
+    stream: &mut S,
     file: &mut File,
     max_upload_bytes: u64,
     quota: &UploadQuota,
@@ -2352,7 +2688,7 @@ fn copy_chunked_upload(
     }
 }
 
-fn read_retry_interrupted(stream: &mut TcpStream, buffer: &mut [u8]) -> io::Result<usize> {
+fn read_retry_interrupted<S: HttpStream>(stream: &mut S, buffer: &mut [u8]) -> io::Result<usize> {
     loop {
         match stream.read(buffer) {
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
@@ -2361,7 +2697,7 @@ fn read_retry_interrupted(stream: &mut TcpStream, buffer: &mut [u8]) -> io::Resu
     }
 }
 
-fn read_http_line(stream: &mut TcpStream, max_bytes: usize) -> io::Result<Vec<u8>> {
+fn read_http_line<S: HttpStream>(stream: &mut S, max_bytes: usize) -> io::Result<Vec<u8>> {
     let mut line = Vec::new();
     let mut byte = [0u8; 1];
     loop {
@@ -2437,11 +2773,15 @@ button, input { font: inherit; }
 .upload-heading p { margin: 5px 0 0; color: var(--muted); font-size: 12px; }
 .upload-limit { flex: none; padding: 6px 9px; border-radius: 8px; background: var(--surface-soft); color: var(--muted); font-size: 11px; }
 .upload-controls { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 10px; margin-top: 17px; }
-.file-picker { position: relative; display: flex; min-width: 0; min-height: 46px; align-items: center; gap: 10px; padding: 0 13px; overflow: hidden; border: 1px dashed #c5cfdf; border-radius: 10px; background: var(--surface-soft); color: var(--muted); cursor: pointer; }
-.file-picker:hover { border-color: var(--accent); background: var(--accent-soft); }
-.file-picker-icon { display: grid; width: 25px; height: 25px; flex: none; place-items: center; border-radius: 7px; background: var(--accent-soft); color: var(--accent); font-size: 18px; line-height: 1; }
-.file-picker-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.file-picker input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
+.upload-selection { display: grid; min-width: 0; gap: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface-soft); }
+.upload-pickers { display: flex; flex-wrap: wrap; gap: 8px; }
+.file-pick-button, .file-picker-clear { min-height: 42px; padding: 0 13px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); color: var(--text); font-size: 12px; font-weight: 650; cursor: pointer; touch-action: manipulation; }
+.file-pick-button { flex: 1 1 120px; }
+.file-pick-button:hover, .file-picker-clear:hover { border-color: var(--accent); background: var(--accent-soft); }
+.file-pick-button:disabled, .file-picker-clear:disabled { opacity: .55; cursor: not-allowed; }
+.file-picker-clear { color: var(--muted); font-weight: 500; }
+.file-picker-label { min-width: 0; max-height: 4.5em; overflow: auto; color: var(--muted); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.file-input-hidden[hidden], .file-picker-clear[hidden] { display: none !important; }
 .primary-button { min-height: 46px; padding: 0 18px; border: 1px solid var(--accent); border-radius: 10px; background: var(--accent); color: #fff; font-size: 13px; font-weight: 700; cursor: pointer; transition: background .15s, transform .15s; }
 .primary-button:hover:not(:disabled) { background: #244dcc; transform: translateY(-1px); }
 .primary-button:disabled { border-color: #bbc6d7; background: #bbc6d7; cursor: not-allowed; }
@@ -2487,7 +2827,7 @@ button, input { font: inherit; }
 .file-details-preview [hidden] { display: none !important; }
 .file-details-preview-heading { color: var(--muted); font-size: 10px; font-weight: 600; }
 .file-details-preview img { display: block; max-width: 100%; max-height: calc(94vh - 240px); align-self: center; border-radius: 7px; background: #111722; object-fit: contain; cursor: zoom-in; }
-.file-image-zoom { position: fixed; inset: 0; width: 100vw; height: 100vh; max-width: none; max-height: none; margin: 0; padding: 56px 24px 24px; overflow: hidden; border: 0; background: rgba(5,8,14,.96); color: #fff; }
+.file-image-zoom { position: fixed; inset: 0; width: 100vw; height: 100vh; width: 100dvw; height: 100dvh; max-width: none; max-height: none; margin: 0; padding: 56px 24px 24px; overflow: hidden; border: 0; background: rgba(5,8,14,.96); color: #fff; }
 .file-image-zoom::backdrop { background: rgba(5,8,14,.96); }
 .file-image-zoom[open] { display: grid; place-items: center; }
 .file-image-zoom img { display: block; max-width: 100%; max-height: 100%; object-fit: contain; cursor: zoom-out; }
@@ -2549,19 +2889,24 @@ html[data-theme="dark"] .upload-result.progress { background: #222f4b; color: #b
 html[data-theme="dark"] .upload-progress-track { background: rgba(255,255,255,.12); }
 html[data-theme="dark"] .primary-button:disabled { border-color: #445168; background: #445168; color: #bbc5d4; }
 @media (max-width: 620px) {
-  .page-shell { width: min(100% - 24px, 920px); padding: 17px 0 34px; }
+  .page-shell { width: min(100% - 24px, 920px); padding: max(14px, env(safe-area-inset-top)) 0 max(28px, env(safe-area-inset-bottom)); }
+  .sitebar { flex-wrap: wrap; gap: 9px; }
+  .theme-toggle, .logout-form button { min-height: 42px; }
   .page-main { margin-top: 14px; }
   .upload-panel { padding: 16px; }
   .upload-heading { flex-direction: column; gap: 9px; }
   .upload-limit { align-self: flex-start; }
   .upload-controls { grid-template-columns: 1fr; }
+  .upload-pickers { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .file-pick-button { min-height: 46px; padding: 0 8px; }
   .file-tools { grid-template-columns: 1fr; padding: 11px 12px 0; }
   .upload-progress-head { flex-direction: column; gap: 4px; }
   .upload-progress-meta { text-align: left; }
   .primary-button { width: 100%; }
   .list-heading { padding: 15px 16px; }
   .file-list { padding: 6px; }
-  .file-row { grid-template-columns: 38px minmax(0,1fr) auto; gap: 10px; min-height: 62px; padding: 9px 8px; }
+  .file-row { grid-template-columns: 38px minmax(0,1fr) auto; gap: 10px; min-height: 68px; padding: 9px 8px; }
+  .file-download-button { width: 42px; height: 42px; }
   .file-details-trigger { grid-column: 1 / 3; grid-template-columns: 38px minmax(0,1fr); gap: 10px; }
   .file-icon { width: 34px; height: 34px; border-radius: 10px; }
   .file-icon svg { width: 18px; height: 18px; }
@@ -2569,11 +2914,14 @@ html[data-theme="dark"] .primary-button:disabled { border-color: #445168; backgr
   .file-arrow { grid-column: 3; grid-row: 1 / span 2; }
   .file-action-spacer { grid-column: 3; grid-row: 1 / span 2; }
   .file-details-body { gap: 10px; padding: 10px; }
+  .file-details-actions .preview-action { min-height: 42px; padding: 0 10px; }
+  .file-details-dialog { width: calc(100vw - 16px); max-width: calc(100vw - 16px); max-height: calc(100dvh - 16px); }
+  .file-details-shell { max-height: calc(100dvh - 16px); }
   .file-details-info { grid-template-columns: repeat(2,minmax(0,1fr)); }
-  .file-details-preview { max-height: 58vh; padding: 8px; }
+  .file-details-preview { max-height: 58vh; max-height: 58dvh; padding: 8px; }
   .file-details-preview img { max-height: 48vh; }
   .file-details-preview video { max-height: 48vh; }
-  .file-details-text { min-height: 200px; height: 48vh; }
+  .file-details-text { min-height: 200px; height: 48vh; height: 48dvh; }
 }
 @media (max-width: 380px) {
   .page-shell { width: min(100% - 20px, 920px); }
@@ -2581,11 +2929,12 @@ html[data-theme="dark"] .primary-button:disabled { border-color: #445168; backgr
   .file-row { grid-template-columns: 32px minmax(0,1fr) auto; gap: 8px; }
   .file-details-trigger { grid-template-columns: 32px minmax(0,1fr); gap: 8px; }
   .file-icon { width: 30px; height: 30px; }
-  .file-download-button { width: 30px; height: 30px; }
+  .file-download-button { width: 42px; height: 42px; }
   .file-details-info { grid-template-columns: minmax(0,1fr); }
-  .file-details-header { gap: 8px; padding: 8px; }
-  .file-details-actions { gap: 5px; }
-  .file-details-actions .preview-action { min-height: 32px; padding: 0 8px; }
+  .file-details-header { gap: 8px; padding: 9px; }
+  .file-details-actions { gap: 6px; }
+  .file-details-actions .preview-action { min-height: 42px; padding: 0 10px; }
+  .file-image-zoom { padding: calc(56px + env(safe-area-inset-top)) 10px calc(12px + env(safe-area-inset-bottom)); }
 }
 "#;
 
@@ -2785,11 +3134,25 @@ main p { color: var(--danger); font-size: 13px; }
 const FOLDER_ICON: &str = r#"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 7.5a2 2 0 0 1 2-2h4l2 2h6.9a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5.5a2 2 0 0 1-2-2z"/><path d="M3.8 10h16.4"/></svg>"#;
 const FILE_ICON: &str = r#"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 3.8h6.5l4.7 4.7v11.7H7a2 2 0 0 1-2-2v-12a2 2 0 0 1 2-2.4z"/><path d="M13 4v5h5M8.5 13h7M8.5 16.5h7"/></svg>"#;
 
-const UPLOAD_PANEL_TEMPLATE: &str = r#"<section class="upload-panel" aria-labelledby="upload-title"><div class="upload-heading"><div><h2 id="upload-title">上传到收件目录</h2><p>上传文件保存在独立收件目录，同名文件不会覆盖。</p></div><span class="upload-limit">单文件最多 MAX_UPLOAD_MB MB · 收件目录最多 MAX_TOTAL_MB MB</span></div><div class="upload-controls"><label class="file-picker"><span class="file-picker-icon" aria-hidden="true">＋</span><span id="file-label" class="file-picker-label">点击选择文件或从手机中选取</span><input id="files" type="file" multiple aria-label="选择要上传的文件"></label><button id="upload" class="primary-button" type="button" disabled>开始上传</button></div><div id="status" class="upload-status" role="status" aria-live="polite"></div><script>
+const UPLOAD_PANEL_TEMPLATE: &str = r#"<section class="upload-panel" aria-labelledby="upload-title"><div class="upload-heading"><div><h2 id="upload-title">上传到收件目录</h2><p>上传文件保存在独立收件目录，同名文件不会覆盖。</p></div><span class="upload-limit">单文件最多 MAX_UPLOAD_MB MB · 收件目录最多 MAX_TOTAL_MB MB</span></div><div class="upload-controls"><div class="upload-selection"><div class="upload-pickers"><button id="pick-images" class="file-pick-button" type="button" aria-label="&#36873;&#25321;&#22270;&#29255;">&#36873;&#25321;&#22270;&#29255;</button><button id="pick-files" class="file-pick-button" type="button" aria-label="&#36873;&#25321;&#25991;&#20214;">&#36873;&#25321;&#25991;&#20214;</button><button id="clear-files" class="file-picker-clear" type="button" hidden>&#28165;&#31354;&#36873;&#25321;</button></div><div id="file-label" class="file-picker-label" aria-live="polite">&#35831;&#36873;&#25321;&#22270;&#29255;&#25110;&#25991;&#20214;</div><input id="images" class="file-input-hidden" type="file" accept="image/*" multiple hidden aria-label="&#36873;&#25321;&#22270;&#29255;"><input id="files" class="file-input-hidden" type="file" multiple hidden aria-label="&#36873;&#25321;&#25991;&#20214;"></div><button id="upload" class="primary-button" type="button" disabled>开始上传</button></div><div id="status" class="upload-status" role="status" aria-live="polite"></div><script>
+const imageInput=document.getElementById('images');
 const input=document.getElementById('files');
 const fileLabel=document.getElementById('file-label');
 const button=document.getElementById('upload');
 const status=document.getElementById('status');
+const pickImages=document.getElementById('pick-images');
+const pickFiles=document.getElementById('pick-files');
+const clearFiles=document.getElementById('clear-files');
+const selectedFiles=[];
+const selectedKeys=new Set();
+function updateSelection(){const names=selectedFiles.slice(0,4).map(file=>file.name).join('\u3001');fileLabel.textContent=selectedFiles.length?'\u5df2\u9009 '+selectedFiles.length+' \u4e2a\u6587\u4ef6\uff1a'+names+(selectedFiles.length>4?'\u7b49':''):'\u8bf7\u9009\u62e9\u56fe\u7247\u6216\u6587\u4ef6';button.disabled=selectedFiles.length===0;clearFiles.hidden=selectedFiles.length===0}
+function addSelectedFiles(source){const files=Array.from(source.files||[]);source.value='';for(const file of files){const key=[file.name,file.size,file.lastModified,file.type].join('|');if(!selectedKeys.has(key)){selectedKeys.add(key);selectedFiles.push(file)}}updateSelection();status.replaceChildren()}
+function setPickerDisabled(disabled){pickImages.disabled=disabled;pickFiles.disabled=disabled;clearFiles.disabled=disabled}
+pickImages.addEventListener('click',()=>imageInput.click());
+pickFiles.addEventListener('click',()=>input.click());
+imageInput.addEventListener('change',()=>addSelectedFiles(imageInput));
+input.addEventListener('change',()=>addSelectedFiles(input));
+clearFiles.addEventListener('click',()=>{selectedFiles.length=0;selectedKeys.clear();status.replaceChildren();updateSelection()});
 const maxUploadBytes=MAX_UPLOAD_BYTES;
 const csrfToken='CSRF_TOKEN';
 function report(message,state=''){const row=document.createElement('p');row.className='upload-result '+state;row.textContent=message;status.appendChild(row)}
@@ -2797,8 +3160,7 @@ function formatBytes(value){if(!Number.isFinite(value)||value<=0)return '0 B';co
 function formatRemaining(seconds){if(!Number.isFinite(seconds)||seconds<0)return '计算中';if(seconds<60)return Math.ceil(seconds)+' 秒';const minutes=Math.floor(seconds/60);const rest=Math.ceil(seconds%60);if(minutes<60)return minutes+' 分 '+rest+' 秒';return Math.floor(minutes/60)+' 小时 '+(minutes%60)+' 分'}
 function createProgressRow(file,index,count){const row=document.createElement('div');row.className='upload-result progress';const head=document.createElement('div');head.className='upload-progress-head';const name=document.createElement('span');name.className='upload-progress-name';name.textContent='上传中（'+(index+1)+'/'+count+'）：'+file.name;const meta=document.createElement('span');meta.className='upload-progress-meta';meta.textContent='等待发送 · 0 B / '+formatBytes(file.size);head.append(name,meta);const track=document.createElement('div');track.className='upload-progress-track';track.setAttribute('role','progressbar');track.setAttribute('aria-label','上传 '+file.name);track.setAttribute('aria-valuemin','0');track.setAttribute('aria-valuemax','100');track.setAttribute('aria-valuenow','0');const fill=document.createElement('div');fill.className='upload-progress-fill';track.append(fill);row.append(head,track);status.appendChild(row);return{row,name,meta,track,fill}}
 function uploadFile(file,url,onProgress){return new Promise((resolve,reject)=>{const request=new XMLHttpRequest();request.open('PUT',url);if(csrfToken)request.setRequestHeader('X-SW-CSRF-Token',csrfToken);request.upload.addEventListener('progress',onProgress);request.addEventListener('load',()=>resolve({status:request.status,body:request.responseText}));request.addEventListener('error',()=>reject(new Error('网络连接中断，未收到服务器响应')));request.addEventListener('abort',()=>reject(new Error('上传已取消')));request.send(file)})}
-input.addEventListener('change',()=>{const files=Array.from(input.files||[]);fileLabel.textContent=files.length?files.map(file=>file.name).join('、'):'点击选择文件或从手机中选取';button.disabled=files.length===0;status.replaceChildren()});
-button.addEventListener('click',async()=>{const files=Array.from(input.files||[]);if(!files.length){report('请先选择文件。','error');return}status.replaceChildren();button.disabled=true;input.disabled=true;button.textContent='正在上传…';const base='UPLOAD_BASE';try{for(let index=0;index<files.length;index++){const file=files[index];if(file.size>maxUploadBytes){report('已跳过 '+file.name+'：超过单文件上限。','error');continue}const progress=createProgressRow(file,index,files.length);const startedAt=performance.now();try{const response=await uploadFile(file,new URL(base+encodeURIComponent(file.name),location.origin),event=>{const loaded=Math.min(event.loaded,file.size);const total=event.lengthComputable?event.total:file.size;const percent=total>0?Math.min(100,Math.floor(loaded/total*100)):0;const elapsed=Math.max((performance.now()-startedAt)/1000,0.001);const speed=loaded/elapsed;const remaining=speed>0&&total>loaded?(total-loaded)/speed:0;progress.fill.style.width=percent+'%';progress.track.setAttribute('aria-valuenow',String(percent));progress.meta.textContent='已发送 '+formatBytes(loaded)+' / '+formatBytes(total)+' · '+percent+'% · '+formatBytes(speed)+'/秒 · 剩余 '+formatRemaining(remaining)});let detail=response.body.trim();if(response.status<200||response.status>=300){if(/<!doctype html/i.test(response.body)){const page=new DOMParser().parseFromString(response.body,'text/html');const code=page.querySelector('.code-label')?.textContent?.trim()||('HTTP '+response.status);const ray=response.body.match(/Cloudflare Ray ID:\s*(?:<strong[^>]*>)?([^<\s]+)/i)?.[1];detail=[code,page.title?.trim(),ray?'Ray ID '+ray:''].filter(Boolean).join(' · ')}else if(!detail){detail='HTTP '+response.status}progress.row.className='upload-result error';progress.meta.textContent='上传失败 · '+detail}else{progress.row.className='upload-result success';progress.name.textContent='上传完成：'+file.name;progress.fill.style.width='100%';progress.track.setAttribute('aria-valuenow','100');progress.meta.textContent='完成 · '+formatBytes(file.size)}}catch(error){progress.row.className='upload-result error';progress.meta.textContent='上传失败 · '+String(error)}}}finally{button.disabled=false;input.disabled=false;button.textContent='重新上传'}});
+button.addEventListener('click',async()=>{const files=selectedFiles.slice();if(!files.length){report('请先选择文件。','error');return}status.replaceChildren();button.disabled=true;setPickerDisabled(true);button.textContent='正在上传…';const base='UPLOAD_BASE';try{for(let index=0;index<files.length;index++){const file=files[index];if(file.size>maxUploadBytes){report('已跳过 '+file.name+'：超过单文件上限。','error');continue}const progress=createProgressRow(file,index,files.length);const startedAt=performance.now();try{const response=await uploadFile(file,new URL(base+encodeURIComponent(file.name),location.origin),event=>{const loaded=Math.min(event.loaded,file.size);const total=event.lengthComputable?event.total:file.size;const percent=total>0?Math.min(100,Math.floor(loaded/total*100)):0;const elapsed=Math.max((performance.now()-startedAt)/1000,0.001);const speed=loaded/elapsed;const remaining=speed>0&&total>loaded?(total-loaded)/speed:0;progress.fill.style.width=percent+'%';progress.track.setAttribute('aria-valuenow',String(percent));progress.meta.textContent='已发送 '+formatBytes(loaded)+' / '+formatBytes(total)+' · '+percent+'% · '+formatBytes(speed)+'/秒 · 剩余 '+formatRemaining(remaining)});let detail=response.body.trim();if(response.status<200||response.status>=300){if(/<!doctype html/i.test(response.body)){const page=new DOMParser().parseFromString(response.body,'text/html');const code=page.querySelector('.code-label')?.textContent?.trim()||('HTTP '+response.status);const ray=response.body.match(/Cloudflare Ray ID:\s*(?:<strong[^>]*>)?([^<\s]+)/i)?.[1];detail=[code,page.title?.trim(),ray?'Ray ID '+ray:''].filter(Boolean).join(' · ')}else if(!detail){detail='HTTP '+response.status}progress.row.className='upload-result error';progress.meta.textContent='上传失败 · '+detail}else{progress.row.className='upload-result success';progress.name.textContent='上传完成：'+file.name;progress.fill.style.width='100%';progress.track.setAttribute('aria-valuenow','100');progress.meta.textContent='完成 · '+formatBytes(file.size)}}catch(error){progress.row.className='upload-result error';progress.meta.textContent='上传失败 · '+String(error)}}}finally{button.disabled=selectedFiles.length===0;setPickerDisabled(false);button.textContent='重新上传'}});
 </script></section>"#;
 
 const IMAGE_ICON: &str = r#"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="2"/><circle cx="9" cy="9" r="1.5"/><path d="m4 17 5-5 3 3 2-2 6 5"/></svg>"#;
@@ -2823,22 +3185,18 @@ fn file_type_details(name: &str) -> (&'static str, &'static str, String) {
         "mp4" | "mkv" | "mov" | "avi" | "webm" | "m4v" | "wmv" | "mpeg" | "mpg" => {
             ("video", "视频")
         }
-        "mp3" | "wav" | "flac" | "aac" | "ogg" | "m4a" | "opus" | "wma" => {
-            ("audio", "音频")
-        }
+        "mp3" | "wav" | "flac" | "aac" | "ogg" | "m4a" | "opus" | "wma" => ("audio", "音频"),
         "zip" | "rar" | "7z" | "tar" | "gz" | "bz2" | "xz" | "zst" | "tgz" => {
             ("archive", "压缩文件")
         }
         "pdf" | "doc" | "docx" | "odt" | "rtf" | "txt" | "md" => ("document", "文档"),
         "xls" | "xlsx" | "ods" | "csv" | "tsv" => ("spreadsheet", "表格"),
         "ppt" | "pptx" | "odp" => ("presentation", "演示文稿"),
-        "rs" | "js" | "mjs" | "cjs" | "ts" | "jsx" | "tsx" | "py" | "java" | "c"
-        | "h" | "cpp" | "hpp" | "go" | "rb" | "php" | "html" | "css" | "scss"
-        | "json" | "yaml" | "yml" | "toml" | "xml" | "sh" | "ps1" | "sql" => {
-            ("code", "代码")
-        }
-        "exe" | "msi" | "msp" | "appx" | "msix" | "apk" | "deb" | "rpm" | "dmg"
-        | "pkg" | "bat" | "cmd" => ("application", "程序"),
+        "rs" | "js" | "mjs" | "cjs" | "ts" | "jsx" | "tsx" | "py" | "java" | "c" | "h" | "cpp"
+        | "hpp" | "go" | "rb" | "php" | "html" | "css" | "scss" | "json" | "yaml" | "yml"
+        | "toml" | "xml" | "sh" | "ps1" | "sql" => ("code", "代码"),
+        "exe" | "msi" | "msp" | "appx" | "msix" | "apk" | "deb" | "rpm" | "dmg" | "pkg" | "bat"
+        | "cmd" => ("application", "程序"),
         "ttf" | "otf" | "woff" | "woff2" => ("font", "字体"),
         _ => ("other", "文件"),
     };
@@ -2911,7 +3269,7 @@ enum RequestReadError {
     Io(io::Error),
 }
 
-fn read_request_head(stream: &mut TcpStream) -> Result<RequestHead, RequestReadError> {
+fn read_request_head<S: HttpStream>(stream: &mut S) -> Result<RequestHead, RequestReadError> {
     let mut bytes = Vec::with_capacity(1024);
     let mut byte = [0u8; 1];
     loop {
@@ -3253,7 +3611,11 @@ fn directory_listing(
             let metadata = fs::metadata(&canonical).ok()?;
             let modified = metadata
                 .modified()
-                .map(|time| chrono::DateTime::<Local>::from(time).format("%Y-%m-%d %H:%M").to_string())
+                .map(|time| {
+                    chrono::DateTime::<Local>::from(time)
+                        .format("%Y-%m-%d %H:%M")
+                        .to_string()
+                })
                 .unwrap_or_else(|_| "未知".to_string());
             Some((name, metadata.is_dir(), metadata.len(), modified))
         })
@@ -3334,7 +3696,9 @@ fn directory_listing(
             html.push_str(&label);
             html.push_str("</span><span class=\"file-kind\">打开文件夹</span></span><span class=\"file-meta\"><span>文件夹</span><time>");
             html.push_str(&modified_label);
-            html.push_str("</time></span><span class=\"file-arrow\" aria-hidden=\"true\">›</span></a>");
+            html.push_str(
+                "</time></span><span class=\"file-arrow\" aria-hidden=\"true\">›</span></a>",
+            );
             continue;
         }
 
@@ -3543,13 +3907,13 @@ fn content_type(path: &Path) -> &'static str {
         .to_ascii_lowercase()
         .as_str()
     {
-        "txt" | "text" | "log" | "md" | "markdown" | "csv" | "tsv"
-        | "jsonc" | "yaml" | "yml" | "toml" | "ini" | "conf" | "cfg" | "properties"
-        | "xml" | "css" | "scss" | "sass" | "less" | "js" | "mjs"
-        | "cjs" | "ts" | "tsx" | "jsx" | "vue" | "svelte" | "rs" | "go" | "py"
-        | "rb" | "php" | "java" | "kt" | "kts" | "c" | "h" | "cc" | "cpp" | "hpp"
-        | "cs" | "sh" | "bash" | "zsh" | "ps1" | "bat" | "cmd" | "sql" | "graphql"
-        | "gql" | "proto" => "text/plain; charset=utf-8",
+        "txt" | "text" | "log" | "md" | "markdown" | "csv" | "tsv" | "jsonc" | "yaml" | "yml"
+        | "toml" | "ini" | "conf" | "cfg" | "properties" | "xml" | "css" | "scss" | "sass"
+        | "less" | "js" | "mjs" | "cjs" | "ts" | "tsx" | "jsx" | "vue" | "svelte" | "rs" | "go"
+        | "py" | "rb" | "php" | "java" | "kt" | "kts" | "c" | "h" | "cc" | "cpp" | "hpp" | "cs"
+        | "sh" | "bash" | "zsh" | "ps1" | "bat" | "cmd" | "sql" | "graphql" | "gql" | "proto" => {
+            "text/plain; charset=utf-8"
+        }
         "pdf" => "application/pdf",
         "json" => "application/json",
         "png" => "image/png",
@@ -3678,10 +4042,7 @@ fn upload_only_page(
         "<meta name=\"theme-color\" content=\"#0e1420\"><title>文件上传</title>",
     );
     html = html.replace("<style>", &format!("{THEME_BOOTSTRAP_SCRIPT}<style>"));
-    html = html.replace(
-        "</header>",
-        &format!("{THEME_TOGGLE_BUTTON}</header>"),
-    );
+    html = html.replace("</header>", &format!("{THEME_TOGGLE_BUTTON}</header>"));
     if prefix.is_empty() {
         html.push_str("<form method=\"post\" action=\"/__auth/logout\" class=\"logout-form\"><button type=\"submit\">退出登录</button></form>");
     }
@@ -3707,8 +4068,8 @@ fn upload_only_page(
     html
 }
 
-fn send_response_with_headers(
-    mut stream: TcpStream,
+fn send_response_with_headers<S: HttpStream>(
+    mut stream: S,
     status: &str,
     content_type: &str,
     body: &[u8],
@@ -3730,8 +4091,8 @@ fn send_response_with_headers(
     Ok(())
 }
 
-fn send_response(
-    mut stream: TcpStream,
+fn send_response<S: HttpStream>(
+    mut stream: S,
     status: &str,
     content_type: &str,
     body: &[u8],

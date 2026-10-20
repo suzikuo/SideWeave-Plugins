@@ -261,7 +261,7 @@ async function clearLogs() {
             <div v-if="share.token" class="link-row token-row"><b>访问令牌</b><code>{{ share.token }}</code><button class="button subtle" @click="copy(share.token, '访问令牌')">复制令牌</button></div>
           </div>
           <footer class="detail-foot">
-            <span v-if="share.lan_enabled && share.require_login" class="warning">局域网 HTTP 不加密，密码和会话流量可能被同网段观察。</span>
+            <span v-if="share.lan_enabled" class="warning">局域网使用 HTTPS 加密传输。证书为自签名，浏览器会提示连接不安全，确认继续即可。</span>
             <span v-else>{{ share.require_login ? '停用服务或修改账号密码会使现有会话失效。' : '分享链接包含访问令牌，请只发送给可信对象。' }}</span>
             <button v-if="!share.require_login" class="button subtle" @click="rotate(share)">重置令牌</button>
           </footer>
@@ -295,7 +295,7 @@ async function clearLogs() {
           <div v-if="form.allow_upload" class="grid"><label class="field"><span>单文件上限（MB）</span><input v-model.number="form.max_upload_mb" type="number" min="1" max="1024" /></label><label class="field"><span>收件目录上限（MB）</span><input v-model.number="form.max_total_upload_mb" type="number" min="1" max="8192" /></label></div>
           <div class="grid"><label class="option"><input v-model="form.lan_enabled" type="checkbox" /><span><b>允许局域网访问</b><small>监听本机所有网络接口</small></span></label><label class="option"><input v-model="form.require_login" type="checkbox" /><span><b>要求共享账号登录</b><small>登录模式不使用令牌后缀</small></span></label></div>
           <label class="field"><span>IP 白名单 <small>每行一个 IP 或 CIDR，可留空</small></span><textarea v-model="form.allowed_ips" rows="3" class="mono" placeholder="192.168.1.20&#10;192.168.1.0/24" /></label>
-          <div v-if="form.lan_enabled && form.require_login" class="security-note warning">局域网 HTTP 不加密，密码和会话可能被同一网络中的其他设备观察。</div>
+          <div v-if="form.lan_enabled" class="security-note warning">局域网使用 HTTPS 加密传输。证书为自签名，浏览器会提示连接不安全，确认继续即可。</div>
         </div>
         <footer class="dialog-foot"><button type="button" class="button subtle" @click="editorOpen = false">取消</button><button type="submit" class="button primary" :disabled="saving">{{ saving ? '保存中…' : '保存实例' }}</button></footer>
       </form>

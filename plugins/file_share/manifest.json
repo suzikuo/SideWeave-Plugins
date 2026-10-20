@@ -4,7 +4,7 @@
   "id": "file_share",
   "name": "本地文件服务",
   "icon": "ui/icon.svg",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "独立管理本机和局域网文件浏览、上传、账号认证与媒体预览。",
   "author": "SideWeave",
   "type": "native",
