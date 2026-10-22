@@ -1,6 +1,6 @@
 [package]
 name = "sideweave_plugin-app-launcher"
-version = "1.0.4"
+version = "1.0.5"
 edition = "2021"
 description = "Application launcher plugin for SideWeave"
 

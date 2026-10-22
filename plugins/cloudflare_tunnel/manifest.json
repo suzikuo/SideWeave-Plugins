@@ -4,7 +4,7 @@
   "id": "cloudflare_tunnel",
   "name": "Cloudflare Tunnel",
   "icon": "ui/icon.svg",
-  "version": "1.0.21",
+  "version": "1.0.22",
   "description": "SideWeave 本地 Cloudflare Tunnel 快速管理器",
   "author": "SideWeave",
   "type": "native",

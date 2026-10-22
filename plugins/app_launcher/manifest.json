@@ -4,7 +4,7 @@
   "id": "app_launcher",
   "name": "App Launcher",
   "icon": "ui/icon.svg",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "应用启动器：快速启动本地应用与 Chrome 应用窗口",
   "author": "SideWeave",
   "type": "native",
