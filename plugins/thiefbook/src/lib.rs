@@ -632,6 +632,7 @@ impl ThiefbookPlugin {
                 Ok(json!({
                     "title": "书架悬浮窗",
                     "status": if visible { "online" } else { "offline" },
+                    "stateText": if visible { "正在显示" } else { "已隐藏" },
                     "statusText": if visible { "正在显示" } else { "已隐藏" },
                     "subtitle": subtitle,
                     "actions": [{

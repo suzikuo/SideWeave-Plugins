@@ -1,14 +1,19 @@
-use sideweave_plugin_api::{
-    ErrorCode, PluginError, PluginManifest, PluginRequest, PluginRequestKind,
-    PluginResponse, PluginRuntime, PluginTrust, API_VERSION, MANIFEST_VERSION,
-};
-use sideweave_plugin_sdk::{success_response, Plugin, PluginContext};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sideweave_plugin_api::{
+    ErrorCode, PluginError, PluginManifest, PluginRequest, PluginRequestKind, PluginResponse,
+    PluginRuntime, PluginTrust, API_VERSION, MANIFEST_VERSION,
+};
+use sideweave_plugin_sdk::{success_response, Plugin, PluginContext};
+use std::collections::{HashMap, VecDeque};
+use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::UNIX_EPOCH;
 
 const PLUGIN_ID: &str = "app_launcher";
 const STATE_KEY: &str = "state";
+const ICON_CACHE_CAPACITY: usize = 128;
 
 sideweave_plugin_sdk::export_plugin_dylib!(AppLauncherPlugin);
 
@@ -76,15 +81,55 @@ struct LauncherState {
 
 pub struct AppLauncherPlugin {
     manifest: PluginManifest,
+    icon_cache: Mutex<IconCache>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct IconCacheKey {
+    path: String,
+    file_len: Option<u64>,
+    modified_ns: Option<u128>,
+}
+
+#[derive(Default)]
+struct IconCache {
+    values: HashMap<IconCacheKey, String>,
+    recent: VecDeque<IconCacheKey>,
+}
+
+impl IconCache {
+    fn get(&mut self, key: &IconCacheKey) -> Option<String> {
+        let value = self.values.get(key)?.clone();
+        if let Some(index) = self.recent.iter().position(|item| item == key) {
+            self.recent.remove(index);
+        }
+        self.recent.push_back(key.clone());
+        Some(value)
+    }
+
+    fn insert(&mut self, key: IconCacheKey, value: String) {
+        if self.values.contains_key(&key) {
+            self.recent.retain(|item| item != &key);
+        } else if self.values.len() >= ICON_CACHE_CAPACITY {
+            if let Some(oldest) = self.recent.pop_front() {
+                self.values.remove(&oldest);
+            }
+        }
+        self.recent.push_back(key.clone());
+        self.values.insert(key, value);
+    }
 }
 
 impl Default for AppLauncherPlugin {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AppLauncherPlugin {
     pub fn new() -> Self {
         Self {
+            icon_cache: Mutex::new(IconCache::default()),
             manifest: PluginManifest {
                 manifest_version: MANIFEST_VERSION,
                 api_version: API_VERSION,
@@ -182,10 +227,7 @@ impl AppLauncherPlugin {
             }
             Some("icon") => {
                 let path = string_field(&request.payload, "path")?;
-                Ok(json!(context
-                    .system()
-                    .extract_icon(&path)
-                    .map_err(|error| error.message)?))
+                Ok(json!(self.extract_icon_cached(context, &path)?))
             }
             Some("toggle_preview") => {
                 let id = string_field(&request.payload, "id")?;
@@ -209,7 +251,10 @@ impl AppLauncherPlugin {
                 let items: Vec<Value> = preview_apps
                     .into_iter()
                     .map(|app| {
-                        let icon = context.system().extract_icon(&app.exe_path).ok().flatten();
+                        let icon = self
+                            .extract_icon_cached(context, &app.exe_path)
+                            .ok()
+                            .flatten();
                         json!({
                             "id": app.id,
                             "title": app.name,
@@ -235,6 +280,52 @@ impl AppLauncherPlugin {
             Some(method) => Err(format!("不支持的应用启动器方法: {method}")),
             None => Err("缺少插件方法".into()),
         }
+    }
+
+    fn extract_icon_cached(
+        &self,
+        context: &PluginContext,
+        path: &str,
+    ) -> Result<Option<String>, String> {
+        let key = icon_cache_key(path);
+        if let Some(icon) = self
+            .icon_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&key)
+        {
+            return Ok(Some(icon));
+        }
+
+        let icon = context
+            .system()
+            .extract_icon(path)
+            .map_err(|error| error.message)?;
+        if let Some(value) = icon.as_ref() {
+            self.icon_cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(key, value.clone());
+        }
+        Ok(icon)
+    }
+}
+
+fn icon_cache_key(path: &str) -> IconCacheKey {
+    let normalized_path = fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
+    let path = normalized_path.to_string_lossy().into_owned();
+    #[cfg(windows)]
+    let path = path.to_lowercase();
+    let metadata = fs::metadata(path.as_str()).ok();
+    let file_len = metadata.as_ref().map(fs::Metadata::len);
+    let modified_ns = metadata
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos());
+    IconCacheKey {
+        path,
+        file_len,
+        modified_ns,
     }
 }
 
@@ -543,5 +634,52 @@ fn error_response(request: &PluginRequest, message: String) -> PluginResponse {
             code: ErrorCode::Internal,
             message,
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cache_key(index: usize) -> IconCacheKey {
+        IconCacheKey {
+            path: format!("C:\\Apps\\app-{index}.exe"),
+            file_len: Some(index as u64),
+            modified_ns: Some(index as u128),
+        }
+    }
+
+    #[test]
+    fn icon_cache_hits_and_invalidates_when_metadata_changes() {
+        let mut cache = IconCache::default();
+        let original = IconCacheKey {
+            path: "C:\\Apps\\target.exe".into(),
+            file_len: Some(100),
+            modified_ns: Some(500),
+        };
+        let changed = IconCacheKey {
+            file_len: Some(101),
+            modified_ns: Some(501),
+            ..original.clone()
+        };
+        cache.insert(original.clone(), "icon-data".into());
+
+        assert_eq!(cache.get(&original).as_deref(), Some("icon-data"));
+        assert!(cache.get(&changed).is_none());
+    }
+
+    #[test]
+    fn icon_cache_evicts_least_recently_used_items_at_capacity() {
+        let mut cache = IconCache::default();
+        for index in 0..ICON_CACHE_CAPACITY {
+            cache.insert(cache_key(index), format!("icon-{index}"));
+        }
+        assert!(cache.get(&cache_key(0)).is_some());
+        cache.insert(cache_key(ICON_CACHE_CAPACITY), "new-icon".into());
+
+        assert_eq!(cache.values.len(), ICON_CACHE_CAPACITY);
+        assert!(cache.get(&cache_key(0)).is_some());
+        assert!(cache.get(&cache_key(1)).is_none());
+        assert!(cache.get(&cache_key(ICON_CACHE_CAPACITY)).is_some());
     }
 }

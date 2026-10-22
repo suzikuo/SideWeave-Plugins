@@ -309,6 +309,7 @@ impl SshPlugin {
                 "title": "SSH 会话",
                 "subtitle": "暂未添加远程服务器",
                 "status": "info",
+                "stateText": "无会话",
                 "statusText": "无会话",
                 "items": [],
                 "actions": [

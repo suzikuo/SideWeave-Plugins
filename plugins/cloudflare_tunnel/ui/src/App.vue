@@ -42,20 +42,28 @@ let refreshTimer = 0
 let pluginActive = false
 let setupPrompted = false
 let unlistenLifecycle: (() => void) | null = null
+let loadDataInFlight: Promise<void> | null = null
 
-async function loadData(silent = false) {
-  try {
-    const res = await cfGetTunnel()
-    if (res) {
-      detail.value = res
-      configured.value = true
-    } else {
-      detail.value = null
-      configured.value = false
+function loadData(silent = false): Promise<void> {
+  if (loadDataInFlight) return loadDataInFlight
+  const request = Promise.resolve().then(async () => {
+    try {
+      const res = await cfGetTunnel()
+      if (res) {
+        detail.value = res
+        configured.value = true
+      } else {
+        detail.value = null
+        configured.value = false
+      }
+    } catch (e: any) {
+      if (!silent) showToast(String(e?.message || e), 'error')
+    } finally {
+      if (loadDataInFlight === request) loadDataInFlight = null
     }
-  } catch (e: any) {
-    if (!silent) showToast(String(e?.message || e), 'error')
-  }
+  })
+  loadDataInFlight = request
+  return request
 }
 
 // ---------- 启停与控制 ----------
@@ -314,13 +322,21 @@ async function handleReset() {
 const showLogDrawer = ref(false)
 const logLines = ref<string[]>([])
 let logTimer = 0
+let logFetchInFlight: Promise<void> | null = null
 
-async function fetchLogs() {
-  try {
-    logLines.value = await cfGetLogs(50)
-  } catch {
-    // 静默
-  }
+function fetchLogs(): Promise<void> {
+  if (logFetchInFlight) return logFetchInFlight
+  const request = Promise.resolve().then(async () => {
+    try {
+      logLines.value = await cfGetLogs(50)
+    } catch {
+      // 静默
+    } finally {
+      if (logFetchInFlight === request) logFetchInFlight = null
+    }
+  })
+  logFetchInFlight = request
+  return request
 }
 
 function openLogs() {

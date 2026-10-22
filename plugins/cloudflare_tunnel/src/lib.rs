@@ -80,7 +80,7 @@ impl CloudflareTunnelPlugin {
             Some("get_preview") => {
                 if !config_manager::has_tunnel() {
                     return Ok(
-                        json!({"title":"Cloudflare Tunnel","status":"offline","statusText":"未配置","subtitle":"未检测到本地 Tunnel","metrics":[],"actions":[]}),
+                        json!({"title":"Cloudflare Tunnel","status":"offline","stateText":"未配置","statusText":"未配置","subtitle":"未检测到本地 Tunnel","metrics":[],"actions":[]}),
                     );
                 }
                 let tunnel = config_manager::load_tunnel()?;
@@ -90,6 +90,12 @@ impl CloudflareTunnelPlugin {
                     models::TunnelState::Starting => ("busy", "正在启动…".to_string()),
                     models::TunnelState::Stopped => ("offline", "已停止".to_string()),
                     models::TunnelState::Error => ("error", "运行异常".to_string()),
+                };
+                let state_text = match state {
+                    models::TunnelState::Running => "已连接",
+                    models::TunnelState::Starting => "正在启动…",
+                    models::TunnelState::Stopped => "已停止",
+                    models::TunnelState::Error => "运行异常",
                 };
                 let active = matches!(
                     state,
@@ -103,7 +109,7 @@ impl CloudflareTunnelPlugin {
                     json!({"id":"start","label":"启动","method":"start","primary":true})
                 };
                 Ok(json!({
-                    "title":"Cloudflare Tunnel", "status":status, "statusText":status_text,
+                    "title":"Cloudflare Tunnel", "status":status, "stateText":state_text, "statusText":status_text,
                     "subtitle":tunnel.domain,
                     "metrics":[
                         {"label":"服务路由","value":format!("{}/{} 启用",active_services,visible_services)},
