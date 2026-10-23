@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark light" />
+    <title>AI 用量</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #09090b; --surface: #101113; --surface-subtle: #18191b;
+        --text: #fafafa; --text-muted: #a1a1aa; --border: #292a2e;
+        --border-strong: #45464d; --primary: #fafafa; --primary-foreground: #09090b;
+        --success: #4ade80; --warning: #facc15; --danger: #f87171;
+        --shadow: 0 8px 24px #0004; --radius-lg: 11px;
+        --font-ui: Inter, "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif;
+        --font-mono: "Cascadia Code", Consolas, monospace;
+      }
+      * { box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+      body { padding: 7px; color: var(--text); background: transparent; font: 12px var(--font-ui); }
+      button { font: inherit; }
+      .card { display: flex; width: 100%; height: 100%; flex-direction: column; gap: 8px; overflow: hidden; padding: 12px 13px 10px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow); }
+      .header { display: flex; min-height: 30px; align-items: center; gap: 8px; }
+      .brand-mark { display: flex; height: 25px; flex: none; align-items: end; gap: 2px; padding: 5px; border: 1px solid color-mix(in srgb, var(--primary) 20%, var(--border)); border-radius: 7px; background: color-mix(in srgb, var(--primary) 7%, var(--surface)); }
+      .brand-mark i { width: 3px; border-radius: 3px; background: var(--primary); }
+      .brand-mark i:nth-child(1) { height: 7px; opacity: .6; }.brand-mark i:nth-child(2) { height: 14px; }.brand-mark i:nth-child(3) { height: 10px; opacity: .8; }
+      .brand { display: grid; min-width: 0; gap: 2px; }.brand strong { overflow: hidden; font-size: 11px; font-weight: 680; text-overflow: ellipsis; white-space: nowrap; }.brand small { color: var(--text-muted); font: 650 7px var(--font-mono); letter-spacing: .1em; }
+      .updated { display: flex; align-items: center; gap: 5px; margin-left: auto; color: var(--text-muted); font-size: 8px; white-space: nowrap; }
+      .updated i { width: 5px; height: 5px; border-radius: 50%; background: var(--success); }
+      .refresh { display: grid; width: 25px; height: 25px; flex: none; place-items: center; border: 1px solid var(--border); border-radius: 7px; background: var(--surface-subtle); color: var(--text-muted); cursor: pointer; }
+      .refresh:hover { border-color: var(--border-strong); color: var(--text); }.refresh svg { width: 13px; height: 13px; }
+      .metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+      .metric { display: grid; min-width: 0; gap: 4px; padding: 7px 8px; border: 1px solid var(--border); border-radius: 8px; background: color-mix(in srgb, var(--surface-subtle) 55%, var(--surface)); }
+      .metric-label { color: var(--text-muted); font-size: 8px; }.metric-value { overflow: hidden; font: 680 15px/1.05 var(--font-ui); letter-spacing: -.025em; text-overflow: ellipsis; white-space: nowrap; }.metric-hint { overflow: hidden; color: var(--text-muted); font-size: 7px; text-overflow: ellipsis; white-space: nowrap; }
+      .metric[data-widget="cost"] .metric-value { color: var(--success); font: 620 12px/1.2 var(--font-mono); }
+      .metrics.compact { grid-template-columns: 1fr; gap: 2px; }.metrics.compact .metric { grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 3px 8px; padding: 4px 7px; border-color: transparent; background: transparent; }.metrics.compact .metric-label { grid-column: 1; grid-row: 1; }.metrics.compact .metric-value { grid-column: 2; grid-row: 1 / span 2; font-size: 12px; }.metrics.compact .metric-hint { grid-column: 1; grid-row: 2; }.metrics.compact .metric[data-widget="cost"] .metric-value { font-size: 11px; }
+      .split { display: grid; grid-template-columns: auto minmax(25px, 1fr) auto; align-items: center; gap: 7px; color: var(--text-muted); font-size: 7px; }.split-track { display: flex; height: 4px; overflow: hidden; border-radius: 9px; background: var(--surface-subtle); }.split-track i { display: block; background: var(--primary); }.split-track i:last-child { background: color-mix(in srgb, var(--primary) 45%, var(--success)); }
+      .tools { display: grid; gap: 2px; min-height: 0; }.section-title { padding-bottom: 2px; color: var(--text-muted); font-size: 8px; font-weight: 620; }.tool-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; padding: 4px 0; border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent); }.tool-row:last-child { border-bottom: 0; }.tool-name { overflow: hidden; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }.tool-detail { flex: none; color: var(--text-muted); font-size: 8px; white-space: nowrap; }
+      .empty { display: grid; flex: 1; place-items: center; color: var(--text-muted); font-size: 9px; text-align: center; }.error { color: var(--warning); }
+      .foot { margin-top: auto; padding-top: 5px; border-top: 1px solid var(--border); color: var(--text-muted); font-size: 7px; }
+      :focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+      @media (prefers-color-scheme: light) { :root { color-scheme: light; --bg: #fafafa; --surface: #fff; --surface-subtle: #f4f4f5; --text: #09090b; --text-muted: #71717a; --border: #e4e4e7; --border-strong: #d4d4d8; --primary: #18181b; --primary-foreground: #fafafa; --success: #15803d; --warning: #a16207; --danger: #b91c1c; --shadow: 0 8px 22px #18181b14; } }
+      @media (prefers-reduced-motion: no-preference) { .updated i { animation: pulse 1.8s ease-in-out infinite; } @keyframes pulse { 50% { opacity: .45; transform: scale(.82); } } }
+      .card { overflow-x: hidden; overflow-y: auto; }
+      .quotas { display: grid; gap: 5px; min-height: 0; max-height: 142px; overflow-y: auto; padding-right: 2px; }
+      .card, .quotas { scrollbar-width: none !important; -ms-overflow-style: none !important; }
+      .card::-webkit-scrollbar, .quotas::-webkit-scrollbar,
+      .card::-webkit-scrollbar-button, .quotas::-webkit-scrollbar-button { display: none !important; width: 0 !important; height: 0 !important; }
+      .quota-row { display: grid; gap: 3px; }
+      .quota-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 8px; }
+      .quota-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .quota-percent { flex: none; font-size: 9px; font-weight: 700; white-space: nowrap; }
+      .quota-track { height: 4px; overflow: hidden; border-radius: 9px; background: var(--surface-subtle); }
+      .quota-track i { display: block; height: 100%; border-radius: inherit; background: var(--success); }
+      .quota-track i.warning { background: var(--warning); }
+      .quota-track i.danger { background: var(--danger); }
+      .quota-reset, .quota-empty, .quota-more { color: var(--text-muted); font-size: 7px; }
+    </style>
+  </head>
+  <body>
+    <main class="card" aria-live="polite">
+      <header class="header">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+        <div class="brand"><strong>AI 用量</strong><small>LOCAL USAGE</small></div>
+        <span id="updated" class="updated"><i></i>读取中</span>
+        <button id="refresh" class="refresh" type="button" title="刷新" aria-label="刷新预览"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7v5h-5"/><path d="M19 12a7 7 0 0 0-12-4L4 11m0 6v-5h5"/><path d="M5 12a7 7 0 0 0 12 4l3-3"/></svg></button>
+      </header>
+      <section id="quotas" class="quotas" hidden><div class="section-title">&#x8BA2;&#x9605;&#x914D;&#x989D;</div><div id="quota-rows"></div></section>
+      <section id="metrics" class="metrics" aria-label="用量汇总"></section>
+      <section id="split" class="split" hidden><span>输入 <b id="input-label">—</b></span><div class="split-track"><i id="input-bar"></i><i id="output-bar"></i></div><span>输出 <b id="output-label">—</b></span></section>
+      <section id="tools" class="tools" hidden><div class="section-title">工具排行</div><div id="tool-rows"></div></section>
+      <footer id="foot" class="foot" hidden>费用按模型公开价格估算 · 点击插件图标打开详情</footer>
+      <div id="empty" class="empty" hidden></div>
+    </main>
+    <script>
+      const pluginId = 'ai_usage'
+      const pending = new Map()
+      let nextId = 0
+      const compactNumber = new Intl.NumberFormat('zh-CN', { notation: 'compact', maximumFractionDigits: 1 })
+      const fullNumber = new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 0 })
+      const knownTools = { claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode', gemini: 'Gemini CLI', antigravity: 'Antigravity' }
+
+      function call(method, payload = {}, timeoutMs = 8000) {
+        return new Promise((resolve, reject) => {
+          const id = `preview-${Date.now()}-${++nextId}`
+          const timer = setTimeout(() => { pending.delete(id); reject(new Error('读取用量超时')) }, timeoutMs + 1000)
+          pending.set(id, { resolve, reject, timer })
+          window.parent.postMessage({ __agileTiles: true, id, plugin_id: pluginId, action: 'call', payload: { method, payload, timeout_ms: timeoutMs } }, '*')
+        })
+      }
+
+      function escapeHtml(value) {
+        return String(value).replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char])
+      }
+      function num(value) { return Math.round(Number(value) || 0) }
+      function short(value) { return compactNumber.format(num(value)) }
+      function toolName(id) {
+        const key = String(id || 'unknown')
+        return knownTools[key] || key.replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase())
+      }
+      function money(value) { return `$${Math.max(0, Number(value) || 0).toFixed(6)}` }
+      function quotaWindow(quota) {
+        if (quota.label) return quota.label
+        const minutes = Number(quota.window_minutes) || 0
+        if (minutes >= 10080) return `${Math.round(minutes / 10080)} \u5468\u7a97\u53e3`
+        if (minutes >= 1440) return `${Math.round(minutes / 1440)} \u5929\u7a97\u53e3`
+        return `${Math.round(minutes / 60)} \u5c0f\u65f6\u7a97\u53e3`
+      }
+      function resetLabel(timestamp) {
+        const minutes = Math.max(0, Math.round((Number(timestamp) - Date.now()) / 60000))
+        if (minutes === 0) return '\u5373\u5c06\u91cd\u7f6e'
+        if (minutes < 60) return `${minutes} \u5206\u949f\u540e\u91cd\u7f6e`
+        if (minutes < 1440) return `${Math.floor(minutes / 60)} \u5c0f\u65f6 ${minutes % 60} \u5206\u949f\u540e\u91cd\u7f6e`
+        return `${Math.floor(minutes / 1440)} \u5929\u540e\u91cd\u7f6e`
+      }
+      function time(value) { return value ? new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit' }).format(value) : '尚未扫描' }
+
+      function render(data) {
+        const settings = data.settings || { widgets: ['tokens', 'cost', 'requests', 'quotas', 'tools', 'split', 'updated'], display_mode: 'cards' }
+        const widgets = new Set(settings.widgets || [])
+        const mode = settings.display_mode === 'compact' ? 'compact' : 'cards'
+        const quotaSection = document.getElementById('quotas')
+        quotaSection.hidden = !widgets.has('quotas')
+        if (widgets.has('quotas')) {
+          const rows = data.quotas || []
+          document.getElementById('quota-rows').innerHTML = rows.length
+            ? rows.map((quota) => {
+                const used = Math.max(0, Math.min(100, Number(quota.used_percent) || 0))
+                const remaining = 100 - used
+                const tone = remaining <= 8 ? 'danger' : remaining <= 25 ? 'warning' : ''
+                return `<div class=\"quota-row\"><div class=\"quota-head\"><span class=\"quota-name\">${escapeHtml(toolName(quota.tool))} &#183; ${escapeHtml(quotaWindow(quota))}</span><strong class=\"quota-percent\">剩余 ${remaining.toFixed(remaining >= 10 ? 0 : 1)}%</strong></div><div class=\"quota-track\"><i class=\"${tone}\" style=\"width:${remaining}%\"></i></div><small class=\"quota-reset\">${escapeHtml(resetLabel(quota.resets_at_ms))}</small></div>`
+              }).join('')
+            : '<small class=\"quota-empty\">\u6682\u65f6\u6ca1\u6709\u8bfb\u53d6\u5230\u8ba2\u9605\u989d\u5ea6</small>'
+        }
+
+        const metrics = document.getElementById('metrics')
+        metrics.className = `metrics ${mode}`
+        const input = Number(data.input_tokens) || 0
+        const output = Number(data.output_tokens) || 0
+        const items = {
+          tokens: { label: 'TOKEN 总量', value: short(data.total_tokens), hint: `${short(input)} 输入 · ${short(output)} 输出` },
+          cost: { label: '费用估算', value: money((Number(data.cost_usd) || 0) + (Number(data.credit_cost_usd) || 0)), hint: data.unpriced_models ? `${data.unpriced_models} 个模型未匹配价格` : '按本机价格表估算' },
+          requests: { label: '请求次数', value: fullNumber.format(num(data.requests)), hint: '最近 24 小时记录' }
+        }
+        metrics.innerHTML = ['tokens', 'cost', 'requests'].filter((id) => widgets.has(id)).map((id) => {
+          const item = items[id]
+          return `<article class="metric" data-widget="${id}"><span class="metric-label">${item.label}</span><strong class="metric-value">${item.value}</strong><small class="metric-hint">${item.hint}</small></article>`
+        }).join('')
+
+        const split = document.getElementById('split')
+        split.hidden = !widgets.has('split')
+        if (widgets.has('split')) {
+          const total = input + output || 1
+          document.getElementById('input-label').textContent = short(input)
+          document.getElementById('output-label').textContent = short(output)
+          document.getElementById('input-bar').style.width = `${input / total * 100}%`
+          document.getElementById('output-bar').style.width = `${output / total * 100}%`
+        }
+
+        const tools = document.getElementById('tools')
+        tools.hidden = !widgets.has('tools')
+        if (widgets.has('tools')) {
+          const rows = data.tools || []
+          document.getElementById('tool-rows').innerHTML = rows.length
+            ? rows.slice(0, 2).map((item) => `<div class="tool-row"><span class="tool-name">${escapeHtml(toolName(item.tool))}</span><span class="tool-detail">${short(item.total_tokens)} tokens · ${num(item.requests)} 次</span></div>`).join('')
+            : '<div class="empty">最近 24 小时没有用量记录</div>'
+        }
+
+        const updated = document.getElementById('updated')
+        updated.hidden = !widgets.has('updated')
+        if (widgets.has('updated')) updated.innerHTML = `<i></i>${data.last_ingest_ms ? `更新于 ${time(data.last_ingest_ms)}` : '尚未扫描'}`
+        document.getElementById('foot').hidden = !(widgets.has('cost') || widgets.has('updated'))
+        const empty = document.getElementById('empty')
+        empty.hidden = widgets.size > 0
+        if (!widgets.size) empty.textContent = '尚未选择展示内容，请在详情页配置预览。'
+      }
+
+      async function refresh() {
+        const button = document.getElementById('refresh')
+        button.disabled = true
+        try { render(await call('get_preview')) }
+        catch (error) {
+          const empty = document.getElementById('empty')
+          empty.hidden = false
+          empty.className = 'empty error'
+          empty.textContent = error?.message || '读取本机用量失败'
+        } finally { button.disabled = false }
+      }
+
+      window.addEventListener('message', (event) => {
+        if (event.source !== window.parent) return
+        const message = event.data
+        if (!message || message.__agileTiles !== true || message.plugin_id !== pluginId) return
+        if (message.type === 'preview-update') { void refresh(); return }
+        if (message.type === 'theme' && message.theme) {
+          for (const [name, value] of Object.entries(message.theme.variables || {})) {
+            if (name.startsWith('--') && typeof value === 'string') document.documentElement.style.setProperty(name, value)
+          }
+          if (message.theme.colorScheme) document.documentElement.style.colorScheme = message.theme.colorScheme
+        }
+        const task = pending.get(message.id)
+        if (!task) return
+        clearTimeout(task.timer)
+        pending.delete(message.id)
+        if (message.error) task.reject(new Error(message.error))
+        else task.resolve(message.result)
+      })
+      document.getElementById('refresh').addEventListener('click', refresh)
+      refresh()
+    </script>
+  </body>
+</html>

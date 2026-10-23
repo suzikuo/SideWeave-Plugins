@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "plugins/app_launcher",
+    "plugins/ai_usage",
     "plugins/bookmarks",
     "plugins/clipboard",
     "plugins/cloudflare_tunnel",
@@ -20,7 +21,60 @@ members = [
     "plugins/toolbox",
 ]
 
+[workspace.package]
+version = "0.1.8"
+edition = "2021"
+license = "MIT"
+
 [workspace.dependencies]
 sideweave-plugin-api = { package = "sideweave-plugin-api", git = "https://github.com/suzikuo/SideWeave.git", branch = "master" }
 sideweave-plugin-sdk = { package = "sideweave-plugin-sdk", git = "https://github.com/suzikuo/SideWeave.git", branch = "master" }
 sideweave-plugin-ipc = { package = "sideweave-plugin-ipc", git = "https://github.com/suzikuo/SideWeave.git", branch = "master" }
+
+# The AI usage plugin vendors TokenMe's parser and aggregation crates so its
+# package can be built and released as one native SideWeave plugin.
+usage-core = { path = "plugins/ai_usage/crates/usage-core" }
+usage-index = { path = "plugins/ai_usage/crates/usage-index" }
+usage-quota = { path = "plugins/ai_usage/crates/usage-quota" }
+usage-adapter-all = { path = "plugins/ai_usage/crates/adapters/all" }
+usage-adapter-agnes = { path = "plugins/ai_usage/crates/adapters/agnes" }
+usage-adapter-antigravity = { path = "plugins/ai_usage/crates/adapters/antigravity" }
+usage-adapter-atomcode = { path = "plugins/ai_usage/crates/adapters/atomcode" }
+usage-adapter-catpaw = { path = "plugins/ai_usage/crates/adapters/catpaw" }
+usage-adapter-claude = { path = "plugins/ai_usage/crates/adapters/claude" }
+usage-adapter-cline = { path = "plugins/ai_usage/crates/adapters/cline" }
+usage-adapter-codebuddy = { path = "plugins/ai_usage/crates/adapters/codebuddy" }
+usage-adapter-codex = { path = "plugins/ai_usage/crates/adapters/codex" }
+usage-adapter-dsh = { path = "plugins/ai_usage/crates/adapters/dsh" }
+usage-adapter-funide = { path = "plugins/ai_usage/crates/adapters/funide" }
+usage-adapter-hermes = { path = "plugins/ai_usage/crates/adapters/hermes" }
+usage-adapter-joycode = { path = "plugins/ai_usage/crates/adapters/joycode" }
+usage-adapter-kimicode = { path = "plugins/ai_usage/crates/adapters/kimicode" }
+usage-adapter-minimaxcode = { path = "plugins/ai_usage/crates/adapters/minimaxcode" }
+usage-adapter-opencode = { path = "plugins/ai_usage/crates/adapters/opencode" }
+usage-adapter-pi = { path = "plugins/ai_usage/crates/adapters/pi" }
+usage-adapter-qoder = { path = "plugins/ai_usage/crates/adapters/qoder" }
+usage-adapter-trae = { path = "plugins/ai_usage/crates/adapters/trae" }
+usage-adapter-workbuddy = { path = "plugins/ai_usage/crates/adapters/workbuddy" }
+usage-adapter-zcode = { path = "plugins/ai_usage/crates/adapters/zcode" }
+
+aes = "0.8"
+aes-gcm = "0.10"
+base64 = "0.22"
+cbc = { version = "0.1", features = ["alloc"] }
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+dirs = "6"
+md-5 = "0.10"
+notify = "6.1"
+pbkdf2 = "0.12"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha1 = "0.10"
+sha2 = "0.10"
+thiserror = "2"
+ureq = { version = "2", features = ["json"] }
+walkdir = "2"
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Registry"] }
+zstd = "0.13"

@@ -1,0 +1,1389 @@
+//! Trae (ByteDance's AI IDE): the account's own entitlement-usage endpoint,
+//! opened with the login record the IDE keeps in its global storage.
+//!
+//! ## The call
+//!
+//! The IDE's usage panel polls exactly one endpoint per refresh (renderer log,
+//! `ICubeUsageService`):
+//!
+//! ```text
+//! POST {host}/trae/api/v1/pay/ide_user_ent_usage
+//! headers: Content-Type: application/json
+//!          Authorization: Cloud-IDE-JWT <token>
+//! body:    {"require_usage": true}
+//! ```
+//!
+//! `host` comes from the login record itself (`https://growsg-normal.trae.ai`
+//! here), the v2 path answers 404 on this account and the shipped mapper reads
+//! v1 — measured live 2026-09-30: HTTP 200 with the real pack list.
+//!
+//! ## The credential envelope
+//!
+//! The login record is `globalStorage/storage.json` under a key shaped
+//! `iCubeAuthInfo://<provider-id>` (`icube.cloudide` here; the sibling
+//! `icube-dc:<uid>` record is a device key pair and carries no token). The
+//! value is base64 of the IDE's own `byteCrypto` envelope — no keychain and no
+//! OS secret store involved, the key travels *inside* the blob:
+//!
+//! ```text
+//! bytes [0..6)   header, picks the salt pair:
+//!                  116,99,5,16,0,0    → plain AES   (salt = SALT_PLAIN)
+//!                  18,57,32,32,2,3    → private AES (salt = SALT_PRIVATE)
+//! bytes [6..38)  32-byte random key, embedded
+//! bytes [38..)   AES-128-CBC( SHA-512(plaintext) || plaintext || PKCS7 )
+//! aesKey = SHA512( SHA512(key) || salt )[0..16]
+//! iv     = SHA512( SHA512(key) || salt )[16..32]
+//! verified: SHA-512(plaintext) == the leading 64-byte digest
+//! ```
+//!
+//! An expired token is a quiet miss, never a refresh: the record carries a
+//! `refreshToken` and consuming a rotation without writing it back would log
+//! the user out of their own IDE (the same rule the Qoder probe keeps).
+//!
+//! ## How a pack list becomes bars
+//!
+//! The shipped mapper (`U(e)` in the workbench bundle) picks the plan pack as
+//! the first of Ultra(6) > ProPlus(4) > Pro(1) > Lite(8) > Free(0) and meters
+//! it as `quota.basic_usage_limit` vs `usage.basic_usage_amount` (dollars when
+//! `is_dollar_usage_billing`); a bonus meter follows unless `no_bonus_quota`.
+//! Fast requests are summed **across packs** (`gb(e)`), where a limit of −1
+//! means unlimited — an infinite meter draws no bar. Pay-as-you-go is uncapped
+//! by construction, so its usage number gets no bar either. Meters with a
+//! zero limit are the 0/0 rows the other probes also skip.
+//!
+//! Token-level usage has its own surface now: the adapter crate
+//! `usage-adapter-trae` decrypts the agent's SQLCipher database and reads each
+//! completed turn. This probe stays the spend/limit side — the plan's dollar
+//! meters and fast requests that no local log carries. The host-exit pause
+//! gates it like every mapped tool, with one wrinkle recorded in `crate::host`:
+//! Trae's main binary ships as the generic "Electron", so the process match is
+//! on its `Trae Helper*` children.
+
+use std::path::{Path, PathBuf};
+
+use serde_json::{json, Value};
+use usage_core::QuotaSample;
+
+use crate::QuotaProbe;
+
+/// One probe per edition fleet: the international build and the CN build log
+/// into different fleets, so each gets its own tool and its own windows.
+#[derive(Debug, Clone, Copy)]
+pub struct TraeQuota {
+    /// `true` → tool `trae_cn`, reading the `Trae CN` / `TRAE SOLO CN` stores.
+    pub cn: bool,
+}
+
+/// `globalStorage/storage.json` of every installed edition — the same three
+/// the usage adapter reads. The editions log into different fleets (the CN
+/// build's auth record carries its own host), so each file contributes its own
+/// logins and the probe reports them side by side. `TRAE_STORAGE_JSON`
+/// overrides the list for tests and side-by-side installs.
+fn storage_jsons(cn: bool) -> Vec<PathBuf> {
+    if let Some(path) = std::env::var_os("TRAE_STORAGE_JSON") {
+        return (!path.is_empty()).then(|| PathBuf::from(path)).into_iter().collect();
+    }
+    let Some(base) = dirs::data_dir() else { return Vec::new() };
+    let editions: &[&str] = if cn { &["Trae CN", "TRAE SOLO CN"] } else { &["Trae"] };
+    editions
+        .iter()
+        .map(|edition| base.join(edition).join("User").join("globalStorage").join("storage.json"))
+        .filter(|p| p.is_file())
+        .collect()
+}
+
+/// The endpoint path the IDE calls (v1; the v2 variant 404s on this account).
+const USAGE_PATH: &str = "/trae/api/v1/pay/ide_user_ent_usage";
+/// The credits-billing usage answer: `usage_summary` + the entitlement packs.
+const USAGE_PATH_V2: &str = "/trae/api/v2/pay/ide_user_ent_usage";
+/// Fallback API host, used when the login record carries none.
+const DEFAULT_HOST: &str = "https://growsg-normal.trae.ai";
+const CLAIM_PATH: &str = "/trae/api/v2/ug/checkin_credits/claim";
+const IDE_VERSION: &str = "1.107.1";
+/// The current-entitlement-base listing: where the CN credits packs live
+/// (`credits_limit` sits under `product_extra.package_extra.quota`, a key the
+/// `ide_user_ent_usage` payloads do not carry).
+/// The v2 entitlement list: unlike v1 it carries the credits packs, each with
+/// both `quota.credits_limit` and `usage.credits_amount`.
+const ENT_LIST_V2: &str = "/trae/api/v2/pay/user_current_entitlement_list";
+
+/// `entitlement_base_info.product_type` values (the bundle's `Vc` enum). The
+/// plan picker reads exactly these five; packs outside them are add-ons.
+const PRODUCT_ULTRA: f64 = 6.0;
+const PRODUCT_PRO_PLUS: f64 = 4.0;
+const PRODUCT_PRO: f64 = 1.0;
+const PRODUCT_LITE: f64 = 8.0;
+const PRODUCT_FREE: f64 = 0.0;
+/// Promo packs duplicate the plan's numbers and are excluded by the mapper.
+const PRODUCT_PROMO: f64 = 3.0;
+
+struct Login {
+    token: String,
+    host: String,
+    /// `expiredAt` on the record, RFC 3339; `None` when absent or unreadable.
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Every `iCubeAuthInfo://` record across the installed editions that
+/// decrypts to a token-bearing login. Records for other provider ids hold
+/// device key pairs and simply fail the shape test; a token seen twice (the
+/// same account logged into two editions) is probed once.
+fn logins(cn: bool) -> Vec<Login> {
+    let mut out: Vec<Login> = Vec::new();
+    for path in storage_jsons(cn) {
+        let Ok(text) = std::fs::read_to_string(&path) else { continue };
+        let Ok(all) = serde_json::from_str::<serde_json::Map<String, Value>>(&text) else {
+            continue;
+        };
+        for (key, value) in &all {
+            let Some(encoded) = value.as_str() else { continue };
+            if !key.starts_with("iCubeAuthInfo://") {
+                continue;
+            }
+            let Some(plain) = decrypt(encoded) else { continue };
+            let Ok(record) = serde_json::from_str::<Value>(&plain) else { continue };
+            let Some(token) = record.get("token").and_then(Value::as_str).filter(|t| !t.is_empty()) else {
+                continue;
+            };
+            if out.iter().any(|l| l.token == token) {
+                continue;
+            }
+            let expires_at = record
+                .get("expiredAt")
+                .and_then(Value::as_str)
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|t| t.with_timezone(&chrono::Utc));
+            let host = record
+                .get("host")
+                .and_then(Value::as_str)
+                .filter(|h| h.starts_with("http"))
+                .unwrap_or(DEFAULT_HOST)
+                .trim_end_matches('/')
+                .to_string();
+            out.push(Login { token: token.to_string(), host, expires_at });
+        }
+    }
+    out
+}
+
+/// The bundle's obfuscation tables, byte-for-byte from `byteCrypto.js`. The
+/// salt is their element-wise XOR — the tables exist so the salt is not a
+/// plain constant in the shipped binary.
+const TABLE_PLAIN_A: [u8; 64] = [
+    82, 9, 106, 213, 48, 54, 165, 56, 191, 64, 163, 158, 129, 243, 215, 251, 124, 227, 57, 130,
+    155, 47, 255, 135, 52, 142, 67, 68, 196, 222, 233, 203, 84, 123, 148, 50, 166, 194, 35, 61,
+    238, 76, 149, 11, 66, 250, 195, 78, 8, 46, 161, 102, 40, 217, 36, 178, 118, 91, 162, 73, 109,
+    139, 209, 37,
+];
+const TABLE_PLAIN_B: [u8; 64] = [
+    31, 221, 168, 51, 136, 7, 199, 49, 177, 18, 16, 89, 39, 128, 236, 95, 96, 81, 127, 169, 25,
+    181, 74, 13, 45, 229, 122, 159, 147, 201, 156, 239, 160, 224, 59, 77, 174, 42, 245, 176, 200,
+    235, 187, 60, 131, 83, 153, 97, 23, 43, 4, 126, 186, 119, 214, 38, 225, 105, 20, 99, 85, 33,
+    12, 125,
+];
+const TABLE_PRIVATE_A: [u8; 64] = [
+    191, 192, 216, 250, 122, 246, 220, 97, 31, 254, 98, 27, 8, 72, 71, 176, 135, 99, 96, 18, 127,
+    101, 203, 104, 211, 102, 191, 125, 37, 72, 150, 156, 51, 229, 121, 35, 17, 153, 141, 177,
+    110, 131, 150, 128, 172, 255, 254, 6, 18, 140, 55, 62, 236, 249, 135, 64, 135, 12, 117, 4,
+    89, 149, 168, 209,
+];
+const TABLE_PRIVATE_B: [u8; 64] = [
+    246, 204, 26, 232, 232, 70, 129, 109, 223, 146, 169, 242, 23, 241, 105, 145, 50, 196, 165,
+    42, 254, 120, 3, 54, 244, 207, 209, 85, 53, 6, 138, 106, 175, 148, 31, 204, 186, 186, 165,
+    182, 87, 142, 49, 10, 39, 110, 26, 154, 86, 56, 173, 125, 18, 64, 198, 225, 99, 99, 83, 82,
+    191, 134, 76, 170,
+];
+
+fn salt_for(header: &[u8]) -> Option<[u8; 64]> {
+    let (a, b) = match header {
+        [116, 99, 5, 16, 0, 0] => (&TABLE_PLAIN_A, &TABLE_PLAIN_B),
+        [18, 57, 32, 32, 2, 3] => (&TABLE_PRIVATE_A, &TABLE_PRIVATE_B),
+        _ => return None,
+    };
+    Some(core::array::from_fn(|i| a[i] ^ b[i]))
+}
+
+/// Decrypt one base64 `byteCrypto` envelope. Every step is exactly the bundle's
+/// `RBe`; a mismatch anywhere is `None`, not a guess.
+fn decrypt(encoded: &str) -> Option<String> {
+    use base64::Engine;
+    use cbc::cipher::{block_padding::NoPadding, BlockDecryptMut, KeyIvInit};
+    use sha2::{Digest, Sha512};
+
+    let blob = base64::engine::general_purpose::STANDARD.decode(encoded).ok()?;
+    let salt = salt_for(blob.get(..6)?)?;
+    let key = blob.get(6..38)?;
+    let ct = blob.get(38..)?;
+    if ct.is_empty() || ct.len() % 16 != 0 {
+        return None;
+    }
+
+    let mut stem = [0u8; 128];
+    stem[..64].copy_from_slice(&Sha512::digest(key));
+    stem[64..].copy_from_slice(&salt[..]);
+    let derived: [u8; 64] = Sha512::digest(stem).into();
+    let key: [u8; 16] = derived[..16].try_into().ok()?;
+    let iv: [u8; 16] = derived[16..32].try_into().ok()?;
+
+    // `NoPadding`: the app's own padding comes off by hand below, because the
+    // digest it must be verified against covers the *unpadded* plaintext.
+    let mut plain = cbc::Decryptor::<aes::Aes128>::new(&key.into(), &iv.into())
+        .decrypt_padded_vec_mut::<NoPadding>(ct)
+        .ok()?;
+    // The app pads before encrypting and hashes the *unpadded* plaintext, so
+    // the padding comes off before the digest check, never after.
+    let pad = *plain.last()? as usize;
+    if !(1..=16).contains(&pad)
+        || plain.len() <= pad
+        || plain[plain.len() - pad..].iter().any(|b| *b != pad as u8)
+    {
+        return None;
+    }
+    plain.truncate(plain.len() - pad);
+    if plain.len() <= 64 {
+        return None;
+    }
+    let (digest, body) = plain.split_at(64);
+    if Sha512::digest(body).as_slice() != digest {
+        return None;
+    }
+    String::from_utf8(body.to_vec()).ok()
+}
+
+impl QuotaProbe for TraeQuota {
+    fn tool(&self) -> &'static str {
+        if self.cn {
+            "trae_cn"
+        } else {
+            "trae"
+        }
+    }
+
+    fn fetch(&self) -> Vec<QuotaSample> {
+        let now = chrono::Utc::now();
+        for login in logins(self.cn) {
+            // A past expiry means "no live sample"; the probe never refreshes.
+            if login.expires_at.is_some_and(|t| t <= now) {
+                continue;
+            }
+            let headers = [
+                ("content-type", "application/json"),
+                ("authorization", &format!("Cloud-IDE-JWT {}", login.token)),
+                ("accept", "application/json"),
+            ];
+            // v2 first: the credits-billing answer the current IDE itself
+            // reads — `usage_summary` (the account's total vs consumed) plus
+            // the entitlement packs with their own spent sides. The v1 path
+            // below stays for accounts/backends that still answer the old
+            // top-level shape; measured 2026-10-09, v1 no longer carries the
+            // usage fields for a credits-billing account, which is exactly
+            // the "usage vanished" this ladder exists to survive.
+            if self.cn {
+                if let Some(body) =
+                    crate::http::post_json(&format!("{}{USAGE_PATH_V2}", login.host), &headers, json!({"require_usage": true}))
+                {
+                    if body.get("usage_summary").is_some() {
+                        cn_daily_checkin(&login, false);
+                        let out = samples_from_ent_usage_v2(&body);
+                        if !out.is_empty() {
+                            return out;
+                        }
+                    }
+                }
+            }
+            let url = format!("{}{USAGE_PATH}", login.host);
+            let Some(body) = crate::http::post_json(&url, &headers, json!({"require_usage": true})) else {
+                continue;
+            };
+            let samples = samples_from_entitlement(&body);
+            if !samples.is_empty() {
+                return samples;
+            }
+            if self.cn {
+                cn_daily_checkin(&login, false);
+                let windows = cn_credit_windows(&login);
+                if !windows.is_empty() {
+                    return windows;
+                }
+            }
+            if let Some(free) = cn_free_window(&body) {
+                return vec![free];
+            }
+        }
+        Vec::new()
+    }
+}
+
+/// The strip's done-badge (`QuotaStrip.groupCheckedIn`) lights on any window id
+/// starting with `checkin`, and its contract reads that prefix as "claimed
+/// today". Trae's check-in credit packs keep the *grant* date in their
+/// entitlement id (`checkin_20261009_x`) and stay listed until they expire, so
+/// a pack from an earlier day would otherwise hold 今日已签到 on a day the user
+/// never claimed. Return the id verbatim only when a `checkin_YYYYMMDD…` stamp
+/// matches today; a stale one is re-labelled `pack_…` so the row still shows as
+/// the real credit gauge it is, but no longer speaks for today's check-in.
+fn today_scoped_checkin_id(id: &str) -> String {
+    let Some(stamp) = id.strip_prefix("checkin_") else {
+        return id.to_string();
+    };
+    let digits: String = stamp.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.len() == 8 && digits != chrono::Local::now().format("%Y%m%d").to_string() {
+        return format!("pack_{id}");
+    }
+    id.to_string()
+}
+
+/// The v2 credits answer, mapped: one summary bar for the account (total vs
+/// consumed — the numbers the subscription page shows), then one row per
+/// entitlement pack with its own spent side in the label
+/// (`每月登录赠送 · 已用 384/500`). Packs without a credits limit stay as
+/// bare marker rows; the checkin packs keep their `checkin_*` ids, which is
+/// what the strip's done-badge reads.
+fn samples_from_ent_usage_v2(body: &Value) -> Vec<QuotaSample> {
+    let mut out = Vec::new();
+    if let Some(s) = body.get("usage_summary") {
+        let ratio = s.get("consumption_ratio").and_then(Value::as_f64);
+        let consumed = s.get("consumed_amount").and_then(Value::as_f64).unwrap_or(0.0);
+        let total = s.get("total_amount").and_then(Value::as_f64).unwrap_or(0.0);
+        let percent = match ratio {
+            Some(r) if (0.0..=1.0).contains(&r) => r * 100.0,
+            _ => if total > 0.0 { consumed / total * 100.0 } else { 0.0 },
+        };
+        out.push(QuotaSample {
+            used_percent: percent.clamp(0.0, 100.0),
+            window_minutes: 0,
+            resets_at_ms: 0,
+            label: Some(format!("积分 · 已用 {consumed:.0}/{total:.0}")),
+            id: Some("credits-summary".into()),
+        });
+    }
+    for pack in body.get("user_entitlement_pack_list").and_then(Value::as_array).unwrap_or(&Vec::new()) {
+        if pack.get("is_hide").and_then(Value::as_bool) == Some(true) {
+            continue;
+        }
+        let name = pack
+            .get("display_desc")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or("积分包");
+        let base = pack.get("entitlement_base_info").unwrap_or(&Value::Null);
+        let id = base.get("entitlement_id").and_then(Value::as_str).unwrap_or("credits");
+        let limit = base
+            .pointer("/quota/credits_limit")
+            .or_else(|| base.pointer("/product_extra/package_extra/quota/credits_limit"))
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0);
+        let spent = pack.pointer("/usage/credits_amount").and_then(Value::as_f64).unwrap_or(0.0);
+        let label = if limit > 0.0 {
+            format!("{name} · 已用 {spent:.0}/{limit:.0}")
+        } else {
+            name.to_string()
+        };
+        // A pack without a credits limit (the free-plan subscription record,
+        // solo-flag carriers) holds no quota and no usage — as a row it would
+        // only show a meaningless 0 % and the plan period's own renewal date.
+        if limit <= 0.0 {
+            continue;
+        }
+        let percent = (spent / limit * 100.0).clamp(0.0, 100.0);
+        out.push(QuotaSample {
+            used_percent: percent,
+            window_minutes: 0,
+            resets_at_ms: base
+                .get("end_time")
+                .and_then(Value::as_f64)
+                .map(|s| (s * 1000.0) as i64)
+                .unwrap_or(0),
+            label: Some(label),
+            id: Some(today_scoped_checkin_id(id)),
+        });
+    }
+    out
+}
+
+/// The CN credits windows — one per credits pack. The packs expire
+/// independently (a monthly login grant lapses at month end while the veteran
+/// grant runs weeks longer), so they cannot merge into one bar. Source: the
+/// v2 entitlement list, whose packs carry both sides — `quota.credits_limit`
+/// and `usage.credits_amount` — so the bar is the real spend, and
+/// `end_time` gives each window its own expiry countdown. The checkin pack's
+/// very presence is the 已签到 mark; the daily claim's outcome refines it.
+fn cn_credit_windows(login: &Login) -> Vec<QuotaSample> {
+    let url = format!("{}{ENT_LIST_V2}", login.host);
+    // Browser-shaped, like the dashboard's own call: Chrome UA and platform
+    // hints that follow the OS the panel runs on (macOS / Windows / Linux).
+    let ua = if cfg!(target_os = "macos") {
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
+    } else if cfg!(windows) {
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
+    } else {
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
+    };
+    let platform = if cfg!(target_os = "macos") {
+        "macOS"
+    } else if cfg!(windows) {
+        "Windows"
+    } else {
+        "Linux"
+    };
+    let Ok(resp) = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(5))
+        .timeout_read(std::time::Duration::from_secs(10))
+        .build()
+        .post(&url)
+        .set("content-type", "application/json")
+        .set("accept", "application/json, text/plain, */*")
+        .set("accept-language", "zh-CN,zh;q=0.9")
+        .set("origin", "https://www.trae.cn")
+        .set("referer", "https://www.trae.cn/")
+        .set("user-agent", ua)
+        .set("sec-ch-ua-platform", &format!("\"{platform}\""))
+        .set("authorization", &format!("Cloud-IDE-JWT {}", login.token))
+        .send_string(&json!({ "require_usage": true, "full_data": true }).to_string()) else {
+        return Vec::new();
+    };
+    let body: Value = resp
+        .into_string()
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or(Value::Null);
+    let Some(list) = body.get("user_entitlement_pack_list").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for pack in list {
+        if let Some(sample) = cn_window_for_pack(pack) {
+            out.push(sample);
+        }
+    }
+    out
+}
+
+/// One CN entitlement-list pack, mapped without the transport: a pack with a
+/// positive `credits_limit` becomes a window for the panel; anything else (the
+/// free-plan record, a limit-less carrier) draws no row. Split out of
+/// [`cn_credit_windows`] so the gauge's spent side is testable without the
+/// live list call.
+fn cn_window_for_pack(pack: &Value) -> Option<QuotaSample> {
+    let base = pack.get("entitlement_base_info").unwrap_or(&Value::Null);
+    let limit = base
+        .pointer("/quota/credits_limit")
+        .and_then(Value::as_f64)
+        .filter(|v| *v > 0.0)?;
+    let spent = pack
+        .pointer("/usage/credits_amount")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    let name = pack
+        .get("display_desc")
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("积分包");
+    let expires_ms = base
+        .get("end_time")
+        .and_then(Value::as_f64)
+        .map(|s| (s * 1000.0) as i64)
+        .unwrap_or(0);
+    // The label stays the bare pack name (the "已用 X/Y" tail truncated and
+    // broke the reset column's alignment across rows), but the *gauge* carries
+    // the spent share — the same `/usage/credits_amount` the primary v2 path
+    // reads. It was parsed and thrown away here, leaving every window at 0 %.
+    Some(QuotaSample {
+        used_percent: (spent / limit * 100.0).clamp(0.0, 100.0),
+        window_minutes: 0,
+        resets_at_ms: expires_ms,
+        label: Some(name.to_string()),
+        // Two anonymous packs must not share an id (the window identity keeps
+        // one pack's spent state from flapping with another's), and a dated
+        // check-in id from an earlier day must not speak for today — the
+        // scoping demotes those to gauge-only rows.
+        id: Some(today_scoped_checkin_id(
+            &pack
+                .get("entitlement_id")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("pack:{name}")),
+        )),
+    })
+}
+
+// ---- CN daily check-in -----------------------------------------------------
+//
+// The dashboard's check-in endpoint is claimable with the local token once the
+// desktop device headers ride along (`req_source: 1` numeric, x-device-* —
+// without them the server answers code 9004). The panel fires at most ONE
+// claim attempt per local day no matter how often the quota pass runs: the
+// endpoint queues and rate-limits repeat claims (code 9074), and the community
+// scripts converge on exactly that discipline. Success (code 0) and
+// already-checked-in (9095) both count as done for the day.
+
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
+struct TraeCheckinState {
+    /// Local day of the last attempt — successful or not. The once-a-day lock.
+    last_attempt_day: String,
+    /// Local day of the last success — the 已签到 marker the label reads.
+    last_ok_day: String,
+    /// Credits the last successful claim paid out.
+    last_credits: f64,
+    /// The stable per-install device id the device headers carry.
+    device_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct TraeCheckinOutcome {
+    /// Claim answered success today (or had answered earlier today).
+    done_today: bool,
+    /// Already checked in when we tried (9095) rather than claimed now.
+    was_already: bool,
+}
+
+fn checkin_state_path() -> Option<PathBuf> {
+    dirs::config_dir().map(|d| d.join("tokenme").join("quota").join("trae_cn_checkin.json"))
+}
+
+fn load_checkin_state(path: &Path) -> TraeCheckinState {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+fn save_checkin_state(path: &Path, state: &TraeCheckinState) {
+    if let Ok(text) = serde_json::to_string(state) {
+        let _ = std::fs::write(path, text);
+    }
+}
+
+/// A stable 16-digit device id: generated once, then persisted — a fresh id on
+/// every pass would read as device churn to the queue that rate-limits claims.
+fn device_id_of(state: &mut TraeCheckinState) -> String {
+    if state.device_id.is_empty() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let seed = (nanos as u64) ^ (std::process::id() as u64);
+        state.device_id = format!("{:016}", seed % 10_000_000_000_000_000);
+    }
+    state.device_id.clone()
+}
+
+fn local_day() -> String {
+    chrono::Local::now().format("%Y-%m-%d").to_string()
+}
+
+/// Fire today's claim (unless today is already spent) and report the outcome.
+/// `None` = no state file could be written (a read-only config dir): the probe
+/// then never auto-claims, the window just loses its marker.
+fn cn_daily_checkin(login: &Login, force: bool) -> Option<TraeCheckinOutcome> {
+    let path = checkin_state_path()?;
+    let mut state = load_checkin_state(&path);
+    let today = local_day();
+    if !force && state.last_attempt_day == today {
+        return Some(TraeCheckinOutcome {
+            done_today: state.last_ok_day == today,
+            was_already: false,
+        });
+    }
+
+    // Master switch off and not an explicit click: no claim leaves.
+    if !force && !crate::auto_checkin_enabled() {
+        return None;
+    }
+
+    let device = device_id_of(&mut state);
+    let url = format!("{}{CLAIM_PATH}", login.host);
+    let claimed: Option<(i64, f64)> = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(5))
+        .timeout_read(std::time::Duration::from_secs(10))
+        .build()
+        .post(&url)
+        .set("content-type", "application/json")
+        .set("authorization", &format!("Cloud-IDE-JWT {}", login.token))
+        .set("x-user-region", "CN")
+        .set("user-agent", &format!("Trae/{IDE_VERSION}"))
+        .set("x-device-type", if cfg!(target_os = "macos") {
+            "Darwin"
+        } else if cfg!(windows) {
+            "Windows"
+        } else {
+            "Linux"
+        })
+        .set("x-app-version", IDE_VERSION)
+        .set("x-device-id", &device)
+        .send_string(&json!({ "req_source": 1 }).to_string())
+        .ok()
+        .and_then(|r| r.into_string().ok())
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .and_then(|v| {
+            let code = v.get("code").and_then(Value::as_i64)?;
+            let points = v
+                .pointer("/data/points")
+                .and_then(Value::as_f64)
+                .unwrap_or_default();
+            Some((code, points))
+        });
+
+    state.last_attempt_day = today.clone();
+    let mut outcome = TraeCheckinOutcome { done_today: false, was_already: false };
+    match claimed {
+        // 0 = claimed; 9095 = already checked in earlier today by the IDE or
+        // the dashboard. Both close the day.
+        Some((0, points)) => {
+            crate::log_checkin(&format!("trae: {today} claimed +{points:.0} points (auto)"));
+            state.last_ok_day = today.clone();
+            state.last_credits = points;
+            outcome.done_today = true;
+        }
+        Some((9095, _)) => {
+            crate::log_checkin(&format!("trae: {today} already claimed (9095)"));
+            state.last_ok_day = today.clone();
+            outcome.done_today = true;
+            outcome.was_already = true;
+        }
+        // 9074 queue/rate-limit, 1001/401/403 token trouble, anything else:
+        // the day is spent either way — retrying is what extends the queue.
+        other => {
+            let (code, points) = other.map_or((None, None), |(code, points)| (Some(code), Some(points)));
+            crate::log_checkin(&format!(
+                "trae: {today} claim failed ({}{}) — will retry",
+                code.map(|c| c.to_string()).unwrap_or_else(|| "no answer".into()),
+                points.map(|p| format!(" points={p:.0}")).unwrap_or_default()
+            ));
+        }
+    }
+    save_checkin_state(&path, &state);
+    Some(outcome)
+}
+
+
+/// The panel's check-in button: one forced claim right now, whatever the
+/// automatic pass already tried today. The bool says whether the day actually
+/// closed, so the button only turns into the done badge for a real claim —
+/// "queued" (9074) stays a button with its reason spelled out.
+pub fn manual_checkin() -> Result<(bool, String), String> {
+    let login = logins(true)
+        .into_iter()
+        .find(|l| l.host.contains("trae.cn"))
+        .ok_or_else(|| "未找到 Trae CN 登录".to_string())?;
+    let today = local_day();
+    let path = checkin_state_path().ok_or_else(|| "无法写入签到状态".to_string())?;
+    let mut state = load_checkin_state(&path);
+    let url = format!("{}{CLAIM_PATH}", login.host);
+    let resp = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(5))
+        .timeout_read(std::time::Duration::from_secs(10))
+        .build()
+        .post(&url)
+        .set("content-type", "application/json")
+        .set("authorization", &format!("Cloud-IDE-JWT {}", login.token))
+        .set("x-user-region", "CN")
+        .set("user-agent", &format!("Trae/{IDE_VERSION}"))
+        .set("x-device-type", if cfg!(target_os = "macos") {
+            "Darwin"
+        } else if cfg!(windows) {
+            "Windows"
+        } else {
+            "Linux"
+        })
+        .set("x-app-version", IDE_VERSION)
+        .set("x-device-id", &device_id_of(&mut state))
+        .send_string(&json!({ "req_source": 1 }).to_string())
+        .map_err(|e| format!("签到请求失败: {e}"))?;
+    let body: Value = resp
+        .into_string()
+        .map_err(|e| format!("签到响应读取失败: {e}"))?
+        .parse()
+        .unwrap_or(Value::Null);
+    let code = body.get("code").and_then(Value::as_i64).unwrap_or(-1);
+    let points = body
+        .pointer("/data/points")
+        .and_then(Value::as_f64)
+        .unwrap_or_default();
+    state.last_attempt_day = today.clone();
+    let (ok, message) = match code {
+        0 => {
+            state.last_ok_day = today.clone();
+            state.last_credits = points;
+            (true, format!("签到成功，+{points:.0} 积分"))
+        }
+        9095 => (true, "今日已签到".to_string()),
+        9074 => (false, "签到排队中，稍后再试".to_string()),
+        other => (false, format!("签到未成功 (code {other})")),
+    };
+    save_checkin_state(&path, &state);
+    Ok((ok, message))
+}
+
+/// The CN free tier has no pack with a limit: the IDE maps a packless account
+/// to its own Free table (50 basic requests a month — `pD.FreeUser` in the
+/// workbench bundle) and the entitlement payload's `basic_usage_*` fields stay
+/// at zero. The window is drawn from that table, with the payload's own basic
+/// usage as the spent side, so a CN Free account shows a bar instead of
+/// nothing.
+fn cn_free_window(body: &Value) -> Option<QuotaSample> {
+    let packs = body.get("user_entitlement_pack_list").and_then(Value::as_array)?;
+    let has_limited_pack = packs.iter().any(|p| {
+        num(p.pointer("/entitlement_base_info/quota/basic_usage_limit")).unwrap_or(0.0) > 0.0
+    });
+    if has_limited_pack {
+        return None;
+    }
+    let used: f64 = packs
+        .iter()
+        .map(|p| num(p.get("usage").unwrap_or(&Value::Null).get("basic_usage_amount")).unwrap_or(0.0))
+        .sum();
+    const FREE_BASIC_LIMIT: f64 = 50.0;
+    Some(QuotaSample {
+        used_percent: (used / FREE_BASIC_LIMIT * 100.0).clamp(0.0, 100.0),
+        window_minutes: 0,
+        resets_at_ms: 0,
+        label: Some(format!("Free plan · 已用 {}/50", fmt(used))),
+        id: Some("basic_usage".to_string()),
+    })
+}
+
+/// The wire answer → bars, in the mapper's own order: plan, bonus, fast.
+pub(crate) fn samples_from_entitlement(body: &Value) -> Vec<QuotaSample> {
+    let Some(list) = body.get("user_entitlement_pack_list").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let packs: Vec<&Value> = list
+        .iter()
+        .filter(|p| num(p.pointer("/entitlement_base_info/product_type")) != Some(PRODUCT_PROMO))
+        .collect();
+    if packs.is_empty() {
+        return Vec::new();
+    }
+    let dollar = body.get("is_dollar_usage_billing").and_then(Value::as_bool).unwrap_or(false);
+
+    let mut out = Vec::new();
+    if let Some(pack) = plan_pack(&packs) {
+        let quota = pack.pointer("/entitlement_base_info/quota").unwrap_or(&Value::Null);
+        let usage = pack.get("usage").unwrap_or(&Value::Null);
+        let identity = pack
+            .get("display_desc")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| "Trae".into());
+        if let Some(bar) = meter(quota, usage, "basic_usage", &identity, dollar, resets_of(pack)) {
+            out.push(bar);
+        }
+        // `no_bonus_quota` hides the bonus meter entirely, exactly as the mapper does.
+        if quota.get("no_bonus_quota").and_then(Value::as_bool) != Some(true) {
+            if let Some(bar) = meter(quota, usage, "bonus_usage", "Bonus", dollar, 0) {
+                out.push(bar);
+            }
+        }
+    }
+    if let Some(bar) = fast_request_bar(&packs) {
+        out.push(bar);
+    }
+    out
+}
+
+/// First of Ultra > ProPlus > Pro > Lite > Free, the mapper's own priority.
+fn plan_pack<'a>(packs: &[&'a Value]) -> Option<&'a Value> {
+    for kind in [PRODUCT_ULTRA, PRODUCT_PRO_PLUS, PRODUCT_PRO, PRODUCT_LITE, PRODUCT_FREE] {
+        if let Some(pack) = packs
+            .iter()
+            .copied()
+            .find(|p| num(p.pointer("/entitlement_base_info/product_type")) == Some(kind))
+        {
+            return Some(pack);
+        }
+    }
+    None
+}
+
+/// One `X_limit` / `X_amount` pair as one bar. A meter without a positive
+/// allowance is not a 0 % bar — it is nothing to draw.
+fn meter(
+    quota: &Value,
+    usage: &Value,
+    stem: &str,
+    name: &str,
+    dollar: bool,
+    resets_at_ms: i64,
+) -> Option<QuotaSample> {
+    let limit = num(quota.get(format!("{stem}_limit")))?;
+    let used = num(usage.get(format!("{stem}_amount"))).unwrap_or(0.0);
+    if limit <= 0.0 {
+        return None;
+    }
+    let spent = if dollar { format!("${}", fmt(used)) } else { fmt(used) };
+    let cap = if dollar { format!("${}", fmt(limit)) } else { fmt(limit) };
+    Some(QuotaSample {
+        used_percent: (used / limit * 100.0).clamp(0.0, 100.0),
+        window_minutes: 0,
+        resets_at_ms,
+        label: Some(format!("{name} · 已用 {spent}/{cap}")),
+        id: Some(stem.to_string()),
+    })
+}
+
+/// Fast requests sum across packs; a single −1 (unlimited) cancels the bar.
+fn fast_request_bar(packs: &[&Value]) -> Option<QuotaSample> {
+    let mut limit = 0.0;
+    let mut used = 0.0;
+    for pack in packs {
+        match num(pack.pointer("/entitlement_base_info/quota/premium_model_fast_request_limit")) {
+            Some(-1.0) => return None,
+            Some(n) => limit += n,
+            None => {}
+        }
+        used += num(pack.pointer("/usage/premium_model_fast_amount")).unwrap_or(0.0);
+    }
+    if limit <= 0.0 {
+        return None;
+    }
+    Some(QuotaSample {
+        used_percent: (used / limit * 100.0).clamp(0.0, 100.0),
+        window_minutes: 0,
+        resets_at_ms: packs.iter().map(|p| resets_of(p)).max().unwrap_or(0),
+        label: Some(format!("Fast · 已用 {}/{}", fmt(used), fmt(limit))),
+        id: Some("fast".into()),
+    })
+}
+
+/// The pack's own period end: `expire_time` first, then the entitlement's
+/// `end_time` — both epoch *seconds* on the wire.
+fn resets_of(pack: &Value) -> i64 {
+    let seconds = num(pack.get("expire_time"))
+        .filter(|s| *s > 0.0)
+        .or_else(|| num(pack.pointer("/entitlement_base_info/end_time")).filter(|s| *s > 0.0));
+    seconds.map(|s| (s * 1000.0) as i64).unwrap_or(0)
+}
+
+fn num(value: Option<&Value>) -> Option<f64> {
+    value.and_then(Value::as_f64).filter(|n| n.is_finite())
+}
+
+/// Whole when whole, enough decimals to keep small dollars honest.
+fn fmt(n: f64) -> String {
+    if n.fract() == 0.0 {
+        format!("{n:.0}")
+    } else if n.abs() < 0.1 {
+        format!("{n:.4}")
+    } else {
+        format!("{n:.2}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::Engine;
+
+    /// The strip lights the header's 今日已签到 badge on any row whose id
+    /// starts with `checkin` (QuotaStrip `groupCheckedIn`), and its own comment
+    /// reads that prefix as "the backend stamped a claimed day". Trae's check-in
+    /// credit pack carries the *grant* date inside its entitlement id
+    /// (`checkin_20261009_x`) and lives for weeks, so a pack from an earlier
+    /// day must NOT still wear the prefix — otherwise the badge freezes on days
+    /// the user never claimed. Only a `checkin_YYYYMMDD` id stamped today may
+    /// keep the prefix; today's claim is still metered.
+    #[test]
+    fn a_checkin_pack_is_badged_only_for_the_day_it_was_granted() {
+        let yesterday = (chrono::Local::now() - chrono::Duration::days(1)).format("%Y%m%d");
+        let body = json!({"user_entitlement_pack_list": [
+            {"display_desc": "签到奖励(昨)", "entitlement_base_info": {
+                "entitlement_id": format!("checkin_{yesterday}_x"), "end_time": 4_102_444_800.0,
+                "quota": {"credits_limit": 100}}, "usage": {}},
+            {"display_desc": "签到奖励(今)", "entitlement_base_info": {
+                "entitlement_id": format!("checkin_{}", chrono::Local::now().format("%Y%m%d")),
+                "end_time": 4_102_444_800.0, "quota": {"credits_limit": 100}}, "usage": {}}
+        ]});
+        let out = samples_from_ent_usage_v2(&body);
+        assert_eq!(out.len(), 2);
+        assert!(
+            !out[0].id.as_deref().unwrap_or_default().starts_with("checkin"),
+            "a prior day's check-in pack must not wear the badge prefix, got {:?}",
+            out[0].id
+        );
+        assert!(
+            out[1].id.as_deref().unwrap_or_default().starts_with("checkin"),
+            "today's check-in claim keeps the badge, got {:?}",
+            out[1].id
+        );
+    }
+
+    /// The CN credits windows list maps each pack's real spent side onto the
+    /// gauge, not a forced zero: the request carries `require_usage` and the
+    /// primary v2 path reads the same `/usage/credits_amount` to draw the bar.
+    /// This path used to parse `spent`, drop it and hard-code 0 %, so every
+    /// pack here read empty however much the account had consumed.
+    #[test]
+    fn a_cn_credit_window_carries_its_spent_share() {
+        let pack = json!({
+            "display_desc": "每月登录赠送",
+            "entitlement_base_info": {"entitlement_id": "monthly_bonus_202610_x", "end_time": 1793462399, "quota": {"credits_limit": 500}},
+            "usage": {"credits_amount": 383.9872}
+        });
+        let sample = cn_window_for_pack(&pack).expect("a limited pack draws a row");
+        assert!((sample.used_percent - 76.8).abs() < 0.1, "the gauge shows the real spend, got {}", sample.used_percent);
+        assert_eq!(sample.label.as_deref(), Some("每月登录赠送"));
+        assert_eq!(sample.resets_at_ms, 1793462399000);
+        // No limit, no row (the free-plan record has nothing to meter).
+        assert!(cn_window_for_pack(&json!({"entitlement_base_info": {"quota": {}}, "usage": {}})).is_none());
+    }
+
+    /// A v2 entitlement list that carries the pack's own spent side is
+    /// reproduced verbatim by the mapper.
+    #[test]
+    fn the_v2_credits_answer_maps_summary_and_packs() {
+        // The check-in pack is stamped with *today* so this fixture keeps the
+        // `checkin` badge prefix (see `today_scoped_checkin_id`): a past-dated
+        // check-in pack is re-labelled so it cannot freeze the badge across days.
+        let checkin_id = format!("checkin_{}", chrono::Local::now().format("%Y%m%d"));
+        let body = json!({
+            "is_credits_billing": true,
+            "usage_summary": {"consumed_amount": 383.99, "consumption_ratio": 0.0817, "total_amount": 4700},
+            "user_entitlement_pack_list": [
+                {"display_desc": "老用户福利", "is_hide": false,
+                 "entitlement_base_info": {"entitlement_id": "370200375810", "end_time": 1794133541,
+                   "quota": {"credits_limit": 4000}}, "usage": {}},
+                {"display_desc": "每月登录赠送", "is_hide": false,
+                 "entitlement_base_info": {"entitlement_id": "monthly_bonus_202610_x", "end_time": 1793462399,
+                   "quota": {"credits_limit": 500}}, "usage": {"credits_amount": 383.9872}},
+                {"display_desc": "签到奖励", "is_hide": false,
+                 "entitlement_base_info": {"entitlement_id": checkin_id.as_str(), "end_time": 1794153620,
+                   "quota": {"credits_limit": 100}}, "usage": {}},
+                {"display_desc": "隐藏包", "is_hide": true,
+                 "entitlement_base_info": {"entitlement_id": "hidden", "quota": {"credits_limit": 9}}, "usage": {}},
+                {"display_desc": "免费", "is_hide": false,
+                 "entitlement_base_info": {"entitlement_id": "free_utc202610_x"}, "usage": {}}
+            ]
+        });
+        let out = samples_from_ent_usage_v2(&body);
+        // 五进四出：隐藏包和免费档记录（无 credits_limit，无任何额度语义）都不成行
+        assert_eq!(out.len(), 4, "hidden and limit-less packs stay out: {out:?}");
+        assert_eq!(out[0].id.as_deref(), Some("credits-summary"));
+        assert!((out[0].used_percent - 8.17).abs() < 0.01, "{:?}", out[0].used_percent);
+        assert_eq!(out[0].label.as_deref(), Some("积分 · 已用 384/4700"));
+        assert_eq!(
+            out[3].id.as_deref(),
+            Some(checkin_id.as_str()),
+            "a check-in pack granted today keeps the `checkin` id for the badge"
+        );
+        assert_eq!(out[1].label.as_deref(), Some("老用户福利 · 已用 0/4000"));
+        assert_eq!(out[2].label.as_deref(), Some("每月登录赠送 · 已用 384/500"));
+        assert!((out[2].used_percent - 76.8).abs() < 0.1, "{:?}", out[2].used_percent);
+        assert_eq!(out[2].resets_at_ms, 1793462399000, "the pack's own expiry drives the countdown");
+    }
+
+    /// Round-trips the envelope: encrypt with the derived scheme, read back —
+    /// and refuses a flipped byte, a wrong header.
+    #[test]
+    fn the_envelope_is_symmetric_and_resists_tampering() {
+        use cbc::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
+        use sha2::{Digest, Sha512};
+
+        let body = br#"{"token":"t","host":"https://x"}"#;
+        // The wire plaintext: SHA-512 digest of the body, then the body.
+        let mut prefixed = Sha512::digest(body).to_vec();
+        prefixed.extend_from_slice(body);
+
+        let key: [u8; 32] = core::array::from_fn(|i| i as u8);
+        let salt = salt_for(&[116, 99, 5, 16, 0, 0]).unwrap();
+        let mut stem = [0u8; 128];
+        stem[..64].copy_from_slice(&Sha512::digest(key));
+        stem[64..].copy_from_slice(&salt);
+        let derived: [u8; 64] = Sha512::digest(stem).into();
+        let aes: [u8; 16] = derived[..16].try_into().unwrap();
+        let iv: [u8; 16] = derived[16..32].try_into().unwrap();
+        let ct = cbc::Encryptor::<aes::Aes128>::new(&aes.into(), &iv.into())
+            .encrypt_padded_vec_mut::<Pkcs7>(&prefixed);
+
+        let mut blob = vec![116u8, 99, 5, 16, 0, 0];
+        blob.extend_from_slice(&key);
+        blob.extend_from_slice(&ct);
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&blob);
+        assert_eq!(decrypt(&encoded).as_deref(), Some(std::str::from_utf8(body).unwrap()));
+
+        // A tampered ciphertext fails the digest check, a wrong header fails earlier.
+        let mut flipped = blob.clone();
+        flipped[50] ^= 0xff;
+        let flipped = base64::engine::general_purpose::STANDARD.encode(&flipped);
+        assert_eq!(decrypt(&flipped), None);
+        let mut bad_header = blob;
+        bad_header[0] = 1;
+        let bad_header = base64::engine::general_purpose::STANDARD.encode(&bad_header);
+        assert_eq!(decrypt(&bad_header), None);
+    }
+
+    /// The answer this machine's free account actually gave (2026-09-30),
+    /// trimmed to the fields the probe reads.
+    const MEASURED: &str = r#"{"billing_version":3,"is_dollar_usage_billing":true,
+        "user_entitlement_pack_list":[{"display_desc":"Free plan","expire_time":0,
+        "entitlement_base_info":{"end_time":1790812799,"product_type":0,
+          "quota":{"advanced_model_request_limit":1000,"auto_completion_limit":5000,
+            "basic_usage_limit":1,"bonus_usage_limit":0,"credits_limit":0,
+            "no_bonus_quota":true,"premium_model_fast_request_limit":10,
+            "premium_model_slow_request_limit":50},
+          "product_extra":{"subscription_extra":{"period_type":0}}},
+        "status":1,
+        "usage":{"basic_usage_amount":0.00839,"bonus_usage_amount":0,"credits_amount":0,
+          "is_flash_consuming":true}}]}"#;
+
+    #[test]
+    fn the_measured_free_plan_becomes_one_dollar_bar() {
+        let body: Value = serde_json::from_str(MEASURED).unwrap();
+        let s = samples_from_entitlement(&body);
+        let labels: Vec<&str> = s.iter().map(|b| b.label.as_deref().unwrap_or_default()).collect();
+        assert_eq!(
+            labels,
+            vec!["Free plan · 已用 $0.0084/$1", "Fast · 已用 0/10"],
+            "{labels:?} — the plan's 10 fast requests are a real, empty meter"
+        );
+        let bar = &s[0];
+        assert!((bar.used_percent - 0.839).abs() < 1e-9, "{}", bar.used_percent);
+        assert_eq!(bar.id.as_deref(), Some("basic_usage"));
+        // end_time 1790812799 s → ms; `expire_time: 0` must not win over it.
+        assert_eq!(bar.resets_at_ms, 1_790_812_799_000);
+    }
+
+    #[test]
+    fn a_paid_plan_draws_plan_bonus_and_fast() {
+        let body: Value = serde_json::from_str(
+            r#"{"is_dollar_usage_billing":false,"user_entitlement_pack_list":[
+            {"display_desc":"Pro","expire_time":0,"entitlement_base_info":{"product_type":1,"end_time":1790812799,
+              "quota":{"basic_usage_limit":600,"bonus_usage_limit":100}},
+             "usage":{"basic_usage_amount":60.5,"bonus_usage_amount":10}},
+            {"display_desc":"","expire_time":0,"entitlement_base_info":{"product_type":2,"end_time":1793404799,
+              "quota":{"premium_model_fast_request_limit":80}},
+             "usage":{"premium_model_fast_amount":8}}]}"#,
+        )
+        .unwrap();
+        let s = samples_from_entitlement(&body);
+        let labels: Vec<&str> = s.iter().map(|b| b.label.as_deref().unwrap_or_default()).collect();
+        assert_eq!(labels, vec!["Pro · 已用 60.50/600", "Bonus · 已用 10/100", "Fast · 已用 8/80"], "{labels:?}");
+        // The fast bar takes the latest pack end as its reset.
+        assert_eq!(s[2].resets_at_ms, 1_793_404_799_000);
+    }
+
+    #[test]
+    fn an_unlimited_or_absent_fast_meter_draws_nothing() {
+        let unlimited: Value = serde_json::from_str(
+            r#"{"user_entitlement_pack_list":[
+            {"entitlement_base_info":{"product_type":1,"quota":{"basic_usage_limit":10,
+               "premium_model_fast_request_limit":-1}},"usage":{"basic_usage_amount":1,
+               "premium_model_fast_amount":999}}]}"#,
+        )
+        .unwrap();
+        assert_eq!(samples_from_entitlement(&unlimited).len(), 1, "only the plan bar");
+        let zero: Value = serde_json::from_str(
+            r#"{"user_entitlement_pack_list":[
+            {"entitlement_base_info":{"product_type":0,"quota":{"basic_usage_limit":0}},
+             "usage":{"basic_usage_amount":0}}]}"#,
+        )
+        .unwrap();
+        assert!(samples_from_entitlement(&zero).is_empty(), "0/0 is not a bar");
+        assert!(samples_from_entitlement(&json!({"billing_version": 3})).is_empty());
+    }
+
+    /// A promo pack would double-count the plan's numbers; the mapper drops it.
+    #[test]
+    fn a_promo_pack_is_not_a_plan_and_not_a_fast_meter() {
+        let body: Value = serde_json::from_str(
+            r#"{"user_entitlement_pack_list":[
+            {"entitlement_base_info":{"product_type":3,"quota":{"basic_usage_limit":600,
+               "premium_model_fast_request_limit":500}},"usage":{"basic_usage_amount":1}}]}"#,
+        )
+        .unwrap();
+        assert!(samples_from_entitlement(&body).is_empty());
+    }
+
+    /// Live proof on the machine that has the IDE; run with
+    /// `cargo test -p usage-quota providers::trae -- --ignored --nocapture`.
+    /// Prints shapes and counts, never the token itself.
+    #[test]
+    #[ignore = "reads the real Trae install and calls the vendor's live quota API"]
+    fn the_live_meters_this_account_actually_has() {
+        let paths = storage_jsons(false).into_iter().chain(storage_jsons(true)).collect::<Vec<_>>();
+        if paths.is_empty() {
+            println!("[trae] no platform data dir");
+            return;
+        }
+        for path in &paths {
+            println!("[trae] storage: {}", path.display());
+        }
+        let all: serde_json::Map<String, Value> = paths
+            .iter()
+            .filter_map(|p| std::fs::read_to_string(p).ok())
+            .filter_map(|t| serde_json::from_str(&t).ok())
+            .fold(serde_json::Map::new(), |mut acc, m: serde_json::Map<String, Value>| {
+                acc.extend(m);
+                acc
+            });
+        let auth_keys: Vec<&String> = all.keys().filter(|k| k.starts_with("iCubeAuthInfo://")).collect();
+        println!("[trae] iCubeAuthInfo records: {auth_keys:?}");
+        for (key, value) in all.iter().filter(|(k, _)| k.starts_with("iCubeAuthInfo://")) {
+            let Some(encoded) = value.as_str() else { continue };
+            let Some(plain) = decrypt(encoded) else {
+                println!("[trae] {key}: envelope did not decrypt");
+                continue;
+            };
+            let record: Value = serde_json::from_str(&plain).unwrap();
+            let token = record.get("token").and_then(Value::as_str).unwrap_or_default();
+            println!(
+                "[trae] {key}: token {} bytes, expiredAt {:?}, host {:?}",
+                token.len(),
+                record.get("expiredAt").and_then(Value::as_str),
+                record.get("host").and_then(Value::as_str)
+            );
+            if token.is_empty() {
+                continue;
+            }
+            let url = format!(
+                "{}{USAGE_PATH}",
+                record.get("host").and_then(Value::as_str).unwrap_or(DEFAULT_HOST)
+            );
+            let resp = ureq::AgentBuilder::new()
+                .timeout_connect(std::time::Duration::from_secs(3))
+                .timeout_read(std::time::Duration::from_secs(6))
+                .build()
+                .post(&url)
+                .set("content-type", "application/json")
+                .set("authorization", &format!("Cloud-IDE-JWT {token}"))
+                .send_json(json!({"require_usage": true}));
+            match resp {
+                Ok(r) => {
+                    let body: Value = r.into_json().unwrap();
+                    println!("[trae] HTTP 200, keys: {:?}", body.as_object().map(|o| o.keys().collect::<Vec<_>>()));
+                    let s = samples_from_entitlement(&body);
+                    for bar in &s {
+                        println!("[trae] {:>6.2}%  reset={:>13}  {}", bar.used_percent, bar.resets_at_ms, bar.label.as_deref().unwrap_or_default());
+                    }
+                    if s.is_empty() {
+                        println!("[trae] mapper drew nothing from: {}", serde_json::to_string(&body).unwrap_or_default().chars().take(400).collect::<String>());
+                    }
+                }
+                Err(ureq::Error::Status(code, r)) => {
+                    println!("[trae] HTTP {code}: {}", r.into_string().unwrap_or_default().chars().take(200).collect::<String>());
+                }
+                Err(e) => println!("[trae] transport error: {e}"),
+            }
+        }
+        // The exact production path, closing the loop past the hand-rolled call above.
+        let fetched = TraeQuota { cn: false }.fetch();
+        println!("[trae] fetch() → {} bars", fetched.len());
+        for bar in &fetched {
+            println!("[trae] fetch: {:>6.2}%  {}", bar.used_percent, bar.label.as_deref().unwrap_or_default());
+        }
+    }
+}
+
+/// `#[ignore]`d live diagnostic: which editions log in on this machine, and
+/// with what host/expiry — the shape a CN-only install must produce for its
+/// quota windows to appear. Never prints the token.
+#[test]
+#[ignore]
+fn live_logins_report() {
+    for path in storage_jsons(false).into_iter().chain(storage_jsons(true)) {
+        println!("storage: {}", path.display());
+    }
+    for login in logins(false).into_iter().chain(logins(true)) {
+        println!(
+            "[trae] login: host {}  expiredAt {:?}",
+            login.host, login.expires_at
+        );
+    }
+    assert!(!logins(false).is_empty(), "no logins decrypt from the live stores");
+}
+
+/// `#[ignore]`d: dump the CN account's full entitlement payload (no token) so
+/// the Free-plan window's mapping is written against the real shapes.
+#[test]
+#[ignore]
+fn cn_entitlement_dump() {
+    for login in logins(true).into_iter().filter(|l| l.host.contains("trae.cn")) {
+        let url = format!("{}{USAGE_PATH}", login.host);
+        let Some(body) = crate::http::post_json(
+            &url,
+            &[
+                ("content-type", "application/json"),
+                ("authorization", &format!("Cloud-IDE-JWT {}", login.token)),
+            ],
+            json!({}),
+        ) else {
+            println!("[trae-cn] {url}: request failed");
+            continue;
+        };
+        println!("[trae-cn] {url}:\n{}", serde_json::to_string_pretty(&body).unwrap());
+    }
+}
+
+/// `#[ignore]`d: the v2 entitlement endpoint takes `require_usage` and is what
+/// the CN IDE itself calls for the free tier's usage numbers — probe it and
+/// dump the shape.
+#[test]
+#[ignore]
+fn cn_entitlement_v2_dump() {
+    for login in logins(true).into_iter().filter(|l| l.host.contains("trae.cn")) {
+        for path in ["/trae/api/v2/pay/ide_user_ent_usage", USAGE_PATH] {
+            let url = format!("{}{path}", login.host);
+            let Some(body) = crate::http::post_json(
+                &url,
+                &[
+                    ("content-type", "application/json"),
+                    ("authorization", &format!("Cloud-IDE-JWT {}", login.token)),
+                ],
+                json!({ "require_usage": true, "req_source": "IDE" }),
+            ) else {
+                println!("[trae-cn] {url}: request failed");
+                continue;
+            };
+            println!("[trae-cn] {url}:\n{}", serde_json::to_string_pretty(&body).unwrap());
+        }
+    }
+}
+
+#[cfg(test)]
+mod cn_free_tests {
+    use super::*;
+
+    /// The exact shape the live CN account returned (2026-10-08): a freshman
+    /// account whose only pack carries no limits at all.
+    #[test]
+    fn a_packless_freshman_account_draws_the_free_table() {
+        let body: Value = serde_json::json!({
+            "is_dollar_usage_billing": false,
+            "is_pay_freshman": true,
+            "trial_status": {"is_eligible_for_trial": true, "is_in_trial": false, "trial_end_time": 1791627941},
+            "user_entitlement_pack_list": [{
+                "display_desc": "原速通次数兑换",
+                "entitlement_base_info": {
+                    "product_type": 2,
+                    "quota": {"basic_usage_limit": 0, "premium_model_fast_request_limit": 0, "no_bonus_quota": true},
+                    "product_id": 208
+                },
+                "usage": {"basic_usage_amount": 0, "premium_model_fast_amount": 0}
+            }]
+        });
+        assert!(samples_from_entitlement(&body).is_empty(), "the paid-plan mapper has nothing for a 0-limit pack");
+        let bar = cn_free_window(&body).expect("the free table draws instead");
+        assert_eq!(bar.used_percent, 0.0);
+        assert_eq!(bar.label.as_deref(), Some("Free plan · 已用 0/50"));
+    }
+
+    /// An account whose pack carries a real limit belongs to the paid mapper,
+    /// not the free table.
+    #[test]
+    fn an_account_with_a_limited_pack_keeps_the_paid_mapper() {
+        let body: Value = serde_json::json!({
+            "is_dollar_usage_billing": false,
+            "user_entitlement_pack_list": [{
+                "entitlement_base_info": {"product_type": 1, "quota": {"basic_usage_limit": 500}},
+                "usage": {"basic_usage_amount": 150}
+            }]
+        });
+        assert!(cn_free_window(&body).is_none(), "the free table must not shadow a real pack");
+    }
+}
+
+/// `#[ignore]`d: shape-hunt the CN checkin claim — the definition carries
+/// `req_source/Session/Request` and the mock endpoint carries a `did`, so try
+
+/// `#[ignore]`d live check: what the CN probe actually fetches right now.
+#[test]
+#[ignore]
+fn cn_fetch_live() {
+    let bars = TraeQuota { cn: true }.fetch();
+    println!("[trae-cn] fetch() → {} bars", bars.len());
+    for bar in &bars {
+        println!("[trae-cn] fetch: {:>6.2}%  {}", bar.used_percent, bar.label.as_deref().unwrap_or_default());
+    }
+    assert!(!bars.is_empty(), "the CN probe returned no bars for a running host");
+}
+
+/// `#[ignore]`d: the CN dashboard's credits endpoints against the local token
+/// — status, billing status and the web entitlement (which the dashboard page
+/// itself calls). Dumps shapes, never the token.
+#[test]
+#[ignore]
+fn cn_credits_dump() {
+    for login in logins(true).into_iter().filter(|l| l.host.contains("trae.cn")) {
+        for (path, payload) in [
+            ("/trae/api/v2/pay/ide_user_ent_usage", json!({ "require_usage": true })),
+            ("/trae/api/v2/pay/user_current_entitlement_list", json!({ "require_usage": true, "req_source": "IDE", "full_data": true })),
+            ("/trae/api/v2/pay/web_user_ent_usage", json!({ "require_usage": true, "req_source": "IDE", "full_data": true })),
+            ("/trae/api/v2/ug/checkin_credits/status", json!({})),
+            ("/api/v1/commercial/get_session_usage", json!({ "session_id": "" })),
+        ] {
+            let url = format!("{}{path}", login.host);
+            let resp = ureq::AgentBuilder::new()
+                .timeout_connect(std::time::Duration::from_secs(5))
+                .timeout_read(std::time::Duration::from_secs(10))
+                .build()
+                .post(&url)
+                .set("content-type", "application/json")
+                .set("authorization", &format!("Cloud-IDE-JWT {}", login.token))
+                .send_string(&payload.to_string());
+            match resp {
+                Ok(r) => {
+                    let text = r.into_string().unwrap_or_default();
+                    let pretty: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+                    println!("[trae-cn] {url} ({}):\n{}", "2xx", serde_json::to_string_pretty(&pretty).unwrap());
+                }
+                Err(ureq::Error::Status(code, r)) => {
+                    let text = r.into_string().unwrap_or_default();
+                    println!("[trae-cn] {url}: HTTP {code}: {text}");
+                }
+                Err(e) => println!("[trae-cn] {url}: {e}"),
+            }
+        }
+    }
+}
+
+/// `#[ignore]`d: parameter-shape matrix for the checkin status endpoint, to
+
+/// `#[ignore]`d: dump the field NAMES (never values) of every decrypted
+/// iCubeAuthInfo record, hunting for a device/session id the claim needs.
+#[test]
+#[ignore]
+fn cn_auth_record_fields() {
+    for path in storage_jsons(true) {
+        let Ok(text) = std::fs::read_to_string(&path) else { continue };
+        let Ok(all) = serde_json::from_str::<serde_json::Map<String, Value>>(&text) else { continue };
+        for (key, value) in &all {
+            let Some(encoded) = value.as_str() else { continue };
+            if !key.starts_with("iCubeAuthInfo://") { continue; }
+            let Some(plain) = decrypt(encoded) else {
+                println!("[trae-cn] {key}: does not decrypt");
+                continue;
+            };
+            match serde_json::from_str::<Value>(&plain) {
+                Ok(record) => {
+                    let names: Vec<&String> = record.as_object().map(|o| o.keys().collect()).unwrap_or_default();
+                    println!("[trae-cn] {key}: fields {names:?}");
+                    for f in ["uid", "did", "device_id", "session", "user_id", "host", "expiredAt"] {
+                        if let Some(v) = record.get(f) {
+                            let shown = match v {
+                                Value::String(sv) if f != "host" && f != "expiredAt" => format!("<{} chars>", sv.len()),
+                                other => format!("{other}"),
+                            };
+                            println!("    {f} = {shown}");
+                        }
+                    }
+                }
+                Err(_) => println!("[trae-cn] {key}: plain text {} bytes", plain.len()),
+            }
+        }
+    }
+}
+
+/// `#[ignore]`d one-shot: write the CN web token to a temp file for browser
+/// session injection. Delete the file right after use.
+#[test]
+#[ignore]
+fn cn_token_to_tmpfile() {
+    let login = logins(true)
+        .into_iter()
+        .find(|l| l.host.contains("trae.cn"))
+        .expect("no CN login");
+    std::fs::write("/tmp/trae-cn-token", &login.token).unwrap();
+    println!("[trae-cn] token written, {} bytes", login.token.len());
+}

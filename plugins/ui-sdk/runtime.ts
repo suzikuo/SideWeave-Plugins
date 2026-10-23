@@ -197,10 +197,13 @@ export function pluginCall<T>(method: string, payload: unknown = {}, timeoutMs =
   return new Promise<T>((resolve, reject) => {
     const id = requestId()
     const pluginId = currentPluginId()
+    const bridgeTimeoutMs = Number.isFinite(timeoutMs) && timeoutMs >= 1 && timeoutMs <= 60_000
+      ? Math.ceil(timeoutMs) + 1_000
+      : 9_000
     const timer = window.setTimeout(() => {
       window.removeEventListener('message', onMessage)
       reject(new Error('SideWeave UI bridge timeout'))
-    }, 8000)
+    }, bridgeTimeoutMs)
     function onMessage(event: MessageEvent) {
       const data = event.data as {
         __agileTiles?: boolean

@@ -115,6 +115,10 @@ foreach ($plugin in $Plugins) {
     New-Item -ItemType Directory -Path $packageRoot -Force | Out-Null
     try {
         Copy-Item -LiteralPath $plugin.ManifestPath -Destination (Join-Path $packageRoot "manifest.json")
+        $noticeSource = Join-Path $plugin.PluginRoot "THIRD_PARTY_NOTICES.md"
+        if (Test-Path -LiteralPath $noticeSource -PathType Leaf) {
+            Copy-Item -LiteralPath $noticeSource -Destination (Join-Path $packageRoot "THIRD_PARTY_NOTICES.md")
+        }
         $backendDestination = Join-Path $packageRoot $packageBackend
         New-Item -ItemType Directory -Path (Split-Path -Parent $backendDestination) -Force | Out-Null
         Copy-Item -LiteralPath $artifactPath -Destination $backendDestination -Force

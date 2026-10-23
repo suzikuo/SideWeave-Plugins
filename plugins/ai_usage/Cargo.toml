@@ -1,0 +1,21 @@
+[package]
+name = "sideweave_plugin-ai_usage"
+version = "0.4.10"
+edition.workspace = true
+license.workspace = true
+description = "Local AI token usage, cost and quota dashboard for SideWeave"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+sideweave-plugin-api = { workspace = true }
+sideweave-plugin-sdk = { workspace = true }
+usage-core = { workspace = true }
+usage-index = { workspace = true }
+usage-quota = { workspace = true }
+usage-adapter-all = { workspace = true }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
