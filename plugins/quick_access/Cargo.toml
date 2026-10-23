@@ -1,0 +1,15 @@
+[package]
+name = "sideweave_plugin-quick-access"
+version = "1.0.0"
+edition = "2021"
+description = "Unified application and bookmark quick access plugin for SideWeave"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+sideweave-plugin-api = { workspace = true }
+sideweave-plugin-sdk = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }

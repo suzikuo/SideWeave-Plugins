@@ -17,6 +17,12 @@ Official plugins follow the community plugin contract. Rust backends use `sidewe
 
 The notification-lab plugin and ssh-process crate are development/support packages. The package builder includes only manifests whose publisher is sideweave and whose matching Cargo package exists.
 
+## Consolidated plugins
+
+- `quick_access` combines App Launcher and Bookmarks in one plugin with separate Applications and Bookmarks sections. It imports existing app and bookmark settings the first time each section is opened.
+- `dev_connection` combines SSH, Port Forward, and Cloudflare Tunnel in one plugin with separate sections. It imports existing connection rules, tunnel configuration, and managed SSH keys when first needed.
+- The original standalone plugin sources remain available as backups. The consolidated plugins use their own storage and configuration after migration; the source plugins are not modified.
+
 ## Build a package
 
 Install Rust stable/MSVC and Node.js 22. Then run:

@@ -1,0 +1,37 @@
+{
+  "manifestVersion": 1,
+  "apiVersion": 1,
+  "id": "quick_access",
+  "name": "快捷入口",
+  "icon": "ui/icon.svg",
+  "version": "1.0.0",
+  "description": "统一管理本地应用与网页书签的快速访问入口",
+  "author": "SideWeave",
+  "type": "native",
+  "publisher": "sideweave",
+  "key_id": "main-2026-rotation-1",
+  "requires_trust": true,
+  "runtime": "dynamic_library",
+  "backend": "plugin.dll",
+  "autoStart": false,
+  "capabilities": [
+    "storage",
+    "filesystem.read",
+    "process.spawn",
+    "system.file_picker",
+    "system.icon",
+    "system.open_external"
+  ],
+  "ui": {
+    "entry": "ui/index.html",
+    "kind": "vue",
+    "assetRoot": "ui",
+    "initialWidth": 860,
+    "initialHeight": 720
+  },
+  "hoverPreview": {
+    "width": 320,
+    "height": 300,
+    "dataMethod": "get_preview"
+  }
+}

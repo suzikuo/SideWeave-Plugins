@@ -1566,7 +1566,7 @@ dependencies = [
 
 [[package]]
 name = "sideweave_plugin-app-launcher"
-version = "1.0.4"
+version = "1.0.5"
 dependencies = [
  "serde",
  "serde_json",
@@ -1600,7 +1600,7 @@ dependencies = [
 
 [[package]]
 name = "sideweave_plugin-cloudflare-tunnel"
-version = "1.0.21"
+version = "1.0.22"
 dependencies = [
  "chrono",
  "serde",
@@ -1617,6 +1617,20 @@ dependencies = [
  "serde_json",
  "sideweave-plugin-api",
  "sideweave-plugin-sdk",
+]
+
+[[package]]
+name = "sideweave_plugin-dev-connection"
+version = "1.0.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sideweave-plugin-api",
+ "sideweave-plugin-sdk",
+ "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1663,6 +1677,17 @@ dependencies = [
  "sideweave-plugin-sdk",
  "uuid",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "sideweave_plugin-quick-access"
+version = "1.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sideweave-plugin-api",
+ "sideweave-plugin-sdk",
+ "uuid",
 ]
 
 [[package]]

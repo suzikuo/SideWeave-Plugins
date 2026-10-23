@@ -1,0 +1,44 @@
+{
+  "manifestVersion": 1,
+  "apiVersion": 1,
+  "id": "dev_connection",
+  "name": "开发连接台",
+  "icon": "ui/icon.svg",
+  "version": "1.0.0",
+  "description": "集中管理 SSH 会话、本地端口转发与 Cloudflare Tunnel",
+  "author": "SideWeave",
+  "type": "native",
+  "publisher": "sideweave",
+  "key_id": "main-2026-rotation-1",
+  "requires_trust": true,
+  "runtime": "dynamic_library",
+  "backend": "plugin.dll",
+  "autoStart": true,
+  "capabilities": [
+    "storage",
+    "filesystem.read",
+    "filesystem.write",
+    "filesystem.external_read",
+    "system.file_picker",
+    "system.open_external",
+    "process.spawn",
+    "network.connect",
+    "network.listen",
+    "clipboard"
+  ],
+  "requiredCapabilities": [
+    "filesystem.write"
+  ],
+  "ui": {
+    "entry": "ui/index.html",
+    "kind": "vue",
+    "assetRoot": "ui",
+    "initialWidth": 900,
+    "initialHeight": 780
+  },
+  "hoverPreview": {
+    "width": 320,
+    "height": 300,
+    "dataMethod": "get_preview"
+  }
+}
