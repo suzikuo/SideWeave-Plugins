@@ -12,7 +12,7 @@ interface SyncStatus {
 }
 
 type PeriodKey = 'day' | 'week' | 'month' | 'year'
-type PageKey = 'overview' | 'tools' | 'sources' | 'sessions' | 'requests' | 'quotas' | 'preview'
+type PageKey = 'overview' | 'tools' | 'sources' | 'accounts' | 'sessions' | 'requests' | 'quotas' | 'preview'
 type PreviewWidget = 'tokens' | 'cost' | 'requests' | 'quotas' | 'tools' | 'split' | 'updated'
 type PreviewDisplayMode = 'cards' | 'compact'
 
@@ -119,6 +119,13 @@ interface QuotaEstimate {
   total_cost_usd: number | null
   remaining_cost_usd: number | null
   reason: string | null
+  group_id?: string | null
+  sources?: string[]
+  included_requests?: number
+  excluded_unknown_requests?: number
+  coverage_note?: string | null
+  quota_account_id?: string | null
+  quota_source_id?: number | null
 }
 
 interface UsageReport {
@@ -190,6 +197,7 @@ interface SessionRow {
   session: string
   session_title: string | null
   account_id: string | null
+  group_id?: string | null
   project: string | null
   model: string
   first_ms: number
@@ -204,6 +212,7 @@ export function useAiUsage() {
     { id: 'overview', label: '总览', icon: '◫' },
     { id: 'tools', label: '工具排行', icon: '⌘' },
     { id: 'sources', label: '来源管理', icon: '⌂' },
+    { id: 'accounts', label: '账号管理', icon: '◎' },
     { id: 'sessions', label: '会话排行', icon: '▤' },
     { id: 'requests', label: '请求明细', icon: '≡' },
     { id: 'quotas', label: '订阅配额', icon: '◷' },
@@ -271,6 +280,7 @@ export function useAiUsage() {
   const requestSnapshotMaxId = ref<number | null>(null)
   let appliedRequestFilters: RequestFilters | null = null
   let requestQuery = 0
+  let sessionQuery = 0
   const sessionRows = ref<SessionRow[]>([])
   const sessionLoading = ref(false)
   const sessionError = ref('')
@@ -673,6 +683,18 @@ export function useAiUsage() {
     }
   }
 
+  async function refreshAccountGroups() {
+    resetRequestPagination()
+    sessionQuery += 1
+    sessionRows.value = []
+    quotaEstimates.value = []
+    await readDashboard()
+    await refreshQuotas(false)
+    if (page.value === 'requests') await fetchRequests()
+    if (page.value === 'sessions') await fetchSessions()
+    if (previewSample.value) previewSample.value = await pluginCall<PreviewData>('get_preview')
+  }
+
   function readDashboard(): Promise<void> {
     const request = ++dashboardRequest
     const selection = { scope: scope.value, account: accountScope.value }
@@ -831,6 +853,7 @@ export function useAiUsage() {
   }
 
   async function fetchSessions() {
+    const query = ++sessionQuery
     sessionLoading.value = true
     sessionError.value = ''
     try {
@@ -843,12 +866,13 @@ export function useAiUsage() {
         account: accountScope.value,
         limit: 200
       }, 60_000)
+      if (disposed || query !== sessionQuery) return
       sessionRows.value = result.rows
       if (result.refresh_warning) sessionError.value = result.refresh_warning
     } catch (reason) {
-      sessionError.value = errorMessage(reason)
+      if (query === sessionQuery) sessionError.value = errorMessage(reason)
     } finally {
-      sessionLoading.value = false
+      if (query === sessionQuery) sessionLoading.value = false
     }
   }
 
@@ -933,7 +957,7 @@ export function useAiUsage() {
       if (uiActive && !loading.value) void refresh(true)
     }, DATA_REFRESH_MS)
     quotaRefreshTimer = window.setInterval(() => {
-      if (uiActive) void refreshQuotas(true)
+      if (uiActive) void refreshQuotas(false)
     }, QUOTA_REFRESH_MS)
   })
   onUnmounted(() => {
@@ -949,7 +973,7 @@ export function useAiUsage() {
     pages, previewWidgetOptions, defaultPreviewSettings, periodOptions, trendOptions,
     page, scope, accountScope, accountNameEditing, accountNameSaving, accountNameDraft,
     accountNameError, rootPathDraft, rootsSaving, rootsError, period, trendDays,
-    payload, loading, error, syncing, syncWarning, quotaLoading, quotaError, refreshQuotas, requestRows, requestLoading, requestError, sessionRows,
+    payload, loading, error, syncing, syncWarning, quotaLoading, quotaError, refreshQuotas, refreshAccountGroups, requestRows, requestLoading, requestError, sessionRows,
     sessionLoading, sessionError, requestTool, requestSearch, requestSince, requestUntil,
     requestPage, requestPageSize, requestTotal, requestPageCount, goRequestPage,
     previewSettings, previewSettingsLoading, previewSettingsSaving, previewSettingsMessage,

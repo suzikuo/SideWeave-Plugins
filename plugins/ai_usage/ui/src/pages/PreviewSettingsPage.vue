@@ -49,6 +49,7 @@ const { previewSettingsError, previewSettings, previewWidgetOptions, hasPreviewW
                 <i class="preview-live-quota-track"><b :class="{ warning: quota.used_percent >= 75, danger: quota.used_percent >= 92 }" :style="{ width: `${Math.max(0, Math.min(100, 100 - quota.used_percent))}%` }"></b></i>
                 <small>{{ resetTimeText(quota.resets_at_ms) }} · {{ resetLabel(quota.resets_at_ms) }}</small>
                 <small v-if="previewQuotaEstimate(quota)?.total_cost_usd != null">预估满额 ≈ {{ formatMoney(previewQuotaEstimate(quota)!.total_cost_usd!) }}</small>
+                <small v-if="previewQuotaEstimate(quota)?.coverage_note">{{ previewQuotaEstimate(quota)!.coverage_note }}</small>
               </div>
             </template>
             <small v-else>暂时没有读取到订阅额度</small>

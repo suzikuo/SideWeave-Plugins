@@ -6,6 +6,7 @@ import AccountNameDialog from './components/AccountNameDialog.vue'
 import OverviewPage from './pages/OverviewPage.vue'
 import ToolsPage from './pages/ToolsPage.vue'
 import SourcesPage from './pages/SourcesPage.vue'
+import AccountsPage from './pages/AccountsPage.vue'
 import SessionsPage from './pages/SessionsPage.vue'
 import RequestsPage from './pages/RequestsPage.vue'
 import QuotasPage from './pages/QuotasPage.vue'
@@ -21,6 +22,7 @@ const pageViews = {
   overview: OverviewPage,
   tools: ToolsPage,
   sources: SourcesPage,
+  accounts: AccountsPage,
   sessions: SessionsPage,
   requests: RequestsPage,
   quotas: QuotasPage,

@@ -87,10 +87,12 @@ fn save(index: &Index, ledger: &Ledger) -> Result<(), String> {
 pub(super) struct Worker {
     stop: mpsc::Sender<()>,
     thread: Option<std::thread::JoinHandle<()>>,
+    _quota_refresh: super::quota_refresh::Worker,
 }
 
 impl Worker {
     pub fn start(context: &PluginContext) -> Result<Self, String> {
+        let quota_refresh = super::quota_refresh::Worker::start()?;
         let context = PluginContext::new(context.plugin_id().clone(), context.services_arc());
         let (stop, receive) = mpsc::channel();
         let thread = std::thread::Builder::new().name("ai-usage-reset-reminders".into()).spawn(move || {
@@ -98,7 +100,11 @@ impl Worker {
             loop {
                 if index.is_none() { index = super::open_index().ok(); }
                 if let Some(index) = index.as_ref() {
-                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| check(index, &context, &usage_quota::cached())));
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let quotas = usage_quota::cached();
+                        let _ = super::notify_quota_threshold(index, &quotas, &context);
+                        check(index, &context, &quotas)
+                    }));
                 }
                 match receive.recv_timeout(Duration::from_secs(15)) {
                     Err(mpsc::RecvTimeoutError::Timeout) => {},
@@ -106,7 +112,7 @@ impl Worker {
                 }
             }
         }).map_err(|error| format!("无法启动重置提醒：{error}"))?;
-        Ok(Self { stop, thread: Some(thread) })
+        Ok(Self { stop, thread: Some(thread), _quota_refresh: quota_refresh })
     }
 }
 

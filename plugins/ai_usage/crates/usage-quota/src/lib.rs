@@ -223,6 +223,47 @@ pub fn refresh_codex_for_account(account_id: &str, budget: Duration) -> Vec<Quot
     collect_codex_account(account_id, budget, true)
 }
 
+pub fn codex_account_at(home: &std::path::Path) -> Option<String> { providers::codex_account_at(home) }
+
+fn codex_source_cache_key(home:&std::path::Path,account:&str)->String {
+    use sha2::{Digest,Sha256};
+    format!("codex-source-{:x}",Sha256::digest(format!("{}\0{account}",home.to_string_lossy()).as_bytes()))
+}
+
+fn cached_codex_source(home:&std::path::Path,account:&str,cache:Option<&cache::Cache>)->Vec<QuotaView> {
+    if codex_account_at(home).as_deref()!=Some(account) {return Vec::new()}
+    cache.and_then(|c|c.fresh(&codex_source_cache_key(home,account))).map(codex_account_views).unwrap_or_default()
+}
+
+/// A quota cache is bound to both the configured login source and account.
+pub fn codex_source_quotas(home: &std::path::Path, account: &str, refresh: bool, force: bool, budget: Duration) -> Vec<QuotaView> {
+    if codex_account_at(home).as_deref()!=Some(account) { return Vec::new() }
+    let key=codex_source_cache_key(home,account);
+    let cache=cache::Cache::open("tokenme/quota",TTL);
+    let fresh=cached_codex_source(home,account,cache.as_ref());
+    if !refresh || (!force && !fresh.is_empty()) { return fresh }
+    let running=CODEX_ACCOUNT_PROBES.get_or_init(||Mutex::new(HashSet::new()));
+    if !running.lock().unwrap_or_else(|e|e.into_inner()).insert(key.clone()) {return fresh}
+    let home=home.to_path_buf(); let account=account.to_string();
+    let (send,receive)=std::sync::mpsc::sync_channel(1);
+    let thread_key=key.clone();
+    let spawn=std::thread::Builder::new().name("quota-source-codex".into()).spawn(move || {
+        let rows=std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let samples=providers::codex_live_at(&home,&account).unwrap_or_default();
+            if samples.is_empty() || codex_account_at(&home).as_deref()!=Some(account.as_str()) {return Vec::new()}
+            if let Some(cache)=cache::Cache::open("tokenme/quota",TTL) {
+                cache.store(&thread_key,&samples);
+                return cache.fresh(&thread_key).map(codex_account_views).unwrap_or_default()
+            }
+            Vec::new()
+        })).unwrap_or_default();
+        CODEX_ACCOUNT_PROBES.get().unwrap().lock().unwrap_or_else(|e|e.into_inner()).remove(&thread_key);
+        let _=send.send(rows);
+    });
+    if spawn.is_err() {running.lock().unwrap_or_else(|e|e.into_inner()).remove(&key);return fresh}
+    receive.recv_timeout(budget).unwrap_or(fresh)
+}
+
 fn collect_codex_account(account_id: &str, budget: Duration, force: bool) -> Vec<QuotaView> {
     let expected = account_id.to_string();
     if codex_account_id().as_deref() != Some(expected.as_str()) {
@@ -449,6 +490,31 @@ pub const BUDGET: Duration = Duration::from_secs(5);
 mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
+
+    #[test]
+    fn source_bound_codex_cache_never_crosses_machine_login_or_expiry() {
+        let dir=tempfile::tempdir().unwrap();
+        let win=dir.path().join("windows");let wsl=dir.path().join("wsl");
+        std::fs::create_dir_all(&win).unwrap();std::fs::create_dir_all(&wsl).unwrap();
+        let auth=|home:&std::path::Path,account:&str|std::fs::write(home.join("auth.json"),serde_json::json!({"tokens":{"access_token":"fixture-token","account_id":account}}).to_string()).unwrap();
+        auth(&win,"a");auth(&wsl,"a");
+        let cache=cache::Cache::in_dir(dir.path().to_path_buf(),TTL);
+        let key=codex_source_cache_key(&win,"a");
+        cache.store(&key,&[QuotaSample {used_percent:25.0,window_minutes:300,resets_at_ms:usage_core::report::now_ms()+60_000,label:None,id:None}]);
+        let rows=cached_codex_source(&win,"a",Some(&cache));
+        assert_eq!(rows.len(),1);assert_eq!(rows[0].tool,"codex");
+        assert!(cached_codex_source(&wsl,"a",Some(&cache)).is_empty(),"same account on a different source does not inherit the source-bound answer");
+        auth(&win,"b");
+        assert!(cached_codex_source(&win,"a",Some(&cache)).is_empty(),"changed login invalidates old source binding");
+        assert!(cached_codex_source(&win,"b",Some(&cache)).is_empty());
+        auth(&win,"a");
+        let path=dir.path().join(format!("{key}.json"));
+        let mut payload:serde_json::Value=serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();payload["captured_at_ms"]=serde_json::json!(0);
+        std::fs::write(path,payload.to_string()).unwrap();
+        assert!(cached_codex_source(&win,"a",Some(&cache)).is_empty(),"expired caches cannot drive an estimate");
+        std::fs::remove_file(win.join("auth.json")).unwrap();
+        assert!(cached_codex_source(&win,"a",Some(&cache)).is_empty());
+    }
 
     #[test]
     fn snapshot_reads_never_invoke_a_probe() {

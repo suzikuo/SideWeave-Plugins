@@ -139,7 +139,8 @@
                 const estimateText = estimate?.total_cost_usd != null
                   ? `预估满额 ≈ $${Number(estimate.total_cost_usd).toFixed(2)} · API 等值`
                   : (estimate?.reason || '等待窗口费用数据')
-                return `<div class="quota-row"><div class="quota-head"><span class="quota-name">${escapeHtml(toolName(quota.tool))} &#183; ${escapeHtml(quotaWindow(quota))}</span><strong class="quota-percent">剩余 ${remaining.toFixed(remaining >= 10 ? 0 : 1)}%</strong></div><div class="quota-track"><i class="${tone}" style="width:${remaining}%"></i></div><small class="quota-reset">${escapeHtml(resetTimeText(Number(quota.resets_at_ms)))}</small><small class="quota-reset">${escapeHtml(resetLabel(quota.resets_at_ms))}</small><small class="quota-estimate" title="根据当前账号本地记录及已用比例推算，并非订阅价格或账单">${escapeHtml(estimateText)}</small></div>`
+                const coverage = estimate?.coverage_note ? `<small class="quota-estimate">${escapeHtml(estimate.coverage_note)}</small>` : ''
+                return `<div class="quota-row"><div class="quota-head"><span class="quota-name">${escapeHtml(toolName(quota.tool))} &#183; ${escapeHtml(quotaWindow(quota))}</span><strong class="quota-percent">剩余 ${remaining.toFixed(remaining >= 10 ? 0 : 1)}%</strong></div><div class="quota-track"><i class="${tone}" style="width:${remaining}%"></i></div><small class="quota-reset">${escapeHtml(resetTimeText(Number(quota.resets_at_ms)))}</small><small class="quota-reset">${escapeHtml(resetLabel(quota.resets_at_ms))}</small><small class="quota-estimate" title="根据已关联账号记录及已用比例推算，并非订阅价格或账单">${escapeHtml(estimateText)}</small>${coverage}</div>`
               }).join('')
             : '<small class=\"quota-empty\">\u6682\u65f6\u6ca1\u6709\u8bfb\u53d6\u5230\u8ba2\u9605\u989d\u5ea6</small>'
         }

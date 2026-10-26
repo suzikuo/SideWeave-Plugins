@@ -7,7 +7,7 @@ const { quotaRows, toolInitial, toolName, quotaWindow, quotaOrigin, percent, res
 
 <template>
   <section class="page-content">
-    <div class="page-intro"><div><h2>订阅配额</h2><p>页面激活时每 5 分钟独立刷新；手动刷新立即读取订阅，不扫描用量日志。</p></div><button class="refresh-button" :disabled="quotaLoading" @click="refreshQuotas()">{{ quotaLoading ? '正在读取订阅…' : '刷新订阅' }}</button></div>
+    <div class="page-intro"><div><h2>订阅配额</h2><p>插件启用时后台每 5 分钟独立刷新；统一账号使用选定的登录来源，手动刷新不扫描用量日志。</p></div><button class="refresh-button" :disabled="quotaLoading" @click="refreshQuotas()">{{ quotaLoading ? '正在读取订阅…' : '刷新订阅' }}</button></div>
     <div v-if="quotaError" class="notice-banner" role="alert">{{ quotaError }}</div>
     <section class="panel quota-alert-settings">
       <div class="quota-alert-heading">
@@ -46,6 +46,7 @@ const { quotaRows, toolInitial, toolName, quotaWindow, quotaOrigin, percent, res
             <small>本窗口已用 {{ formatMoney(quotaEstimate(quota)!.used_cost_usd!) }} · 预估剩余 {{ formatMoney(quotaEstimate(quota)!.remaining_cost_usd!) }}</small>
           </template>
           <span v-else>{{ quotaEstimate(quota)?.reason ?? '等待窗口费用数据' }}</span>
+          <small v-if="quotaEstimate(quota)?.coverage_note">{{ quotaEstimate(quota)!.coverage_note }}</small>
         </div>
         <div class="quota-sampled">最近读取 {{ formatTime(quota.sampled_at_ms) }}</div>
       </article>

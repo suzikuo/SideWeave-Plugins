@@ -121,7 +121,7 @@ test('60-second data and five-minute quota timers pause on inactive pages', asyn
   quotaTimer.callback()
   await flush()
   assert.deepEqual(host.calls.map((call) => call.method), ['get_quotas'])
-  assert.equal(host.calls[0].payload.force, true)
+  assert.equal(host.calls[0].payload.force, false, 'visible-page polling reuses the backend quota cache')
   host.unmount()
   assert.equal(host.intervals.size, 0)
   assert.equal(host.timers.size, 0)
@@ -135,6 +135,25 @@ test('changing a source or account queries snapshots without starting another sc
   await flush()
   assert.deepEqual(host.calls.map((call) => call.method), ['dashboard', 'get_quotas'])
   assert.equal(host.calls[1].payload.refresh, false)
+})
+
+test('group selection reaches queries and membership edits discard old request snapshots', async (t) => {
+  const host = await mount(t)
+  await host.finishScan()
+  host.responses.dashboard = { accounts: [{ selection: 'group:g', tool: 'codex', label: 'Unified', name: 'Unified', requests: 2, sessions: 1 }], report: { quotas: [], sources: [] }, last_ingest_ms: 1 }
+  host.state.accountScope.value = 'group:g'
+  await flush()
+  assert.ok(host.calls.some(call => call.method === 'dashboard' && call.payload.account === 'group:g'))
+  host.state.page.value = 'requests'
+  host.responses.requests = { rows: [], total: 2, page: 1, page_size: 100, total_pages: 1, snapshot_max_id: 123 }
+  await host.state.fetchRequests()
+  host.calls.length = 0
+  await host.state.refreshAccountGroups()
+  const request = host.calls.find(call => call.method === 'requests')
+  assert.equal(request.payload.account, 'group:g')
+  assert.equal(request.payload.page, 1)
+  assert.equal('snapshot_max_id' in request.payload, false)
+  assert.ok(!host.calls.some(call => call.method === 'sync_data'), 'linking accounts must not re-ingest logs')
 })
 
 test('reset times show full local dates and unknown or expired times are explicit', () => {

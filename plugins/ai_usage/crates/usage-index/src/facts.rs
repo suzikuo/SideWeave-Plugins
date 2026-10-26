@@ -188,7 +188,7 @@ impl Index {
                         in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, n, nonzero, min_ts, max_ts \
                  FROM event_rollup \
                  WHERE (?1 = 'all' OR (?1 = 'account' AND tool || '|' || account_id = ?2) \
-                        OR (?1 = 'unknown' AND tool || '|' || account_id = ?2 AND account_id = ''))",
+                        OR (?1 = 'group' AND EXISTS(SELECT 1 FROM account_group_member gm WHERE gm.group_id=?2 AND gm.tool=event_rollup.tool AND gm.origin=(event_rollup.origin) AND gm.account_id=event_rollup.account_id)) OR (?1 = 'unknown' AND tool || '|' || account_id = ?2 AND account_id = ''))",
             )
             .map_err(sql_err)?;
         let rows = stmt
@@ -250,7 +250,7 @@ impl Index {
         let account_id_param = account_kind_param + 1;
         let account_clause = format!(
             "(?{account_kind_param} = 'all' OR (?{account_kind_param} = 'account' AND e.tool || '|' || extra.account_id = ?{account_id_param}) \
-             OR (?{account_kind_param} = 'unknown' AND e.tool || '|' || COALESCE(extra.account_id, '') = ?{account_id_param}))"
+             OR (?{account_kind_param} = 'group' AND EXISTS(SELECT 1 FROM account_group_member gm WHERE gm.group_id=?{account_id_param} AND gm.tool=e.tool AND gm.origin=(CASE WHEN substr(e.source,1,6)='linux:' AND instr(substr(e.source,7),':')>0 THEN substr(e.source,7,instr(substr(e.source,7),':')-1) ELSE '' END) AND gm.account_id=extra.account_id)) OR (?{account_kind_param} = 'unknown' AND e.tool || '|' || COALESCE(extra.account_id, '') = ?{account_id_param}))"
         );
         let sql = format!(
             "WITH b(bid, lo, hi) AS (VALUES {values}) \
@@ -313,7 +313,7 @@ impl Index {
              JOIN firsts f ON f.event_id = e.id \
              LEFT JOIN event_extra extra ON extra.event_id = e.id \
              WHERE (?9 = 'all' OR (?9 = 'account' AND e.tool || '|' || extra.account_id = ?10) \
-                    OR (?9 = 'unknown' AND e.tool || '|' || COALESCE(extra.account_id, '') = ?10)) \
+                    OR (?9 = 'group' AND EXISTS(SELECT 1 FROM account_group_member gm WHERE gm.group_id=?10 AND gm.tool=e.tool AND gm.origin=(CASE WHEN substr(e.source,1,6)='linux:' AND instr(substr(e.source,7),':')>0 THEN substr(e.source,7,instr(substr(e.source,7),':')-1) ELSE '' END) AND gm.account_id=extra.account_id)) OR (?9 = 'unknown' AND e.tool || '|' || COALESCE(extra.account_id, '') = ?10)) \
              GROUP BY w.bid, f.kind, f.name, {ORIGIN_SQL}, e.tool, e.session, \
                       COALESCE(e.project, ''), COALESCE(e.model, ''), e.meter \
              ORDER BY w.bid"
@@ -373,7 +373,7 @@ impl Index {
                  LEFT JOIN event_extra extra ON extra.event_id = e.id \
                  WHERE (q.resets_at_ms >= ?1 OR (q.resets_at_ms = 0 AND e.ts_ms > ?1 - 86400000)) \
                    AND (?2 = 'all' OR (?2 = 'account' AND e.tool || '|' || extra.account_id = ?3) \
-                        OR (?2 = 'unknown' AND e.tool || '|' || COALESCE(extra.account_id, '') = ?3)) \
+                        OR (?2 = 'group' AND EXISTS(SELECT 1 FROM account_group_member gm WHERE gm.group_id=?3 AND gm.tool=e.tool AND gm.origin=(CASE WHEN substr(e.source,1,6)='linux:' AND instr(substr(e.source,7),':')>0 THEN substr(e.source,7,instr(substr(e.source,7),':')-1) ELSE '' END) AND gm.account_id=extra.account_id)) OR (?2 = 'unknown' AND e.tool || '|' || COALESCE(extra.account_id, '') = ?3)) \
                  ORDER BY q.event_id",
             )
             .map_err(sql_err)?;
@@ -427,7 +427,7 @@ impl Index {
                  FROM event_rollup \
                  WHERE (?2 = 1 OR origin = ?3) \
                    AND (?4 = 'all' OR (?4 = 'account' AND tool || '|' || account_id = ?5) \
-                        OR (?4 = 'unknown' AND tool || '|' || account_id = ?5 AND account_id = '')) \
+                        OR (?4 = 'group' AND EXISTS(SELECT 1 FROM account_group_member gm WHERE gm.group_id=?5 AND gm.tool=event_rollup.tool AND gm.origin=(event_rollup.origin) AND gm.account_id=event_rollup.account_id)) OR (?4 = 'unknown' AND tool || '|' || account_id = ?5 AND account_id = '')) \
                  GROUP BY tool, session \
                  ORDER BY MAX(max_ts) DESC, tool ASC, session ASC \
                  LIMIT ?1",
@@ -451,7 +451,7 @@ impl Index {
                         sum(n) \
                  FROM event_rollup WHERE tool = ?1 AND session = ?2 AND (?3 = 1 OR origin = ?4) \
                    AND (?5 = 'all' OR (?5 = 'account' AND tool || '|' || account_id = ?6) \
-                        OR (?5 = 'unknown' AND tool || '|' || account_id = ?6 AND account_id = '')) \
+                        OR (?5 = 'group' AND EXISTS(SELECT 1 FROM account_group_member gm WHERE gm.group_id=?6 AND gm.tool=event_rollup.tool AND gm.origin=(event_rollup.origin) AND gm.account_id=event_rollup.account_id)) OR (?5 = 'unknown' AND tool || '|' || account_id = ?6 AND account_id = '')) \
                  GROUP BY model, meter ORDER BY model, meter",
             )
             .map_err(sql_err)?;
@@ -461,7 +461,7 @@ impl Index {
                 "SELECT project FROM event LEFT JOIN event_extra extra ON extra.event_id = event.id \
                  WHERE tool = ?1 AND session = ?2 AND (?3 = 1 OR ({ORIGIN_SQL}) = ?4) \
                    AND (?5 = 'all' OR (?5 = 'account' AND tool || '|' || extra.account_id = ?6) \
-                        OR (?5 = 'unknown' AND tool || '|' || COALESCE(extra.account_id, '') = ?6)) \
+                        OR (?5 = 'group' AND EXISTS(SELECT 1 FROM account_group_member gm WHERE gm.group_id=?6 AND gm.tool=event.tool AND gm.origin=(CASE WHEN substr(event.source,1,6)='linux:' AND instr(substr(event.source,7),':')>0 THEN substr(event.source,7,instr(substr(event.source,7),':')-1) ELSE '' END) AND gm.account_id=extra.account_id)) OR (?5 = 'unknown' AND tool || '|' || COALESCE(extra.account_id, '') = ?6)) \
                    AND project IS NOT NULL \
                  ORDER BY id ASC LIMIT 1",
             ))
@@ -472,7 +472,7 @@ impl Index {
                 "SELECT model FROM event LEFT JOIN event_extra extra ON extra.event_id = event.id \
                  WHERE tool = ?1 AND session = ?2 AND (?3 = 1 OR ({ORIGIN_SQL}) = ?4) \
                    AND (?5 = 'all' OR (?5 = 'account' AND tool || '|' || extra.account_id = ?6) \
-                        OR (?5 = 'unknown' AND tool || '|' || COALESCE(extra.account_id, '') = ?6)) \
+                        OR (?5 = 'group' AND EXISTS(SELECT 1 FROM account_group_member gm WHERE gm.group_id=?6 AND gm.tool=event.tool AND gm.origin=(CASE WHEN substr(event.source,1,6)='linux:' AND instr(substr(event.source,7),':')>0 THEN substr(event.source,7,instr(substr(event.source,7),':')-1) ELSE '' END) AND gm.account_id=extra.account_id)) OR (?5 = 'unknown' AND tool || '|' || COALESCE(extra.account_id, '') = ?6)) \
                    AND model IS NOT NULL \
                  ORDER BY id DESC LIMIT 1",
             ))
@@ -483,7 +483,7 @@ impl Index {
                 "SELECT session_title FROM event LEFT JOIN event_extra extra ON extra.event_id = event.id \
                  WHERE tool = ?1 AND session = ?2 AND (?3 = 1 OR ({ORIGIN_SQL}) = ?4) \
                    AND (?5 = 'all' OR (?5 = 'account' AND tool || '|' || extra.account_id = ?6) \
-                        OR (?5 = 'unknown' AND tool || '|' || COALESCE(extra.account_id, '') = ?6)) \
+                        OR (?5 = 'group' AND EXISTS(SELECT 1 FROM account_group_member gm WHERE gm.group_id=?6 AND gm.tool=event.tool AND gm.origin=(CASE WHEN substr(event.source,1,6)='linux:' AND instr(substr(event.source,7),':')>0 THEN substr(event.source,7,instr(substr(event.source,7),':')-1) ELSE '' END) AND gm.account_id=extra.account_id)) OR (?5 = 'unknown' AND tool || '|' || COALESCE(extra.account_id, '') = ?6)) \
                    AND session_title IS NOT NULL AND session_title <> '' \
                  ORDER BY id DESC LIMIT 1",
             ))

@@ -50,6 +50,23 @@ impl QuotaProbe for CodexQuota {
 
 fn live() -> Option<Vec<QuotaSample>> {
     let (token, account_id) = credential()?;
+    fetch_credential(token, account_id)
+}
+
+pub(crate) fn account_at(home: &std::path::Path) -> Option<String> {
+    let text=std::fs::read_to_string(home.join("auth.json")).ok()?;
+    token_in(&text)?.1
+}
+
+pub(crate) fn live_at(home: &std::path::Path, expected: &str) -> Option<Vec<QuotaSample>> {
+    let text=std::fs::read_to_string(home.join("auth.json")).ok()?;
+    let (token,account)=token_in(&text)?;
+    if account.as_deref()!=Some(expected) { return None }
+    let samples=fetch_credential(token,account)?;
+    (account_at(home).as_deref()==Some(expected)).then_some(samples)
+}
+
+fn fetch_credential(token: String, account_id: Option<String>) -> Option<Vec<QuotaSample>> {
     let mut headers = vec![
         ("authorization", format!("Bearer {token}")),
         ("accept", "application/json".into()),

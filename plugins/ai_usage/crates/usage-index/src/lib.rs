@@ -18,6 +18,7 @@
 //! [`usage_core::PricingMap`]; the index only stores token stages and credits.
 
 mod facts;
+pub mod account_groups;
 mod ingest;
 mod sync;
 mod watcher;
@@ -321,12 +322,15 @@ pub enum AccountFilter {
     #[default]
     All,
     Account { tool: String, id: String },
+    Group(String),
     Unknown(String),
 }
 
 impl AccountFilter {
     pub fn from_selection(value: &str) -> Self {
-        if let Some(tool) = value.strip_prefix("unknown:").filter(|tool| !tool.is_empty()) {
+        if let Some(id) = value.strip_prefix("group:").filter(|id| !id.is_empty()) {
+            Self::Group(id.to_string())
+        } else if let Some(tool) = value.strip_prefix("unknown:").filter(|tool| !tool.is_empty()) {
             Self::Unknown(tool.to_string())
         } else if value == "unknown" {
             Self::Unknown("codex".to_string())
@@ -345,6 +349,7 @@ impl AccountFilter {
     pub fn sql_parts(&self) -> (&'static str, String) {
         match self {
             Self::All => ("all", String::new()),
+            Self::Group(id) => ("group", id.clone()),
             Self::Account { tool, id } => ("account", format!("{tool}|{id}")),
             Self::Unknown(tool) => ("unknown", format!("{tool}|")),
         }
@@ -541,6 +546,7 @@ impl Index {
             )
             .map_err(sql_err)?;
         }
+        conn.execute_batch(account_groups::SCHEMA).map_err(sql_err)?;
         // Rebuild only local Codex rows once: older indexes have neither names
         // from session_index/state_5 nor task duration. Imported machine rows
         // remain intact and keep their original origin.

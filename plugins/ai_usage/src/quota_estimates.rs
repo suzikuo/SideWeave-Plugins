@@ -10,12 +10,20 @@ pub(super) struct Estimate {
     pub total_cost_usd: Option<f64>,
     pub remaining_cost_usd: Option<f64>,
     pub reason: Option<String>,
+    pub group_id: Option<String>,
+    pub sources: Vec<String>,
+    pub included_requests: u64,
+    pub excluded_unknown_requests: u64,
+    pub coverage_note: Option<String>,
+    pub quota_account_id: Option<String>,
+    pub quota_source_id: Option<i64>,
 }
 
 impl Estimate {
     fn unavailable(quota: &QuotaView, reason: &str) -> Self {
         Self { key: super::quota_notification_identity(quota), used_cost_usd: None,
-            total_cost_usd: None, remaining_cost_usd: None, reason: Some(reason.into()) }
+            total_cost_usd: None, remaining_cost_usd: None, reason: Some(reason.into()),
+            group_id: None, sources:Vec::new(),included_requests:0,excluded_unknown_requests:0,coverage_note:None,quota_account_id:None,quota_source_id:None }
     }
 }
 
@@ -23,6 +31,20 @@ pub(super) fn collect(index: &Index, quotas: &[QuotaView], selection: &str, pric
     let active_codex = if quotas.iter().any(|q| q.tool == "codex") { usage_quota::codex_account_id() } else { None };
     let accounts = if selection == "all" && quotas.iter().any(|q| q.tool == "claude") { index.accounts().ok() } else { None };
     quotas.iter().map(|quota| {
+        if let Some((group,identity))=super::account_groups::selected(index,selection,&quota.tool) {
+            if quota.tool!="codex" {return Estimate::unavailable(quota,"此工具尚无法验证统一账号的配额归属")}
+            let bound=super::account_groups::quotas(index,&format!("group:{}",group.id),false,false).unwrap_or_default();
+            if !bound.iter().any(|q|q.window_minutes==quota.window_minutes && q.resets_at_ms==quota.resets_at_ms && q.sampled_at_ms==quota.sampled_at_ms && q.used_percent==quota.used_percent) {
+                return Estimate::unavailable(quota,"请刷新所选来源订阅，确认账号与采样")
+            }
+            let mut estimate=calculate_for(index,quota,"",Some(&group.id),prices,usage_core::report::now_ms())
+                .unwrap_or_else(|_|Estimate::unavailable(quota,"暂时无法读取统一账号费用"));
+            estimate.quota_account_id=Some(identity.account_id);
+            estimate.quota_source_id=Some(identity.id);
+            estimate.group_id=Some(group.id);
+            estimate.coverage_note=estimate.coverage_note.map(|note|format!("{} · {note}",group.name));
+            return estimate
+        }
         if quota.origin != QuotaOrigin::Probe || !matches!(quota.window_minutes, 300 | 10_080) {
             return Estimate::unavailable(quota, "仅估算实时订阅的 5 小时／周额度窗口");
         }
@@ -35,9 +57,8 @@ pub(super) fn collect(index: &Index, quotas: &[QuotaView], selection: &str, pric
             AccountFilter::All => accounts.as_ref().and_then(|accounts| {
                 let mut matches = accounts.iter().filter(|a| a.tool == quota.tool);
                 let first = matches.next()?;
-                if matches.next().is_some() { None } else { Some(first.account_id.clone().unwrap_or_default()) }
+                if matches.next().is_some() { None } else { first.account_id.clone() }
             }),
-            AccountFilter::Unknown(tool) if tool == quota.tool => Some(String::new()),
             _ => None,
         };
         if quota.tool == "codex" {
@@ -57,7 +78,31 @@ pub(super) fn collect(index: &Index, quotas: &[QuotaView], selection: &str, pric
 }
 
 fn calculate(index: &Index, quota: &QuotaView, account: &str, prices: &PricingMap, now: i64) -> Result<Estimate, String> {
+    calculate_for(index,quota,account,None,prices,now)
+}
+
+fn calculate_for(index: &Index, quota: &QuotaView, account: &str, group:Option<&str>, prices: &PricingMap, now: i64) -> Result<Estimate, String> {
+    let mut estimate=calculate_cost(index,quota,account,group,prices,now)?;
+    if let Some(group)=group {
+        estimate.group_id=Some(group.to_string());
+        let start=quota.resets_at_ms.saturating_sub(quota.window_minutes.saturating_mul(60_000));
+        let until=quota.sampled_at_ms.min(now);
+        let mut sources=index.conn().prepare("SELECT DISTINCT origin FROM account_group_member WHERE group_id=?1 ORDER BY origin").map_err(|e|e.to_string())?;
+        estimate.sources=sources.query_map([group],|r|r.get(0)).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+        let origin="CASE WHEN substr(e.source,1,6)='linux:' AND instr(substr(e.source,7),':')>0 THEN substr(e.source,7,instr(substr(e.source,7),':')-1) ELSE '' END";
+        let member=usage_index::account_groups::group_clause("'group'","?4","e.tool","extra.account_id",origin);
+        let sql=format!("SELECT COALESCE(SUM(CASE WHEN {member} THEN 1 ELSE 0 END),0),COALESCE(SUM(CASE WHEN NULLIF(TRIM(extra.account_id),'') IS NULL THEN 1 ELSE 0 END),0) FROM event e LEFT JOIN event_extra extra ON extra.event_id=e.id WHERE e.tool=?1 AND e.ts_ms>=?2 AND e.ts_ms<=?3 AND ({origin}) IN(SELECT origin FROM account_group_member WHERE group_id=?4)");
+        let (included,unknown):(i64,i64)=index.conn().query_row(&sql,params![quota.tool,start,until,group],|r|Ok((r.get(0)?,r.get(1)?))).map_err(|e|e.to_string())?;
+        estimate.included_requests=included.max(0) as u64;
+        estimate.excluded_unknown_requests=unknown.max(0) as u64;
+        estimate.coverage_note=Some(format!("仅基于已关联用量 · 汇总该账号全部关联来源 · {} 条请求 · {} 条未知账号请求未纳入",estimate.included_requests,estimate.excluded_unknown_requests));
+    }
+    Ok(estimate)
+}
+
+fn calculate_cost(index: &Index, quota: &QuotaView, account: &str, group:Option<&str>, prices: &PricingMap, now: i64) -> Result<Estimate, String> {
     let unavailable = |reason| Ok(Estimate::unavailable(quota, reason));
+    if group.is_none() && account.trim().is_empty() {return unavailable("未知账号用量不纳入订阅预估")}
     if quota.origin != QuotaOrigin::Probe || !matches!(quota.window_minutes, 300 | 10_080) {
         return unavailable("仅估算实时订阅的 5 小时／周额度窗口");
     }
@@ -76,16 +121,19 @@ fn calculate(index: &Index, quota: &QuotaView, account: &str, prices: &PricingMa
     let label = quota.label.as_deref().unwrap_or_default().to_ascii_lowercase();
     let family = if quota.tool == "claude" && label.contains("sonnet") { "sonnet" }
         else if quota.tool == "claude" && label.contains("opus") { "opus" } else { "" };
-    let mut statement = index.conn().prepare(
+    let origin="CASE WHEN substr(e.source,1,6)='linux:' AND instr(substr(e.source,7),':')>0 THEN substr(e.source,7,instr(substr(e.source,7),':')-1) ELSE '' END";
+    let group_match=usage_index::account_groups::group_clause("'group'","?6","e.tool","extra.account_id",origin);
+    let sql=format!(
         "SELECT e.model, COUNT(*), COALESCE(SUM(e.in_tok),0), COALESCE(SUM(e.cc_tok),0), \
                 COALESCE(SUM(e.cr_tok),0), COALESCE(SUM(e.out_tok),0) \
          FROM event e LEFT JOIN event_extra extra ON extra.event_id = e.id \
-         WHERE e.tool=?1 AND e.ts_ms>=?2 AND e.ts_ms<=?3 AND e.source NOT LIKE 'linux:%' \
-           AND COALESCE(extra.account_id,'')=?4 \
+         WHERE e.tool=?1 AND e.ts_ms>=?2 AND e.ts_ms<=?3 \
+           AND ((?6='' AND e.source NOT LIKE 'linux:%' AND COALESCE(extra.account_id,'')=?4) OR (?6<>'' AND {group_match})) \
            AND (?5='' OR LOWER(COALESCE(e.model,'')) LIKE '%' || ?5 || '%') \
          GROUP BY e.model"
-    ).map_err(|error| error.to_string())?;
-    let rows = statement.query_map(params![quota.tool, start, until, account, family], |row| Ok((
+    );
+    let mut statement = index.conn().prepare(&sql).map_err(|error|error.to_string())?;
+    let rows = statement.query_map(params![quota.tool, start, until, account, family,group.unwrap_or("")], |row| Ok((
         row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)?,
         TokenCounts { input: row.get(2)?, cache_creation: row.get(3)?, cache_read: row.get(4)?,
             output: row.get(5)?, ..Default::default() }
@@ -105,8 +153,10 @@ fn calculate(index: &Index, quota: &QuotaView, account: &str, prices: &PricingMa
         return unavailable("此账号在该窗口内暂无可定价的本地用量");
     }
     let total = used_cost / (quota.used_percent / 100.0);
-    Ok(Estimate { key: super::quota_notification_identity(quota), used_cost_usd: Some(used_cost),
-        total_cost_usd: Some(total), remaining_cost_usd: Some((total - used_cost).max(0.0)), reason: None })
+    let estimate=Estimate { key: super::quota_notification_identity(quota), used_cost_usd: Some(used_cost),
+        total_cost_usd: Some(total), remaining_cost_usd: Some((total - used_cost).max(0.0)), reason: None,
+        group_id:group.map(str::to_string),sources:Vec::new(),included_requests:requests as u64,excluded_unknown_requests:0,coverage_note:None,quota_account_id:None,quota_source_id:None };
+    Ok(estimate)
 }
 
 #[cfg(test)]
@@ -155,5 +205,29 @@ mod tests {
         assert!(calculate(&index, &q, "a", &prices, NOW).unwrap().reason.unwrap().contains("1%"));
         q.resets_at_ms = 0;
         assert!(calculate(&index, &q, "a", &prices, NOW).unwrap().total_cost_usd.is_none());
+    }
+
+    #[test]
+    fn unified_window_sums_linked_sources_excludes_unknown_and_reports_coverage() {
+        let index=Index::open_in_memory().unwrap();let prices=PricingMap::default();
+        insert(&index,NOW-1,"a","local","gpt-5",1_000_000.0);
+        insert(&index,NOW-1,"b","linux:wsl:file","gpt-5",2_000_000.0);
+        insert(&index,NOW-1,"c","linux:remote:file","gpt-5",3_000_000.0);
+        insert(&index,NOW-1,"x","linux:unrelated:file","gpt-5",9_000_000.0);
+        insert(&index,NOW+1,"a","local","gpt-5",9_000_000.0);
+        insert(&index,NOW-1,"","linux:wsl:file","gpt-5",9_000_000.0);
+        let identities=index.source_accounts().unwrap();
+        let members=identities.iter().filter(|i|i.account_id!="x").map(|i|i.id).collect();
+        let group=usage_index::account_groups::AccountGroup {id:"g".into(),tool:"codex".into(),name:"Group".into(),members,quota_identity_id:None};
+        index.save_account_group(&group).unwrap();
+        let result=calculate_for(&index,&quota(300),"",Some("g"),&prices,NOW).unwrap();
+        let expected=prices.cost(Some("gpt-5"),&TokenCounts {input:6_000_000.0,..Default::default()}).unwrap();
+        assert_eq!(result.used_cost_usd,Some(expected));
+        assert_eq!(result.total_cost_usd,Some(expected*4.0));
+        assert_eq!(result.included_requests,3);
+        assert_eq!(result.excluded_unknown_requests,1);
+        assert_eq!(result.sources,vec!["","remote","wsl"]);
+        assert_eq!(result.group_id.as_deref(),Some("g"));
+        assert!(result.coverage_note.unwrap().contains("仅基于已关联用量"));
     }
 }

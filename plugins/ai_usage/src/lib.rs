@@ -6,7 +6,9 @@ use std::time::Duration;
 use std::sync::OnceLock;
 
 mod data_sync;
+mod account_groups;
 mod quota_estimates;
+mod quota_refresh;
 mod quota_resets;
 
 use rusqlite::params;
@@ -103,6 +105,9 @@ impl AiUsagePlugin {
             Some("get_sync_status") => Ok(json!(data_sync().status())),
             Some("get_quotas") => quota_data(&request.payload, context),
             Some("requests") => request_rows(&request.payload),
+            Some("get_account_groups") => account_groups::get(&open_index()?),
+            Some("save_account_group") => account_groups::save(&request.payload),
+            Some("delete_account_group") => account_groups::delete(&request.payload),
             Some("sessions") => session_rows(&request.payload),
             Some("set_data_roots") => set_data_roots(&request.payload),
             Some("set_account_name") | Some("set_codex_account_name") => set_account_name(&request.payload),
@@ -319,6 +324,9 @@ fn notify_quota_threshold(
     quotas: &[QuotaView],
     context: &PluginContext,
 ) -> Result<usize, String> {
+    // Detail, preview and the background watcher share one notification ledger.
+    static CHECK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = CHECK_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let settings = read_quota_notification_settings(index);
     if !quotas.iter().any(|quota| quota.origin == QuotaOrigin::Probe) {
         return Ok(0);
@@ -589,7 +597,7 @@ fn preview_data(context: &PluginContext) -> Result<Value, String> {
     let now = usage_core::report::now_ms();
     let since = now - 24 * 60 * 60 * 1000;
     let settings = read_preview_settings(&index);
-    let polled_quotas = usage_quota::cached();
+    let polled_quotas = quotas_for_selection(&json!({}), false);
     let _ = notify_quota_threshold(&index, &polled_quotas, context);
     let last_ingest_ms = index
         .meta_value("last_ingest_ms")
@@ -954,6 +962,10 @@ fn start_data_sync(force: bool) -> data_sync::SyncStatus {
 }
 
 fn quotas_for_selection(payload: &Value, refresh: bool) -> Vec<QuotaView> {
+    let selection=payload.get("account").and_then(Value::as_str).unwrap_or("all");
+    if let Ok(index)=open_index() {
+        if let Some(quotas)=account_groups::quotas(&index,selection,refresh,payload.get("force").and_then(Value::as_bool).unwrap_or(false)) {return quotas}
+    }
     if matches!(parse_scope(payload.get("scope").and_then(Value::as_str).unwrap_or("all")), MachineScope::Origin { .. }) {
         return Vec::new();
     }
@@ -1056,7 +1068,7 @@ fn dashboard(payload: &Value, _context: &PluginContext) -> Result<Value, String>
         .report_facts_for_account(&plan, &scope, &account_filter)
         .map_err(|error| format!("无法汇总用量数据：{error}"))?;
     let account_names = read_account_names();
-    let accounts = index
+    let mut accounts: Vec<AccountOption> = index
         .accounts()
         .map_err(|error| format!("无法读取 账号：{error}"))?
         .into_iter()
@@ -1087,6 +1099,11 @@ fn dashboard(payload: &Value, _context: &PluginContext) -> Result<Value, String>
             }
         })
         .collect();
+    for group in index.account_groups()? {
+        let clause=usage_index::account_groups::group_clause("'group'","?1","e.tool","extra.account_id","CASE WHEN substr(e.source,1,6)='linux:' AND instr(substr(e.source,7),':')>0 THEN substr(e.source,7,instr(substr(e.source,7),':')-1) ELSE '' END");
+        let (requests,sessions):(i64,i64)=index.conn().query_row(&format!("SELECT COUNT(*),COUNT(DISTINCT e.session) FROM event e LEFT JOIN event_extra extra ON extra.event_id=e.id WHERE {clause}"),[&group.id],|r|Ok((r.get(0)?,r.get(1)?))).map_err(|e|e.to_string())?;
+        accounts.push(AccountOption {tool:group.tool,selection:format!("group:{}",group.id),label:format!("统一账号 · {}",group.name),name:Some(group.name),requests:requests.max(0) as u64,sessions:sessions.max(0) as u64});
+    }
     let prices = pricing();
     let mut options = ReportOptions::new(&prices);
     options.now_ms = now;
@@ -1142,6 +1159,7 @@ struct SessionUsageRow {
     session: String,
     session_title: Option<String>,
     account_id: Option<String>,
+    group_id: Option<String>,
     project: Option<String>,
     model: String,
     first_ms: i64,
@@ -1160,6 +1178,10 @@ struct SessionUsageAccumulator {
 fn session_rows(payload: &Value) -> Result<Value, String> {
     let index = open_index()?;
     let warning = data_sync().status().warning;
+    session_rows_from_index(&index,payload,warning,&pricing())
+}
+
+fn session_rows_from_index(index:&Index,payload:&Value,warning:Option<String>,prices:&PricingMap)->Result<Value,String> {
     let now = usage_core::report::now_ms();
     let since_ms = payload
         .get("since_ms")
@@ -1200,7 +1222,7 @@ fn session_rows(payload: &Value) -> Result<Value, String> {
                AND (?3 = 'all' OR (?3 = 'local' AND e.source NOT LIKE 'linux:%') \
                     OR (substr(?3, 1, 7) = 'origin:' AND e.source LIKE 'linux:' || substr(?3, 8) || ':%')) \
                AND (?4 = 'all' OR (?4 = 'account' AND e.tool || '|' || extra.account_id = ?5) \
-                    OR (?4 = 'unknown' AND e.tool || '|' || COALESCE(extra.account_id, '') = ?5)) \
+                    OR (?4 = 'group' AND EXISTS(SELECT 1 FROM account_group_member gm WHERE gm.group_id=?5 AND gm.tool=e.tool AND gm.origin=(CASE WHEN substr(e.source,1,6)='linux:' AND instr(substr(e.source,7),':')>0 THEN substr(e.source,7,instr(substr(e.source,7),':')-1) ELSE '' END) AND gm.account_id=extra.account_id)) OR (?4 = 'unknown' AND e.tool || '|' || COALESCE(extra.account_id, '') = ?5)) \
              GROUP BY e.tool, e.session, e.model, e.meter, e.source, extra.account_id \
              ORDER BY MAX(e.ts_ms) DESC",
         )
@@ -1234,16 +1256,17 @@ fn session_rows(payload: &Value) -> Result<Value, String> {
         .map_err(|error| format!("无法读取会话排行：{error}"))?;
     drop(statement);
 
-    let prices = pricing();
     let mut sessions = std::collections::HashMap::<(String, String, Option<String>), SessionUsageAccumulator>::new();
     for (tool, session, title, account_id, project, model, meter, first_ms, last_ms, counts, requests) in grouped {
-        let key = (tool.clone(), session.clone(), account_id.clone());
+        let group_id=if let AccountFilter::Group(id)=&account_filter {Some(id.clone())} else {None};
+        let key = (tool.clone(), session.clone(), group_id.as_ref().map(|id|format!("group:{id}")).or_else(||account_id.clone()));
         let accumulator = sessions.entry(key).or_default();
         let row = accumulator.row.get_or_insert_with(|| SessionUsageRow {
             tool: tool.clone(),
             session: session.clone(),
             session_title: title.clone(),
-            account_id: account_id.clone(),
+            account_id: if group_id.is_some(){None}else{account_id.clone()},
+            group_id,
             project: project.clone(),
             model: model.clone().unwrap_or_else(|| "unknown".into()),
             first_ms,
@@ -1337,7 +1360,7 @@ fn request_rows_from_index(index: &Index, payload: &Value, now: i64, prices: &Pr
                OR (substr(?4, 1, 7) = 'origin:' AND e.source LIKE 'linux:' || substr(?4, 8) || ':%')) \
           AND (?5 = '' OR instr(lower(COALESCE(e.session_title, '') || ' ' || COALESCE(e.project, '') || ' ' || COALESCE(e.model, '')), lower(?5)) > 0) \
           AND (?6 = 'all' OR (?6 = 'account' AND e.tool || '|' || extra.account_id = ?7) \
-               OR (?6 = 'unknown' AND e.tool || '|' || COALESCE(extra.account_id, '') = ?7))";
+               OR (?6 = 'group' AND EXISTS(SELECT 1 FROM account_group_member gm WHERE gm.group_id=?7 AND gm.tool=e.tool AND gm.origin=(CASE WHEN substr(e.source,1,6)='linux:' AND instr(substr(e.source,7),':')>0 THEN substr(e.source,7,instr(substr(e.source,7),':')-1) ELSE '' END) AND gm.account_id=extra.account_id)) OR (?6 = 'unknown' AND e.tool || '|' || COALESCE(extra.account_id, '') = ?7))";
     let total = transaction.query_row(&format!("SELECT COUNT(*) {FILTER}"),
         params![since_ms, until_ms, tool, scope, search, account_kind, account_key, snapshot_max_id],
         |row| row.get::<_, i64>(0)).map_err(|error| format!("无法统计请求明细：{error}"))? as u64;
@@ -1422,6 +1445,42 @@ fn request_rows_from_index(index: &Index, payload: &Value, now: i64, prices: &Pr
 mod request_pagination_tests {
     use super::*;
     const NOW: i64 = 1_790_000_000_000;
+
+    #[test]
+    fn group_request_filters_include_only_member_sources_with_no_duplicate_rows() {
+        let index=Index::open_in_memory().unwrap();
+        add(&index,"native","local","a","Native");
+        add(&index,"wsl","linux:wsl:file","a","WSL");
+        add(&index,"other","linux:other:file","a","Other");
+        add(&index,"unknown","local","","Unknown");
+        let members=index.source_accounts().unwrap().into_iter().filter(|i|i.origin!="other").map(|i|i.id).collect();
+        index.save_account_group(&usage_index::account_groups::AccountGroup{id:"g".into(),tool:"codex".into(),name:"Unified".into(),members,quota_identity_id:None}).unwrap();
+        let prices=PricingMap::default();
+        let result=request_rows_from_index(&index,&json!({"account":"group:g"}),NOW,&prices,None).unwrap();
+        assert_eq!(result["total"],2);
+        let local=request_rows_from_index(&index,&json!({"account":"group:g","scope":"local"}),NOW,&prices,None).unwrap();
+        assert_eq!(local["total"],1);
+        index.delete_account_group("g").unwrap();
+        assert_eq!(request_rows_from_index(&index,&json!({"account":"group:g"}),NOW,&prices,None).unwrap()["total"],0);
+        assert_eq!(index.event_count().unwrap(),4);
+    }
+
+    #[test]
+    fn unified_session_ranking_merges_member_aliases_without_changing_raw_accounts() {
+        let index=Index::open_in_memory().unwrap();
+        add(&index,"shared","local","a","Title");
+        add(&index,"shared","linux:wsl:file","b","Title");
+        add(&index,"unrelated","linux:other:file","c","Other");
+        let members=index.source_accounts().unwrap().into_iter().filter(|i|i.origin!="other").map(|i|i.id).collect();
+        index.save_account_group(&usage_index::account_groups::AccountGroup{id:"g".into(),tool:"codex".into(),name:"Unified".into(),members,quota_identity_id:None}).unwrap();
+        let result=session_rows_from_index(&index,&json!({"account":"group:g","since_ms":NOW-100,"until_ms":NOW}),None,&PricingMap::default()).unwrap();
+        let rows=result["rows"].as_array().unwrap();
+        assert_eq!(rows.len(),1);
+        assert_eq!(rows[0]["requests"],2);
+        assert_eq!(rows[0]["group_id"],"g");
+        let ids:i64=index.conn().query_row("SELECT COUNT(DISTINCT account_id) FROM event_extra",[],|r|r.get(0)).unwrap();
+        assert_eq!(ids,3);
+    }
 
     #[test]
     fn antigravity_requests_keep_titles_and_explain_internal_model_price_estimates() {
