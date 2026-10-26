@@ -8,8 +8,8 @@
 //! whose `#2` is uncached input, `#3` total output, `#5` cache read and `#11` the
 //! responseId used as dedupe key, plus the model id at `#1.#19`.
 //!
-//! `conversation_summaries.db` beside these files is deliberately not read: its
-//! 21 columns are all title/step-count metadata and carry no token data.
+//! `conversation_summaries.db` supplies session titles only; it never produces
+//! token events of its own.
 
 mod loader;
 mod parser;
@@ -89,13 +89,15 @@ impl SourceAdapter for AntigravityAdapter {
         conversation_dbs(&paths::roots())
             .into_iter()
             .filter_map(|path| {
-                let (size, mtime_ms) = paths::stat_file(&path)?;
+                let (size, _) = paths::stat_file(&path)?;
+                let mtime_ms = paths::data_mtime(&path);
                 // One conversation per file, so the last write to it bounds every
                 // row inside: a file older than the retention window is pruned
                 // here rather than opened for nothing.
                 if filter.since_ms.is_some_and(|since| mtime_ms < since) {
                     return None;
                 }
+                let mtime_ms = mtime_ms.max(paths::data_mtime(&paths::summary_path(&path)));
                 Some(SourceFile { path, kind: FileKind::Tree, size, mtime_ms })
             })
             .collect()

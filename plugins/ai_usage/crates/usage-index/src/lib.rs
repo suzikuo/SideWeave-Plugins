@@ -567,6 +567,17 @@ impl Index {
             )
             .map_err(sql_err)?;
         }
+        let antigravity_titles: Option<String> = conn
+            .query_row("SELECT value FROM meta WHERE key = 'antigravity_titles_v1'", [], |row| row.get(0))
+            .optional().map_err(sql_err)?;
+        if antigravity_titles.as_deref() != Some("1") {
+            // Replay local files once to attach summary titles through stable
+            // dedupe keys. Keep existing events, counts and imported rows intact.
+            conn.execute("DELETE FROM file_state WHERE tool = 'antigravity' AND source_key NOT LIKE 'linux:%'", [])
+                .map_err(sql_err)?;
+            conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('antigravity_titles_v1', '1')", [])
+                .map_err(sql_err)?;
+        }
         let index_id: Option<String> = conn
             .query_row("SELECT value FROM meta WHERE key = 'index_id'", [], |r| r.get(0))
             .optional()
@@ -1371,6 +1382,31 @@ mod tests {
         assert_eq!(idx.event_count().unwrap(), 0);
         assert_eq!(idx.meta_value("schema_version").unwrap().as_deref(), Some(SCHEMA_VERSION));
         assert!(idx.meta_value("index_id").unwrap().is_some());
+    }
+
+    #[test]
+    fn antigravity_title_migration_replays_local_files_once_without_deleting_usage() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        {
+            let idx = Index::open(&path).unwrap();
+            idx.conn().execute_batch("DELETE FROM meta WHERE key = 'antigravity_titles_v1';
+                INSERT INTO event(tool, ts_ms, session, meter, in_tok, source) VALUES('antigravity', 1, 's', 'tokens', 123, '/local.db');
+                INSERT INTO file_state(source_key, tool) VALUES('/local.db', 'antigravity'), ('linux:remote.db', 'antigravity'), ('/codex.jsonl', 'codex');").unwrap();
+        }
+        {
+            let idx = Index::open(&path).unwrap();
+            assert_eq!(idx.event_count().unwrap(), 1);
+            let counts: f64 = idx.conn().query_row("SELECT in_tok FROM event", [], |row| row.get(0)).unwrap();
+            assert_eq!(counts, 123.0);
+            let keys: Vec<String> = idx.conn().prepare("SELECT source_key FROM file_state ORDER BY source_key").unwrap()
+                .query_map([], |row| row.get(0)).unwrap().collect::<std::result::Result<_, _>>().unwrap();
+            assert_eq!(keys, vec!["/codex.jsonl", "linux:remote.db"]);
+            idx.conn().execute("INSERT INTO file_state(source_key, tool) VALUES('/local.db', 'antigravity')", []).unwrap();
+        }
+        let idx = Index::open(&path).unwrap();
+        let files: i64 = idx.conn().query_row("SELECT COUNT(*) FROM file_state", [], |row| row.get(0)).unwrap();
+        assert_eq!(files, 3, "subsequent opens must keep the new read state");
     }
 
     #[test]

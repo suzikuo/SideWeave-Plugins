@@ -173,6 +173,7 @@ interface RequestRow {
   total_tokens: number
   cost_usd: number | null
   credits_cost_usd: number | null
+  pricing_alias?: string | null
 }
 
 interface RequestFilters {

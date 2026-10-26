@@ -976,7 +976,7 @@ mod golden {
                 .execute(
                     crate::INSERT_EVENT,
                     params![
-                        e.tool, e.ts_ms, e.session, e.project, e.model,
+                        e.tool, e.ts_ms, e.session, e.session_title, e.project, e.model,
                         crate::meter_str(e.meter), c.input, c.cache_creation, c.cache_read,
                         c.output, c.reasoning, c.credits, e.dedupe_key, "/fixture/raw.jsonl",
                     ],

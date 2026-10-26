@@ -128,6 +128,8 @@ struct Entry {
 #[derive(Debug, Clone, Copy)]
 pub struct Explanation<'a> {
     pub provider: &'a str,
+    /// Explicit internal model alias used for an API-equivalent estimate.
+    pub matched_alias: Option<&'static str>,
     pub price: Price,
     /// Other listings for the same model, in the order the precedence rule would
     /// have taken them. Empty means the price was not a choice.
@@ -417,12 +419,14 @@ impl PricingMap {
     /// was nothing to choose between.
     pub fn explain(&self, model: &str) -> Option<Explanation<'_>> {
         for key in lookup_keys(model) {
+            let matched_alias = model_alias(model).filter(|alias| normalize_key(alias) == key);
             if let Some(price) = self.overrides.get(&key) {
-                return Some(Explanation { provider: "override", price: *price, alternatives: &[] });
+                return Some(Explanation { provider: "override", matched_alias, price: *price, alternatives: &[] });
             }
             if let Some(e) = self.table.get(&key) {
                 return Some(Explanation {
                     provider: &e.provider,
+                    matched_alias,
                     price: e.price,
                     alternatives: self.alternatives.get(&key).map(Vec::as_slice).unwrap_or(&[]),
                 });
@@ -488,9 +492,22 @@ fn lookup_keys(model: &str) -> Vec<String> {
     if let Some(pos) = model.rfind('/') {
         out.push(normalize_key(&model[pos + 1..]));
     }
+    // Keep exact IDs/overrides first. Do not strip arbitrary suffixes: router
+    // labels and future models must remain unpriced rather than guessed.
+    if let Some(alias) = model_alias(model) { out.push(normalize_key(alias)); }
     out.retain(|k| !k.is_empty());
     out.dedup();
     out
+}
+
+fn model_alias(model: &str) -> Option<&'static str> {
+    match normalize_key(model).as_str() {
+        // Observed Antigravity internal variant. Estimate at the named model's
+        // public API rate, and expose the alias to callers rather than changing
+        // the model recorded in the source log.
+        "gemini-3p8-flash-n" => Some("gemini-3.8-flash"),
+        _ => None,
+    }
 }
 
 /// Parse `model=in/out/cache_creation/cache_read` overrides from the CLI.
@@ -513,6 +530,25 @@ pub fn parse_override(spec: &str) -> Option<(String, Price)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn antigravity_internal_flash_variant_uses_an_explicit_traceable_api_estimate() {
+        let map = PricingMap::default();
+        let base = map.price_for("gemini-3.8-flash").unwrap();
+        assert_eq!(map.price_for("gemini-3.8-flash-n"), Some(base));
+        assert_eq!(map.explain("gemini-3.8-flash-n").unwrap().matched_alias, Some("gemini-3.8-flash"));
+        assert_eq!(map.explain("gemini-3.8-flash").unwrap().matched_alias, None);
+        let counts = TokenCounts { input: 1000.0, output: 500.0, cache_read: 2000.0, ..Default::default() };
+        assert_eq!(map.cost(Some("gemini-3.8-flash-n"), &counts), Some(base.cost_of(&counts)));
+        assert!(map.price_for("gemini-default").is_none());
+        assert!(map.price_for("gemini-3.8-flash-unknown").is_none());
+        let map = PricingMap::load(&PricingOptions {
+            offline: true, cache_dir: None,
+            overrides: HashMap::from([(normalize_key("gemini-3.8-flash-n"), Price { input: 2.0, ..Default::default() })]),
+        });
+        assert_eq!(map.price_for("gemini-3.8-flash-n").unwrap().input, 2.0);
+        assert_eq!(map.explain("gemini-3.8-flash-n").unwrap().matched_alias, None, "exact prices win over alias estimates");
+    }
 
     /// A map assembled from a caller-supplied payload, for the tests below.
     /// `parse_models_payload` refuses anything with fewer than ten providers (an

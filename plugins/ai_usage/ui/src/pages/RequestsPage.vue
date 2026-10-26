@@ -2,7 +2,7 @@
 import { inject } from 'vue'
 import { aiUsageKey } from '../context'
 
-const { requestSince, requestUntil, requestTool, requestTools, requestSearch, fetchRequests, requestError, requestLoading, requestRows, requestPage, requestPageSize, requestTotal, requestPageCount, goRequestPage, toolInitial, toolName, tokenBreakdownTitle, formatTokens, formatRequestCost, formatDuration, formatTime, percent } = inject(aiUsageKey)!
+const { requestSince, requestUntil, requestTool, requestTools, requestSearch, fetchRequests, requestError, requestLoading, requestRows, requestPage, requestPageSize, requestTotal, requestPageCount, goRequestPage, toolInitial, toolName, tokenBreakdownTitle, formatTokens, formatRequestCost, formatTime, percent } = inject(aiUsageKey)!
 </script>
 
 <template>
@@ -30,7 +30,7 @@ const { requestSince, requestUntil, requestTool, requestTools, requestSearch, fe
     <div class="panel table-panel request-table-panel">
       <div v-if="requestLoading && !requestRows.length" class="loading-table">正在读取请求明细…</div>
       <div v-else-if="requestRows.length" class="usage-table request-table">
-        <div class="table-head request-columns"><span>请求</span><span>模型</span><span>TOKEN</span><span>费用</span><span>本次耗时</span><span>请求时间</span></div>
+        <div class="table-head request-columns"><span>请求</span><span>模型</span><span>TOKEN</span><span>费用</span><span>请求时间</span></div>
         <div v-for="(row, index) in requestRows" :key="`${row.session}-${row.timestamp_ms}-${index}`" class="table-row request-columns">
           <div class="request-origin">
             <div class="request-origin-top"><span class="tool-avatar" :class="`avatar-${row.tool}`">{{ toolInitial(row.tool) }}</span><strong>{{ toolName(row.tool) }}</strong></div>
@@ -49,10 +49,7 @@ const { requestSince, requestUntil, requestTool, requestTools, requestSearch, fe
             <strong :class="{ 'cost-unpriced': row.cost_usd === null && row.credits_cost_usd === null }">{{ row.cost_usd !== null ? formatRequestCost(row.cost_usd) : row.credits_cost_usd !== null ? formatRequestCost(row.credits_cost_usd) : '未计价' }}</strong>
             <small v-if="row.cost_usd === null && row.credits_cost_usd !== null">按额度折算</small>
             <small v-else-if="row.cost_usd === null">价格表未匹配</small>
-          </div>
-          <div class="request-duration-group" :title="row.tool === 'codex' ? undefined : row.duration_ms === null ? '此来源没有记录单条请求用时' : '本条请求的用时。'">
-            <strong>{{ formatDuration(row.duration_ms) }}</strong>
-            <small v-if="row.tool !== 'codex'">{{ row.duration_ms === null ? '来源未记录' : '本次用时' }}</small>
+            <small v-else-if="row.pricing_alias" :title="`按 ${row.pricing_alias} 的公开 API 单价估算，并非订阅实际账单`">按基础模型估算</small>
           </div>
           <div class="request-date-group">{{ formatTime(row.timestamp_ms) }}</div>
         </div>

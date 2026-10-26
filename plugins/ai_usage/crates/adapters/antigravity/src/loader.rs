@@ -140,7 +140,7 @@ impl Window {
         }
     }
 
-    fn finish(self, session: &str, project: Option<&str>, file: &SourceFile) -> Vec<UsageEvent> {
+    fn finish(self, session: &str, title: Option<&str>, project: Option<&str>, file: &SourceFile) -> Vec<UsageEvent> {
         let mut buckets: Vec<(String, Bucket)> = self.turns.into_iter().collect();
         // `idx` order is the only chronology the table defines.
         buckets.sort_by_key(|(_, bucket)| bucket.order);
@@ -150,6 +150,7 @@ impl Window {
             // event beside its real neighbours.
             let Some(counts) = counts_for(&bucket.stages) else { continue };
             let mut event = UsageEvent::new(TOOL_ID, bucket.ts_ms, session.to_string());
+            event.session_title = title.map(str::to_string);
             event.project = project.map(str::to_string);
             event.account_id = Some(paths::profile_id_for_file(&file.path));
             event.model = bucket.model;
@@ -218,7 +219,8 @@ pub(crate) fn read_db(file: &SourceFile, audit: &mut Audit) -> ReadOutcome {
         }
     }
 
-    let events = window.finish(&session, conv.project.as_deref(), file);
+    let title = session_title(file, &session);
+    let events = window.finish(&session, title.as_deref(), conv.project.as_deref(), file);
     for event in &events {
         audit.counts += &event.counts;
     }
@@ -253,6 +255,16 @@ fn session_of(file: &SourceFile) -> String {
         .filter(|stem| !stem.is_empty())
         .unwrap_or("unknown")
         .to_string()
+}
+
+fn session_title(file: &SourceFile, session: &str) -> Option<String> {
+    let summary = paths::open_summary(&paths::summary_path(&file.path))?;
+    let title: String = summary.conn().query_row(
+        "SELECT title FROM conversation_summaries WHERE conversation_id = ?1",
+        [session], |row| row.get(0),
+    ).ok()?;
+    let title = title.trim();
+    (!title.is_empty()).then(|| title.to_string())
 }
 
 fn conversation(conn: &Connection) -> Conversation {
@@ -300,7 +312,11 @@ fn timestamp_for(gen: &Generation, stamps: &Stamps, conv: &Conversation, file: &
         .or(by_response.copied())
         .or(by_gen.copied())
         .or(conv.created_ms)
-        .or((file.mtime_ms > 0).then_some(file.mtime_ms))
+        // Discovery also watches title updates; those must not redate usage.
+        .or_else(|| {
+            let actual = paths::data_mtime(&file.path);
+            (actual > 0).then_some(actual).or((file.mtime_ms > 0).then_some(file.mtime_ms))
+        })
         .unwrap_or_else(scan_ms)
 }
 

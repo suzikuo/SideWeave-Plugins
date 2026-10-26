@@ -22,9 +22,29 @@ pub(crate) const USABLE_SQL: &str = "SELECT max(rowid) FROM gen_metadata";
 /// `probe`'s hint only. Run once, against one already-open database.
 pub(crate) const COUNT_SQL: &str = "SELECT count(*) FROM gen_metadata";
 /// The CLI's own summary index: 21 columns of titles, step counts and workspace
-/// URIs, and no token data in any of them, so it is never a source file even
+/// URIs, and no token data in any of them, so it is never a usage source file even
 /// when a user points `ANTIGRAVITY_DATA_DIR` at the directory holding it.
 pub(crate) const SUMMARIES_DB: &str = "conversation_summaries.db";
+
+pub(crate) fn summary_path(file: &Path) -> PathBuf {
+    let directory = file.parent().unwrap_or(file);
+    if directory.file_name() == Some(OsStr::new(CONVERSATIONS)) {
+        if let Some(root) = directory.parent() {
+            let path = root.join(SUMMARIES_DB);
+            if path.is_file() { return path; }
+        }
+    }
+    directory.join(SUMMARIES_DB)
+}
+
+/// WAL commits may change usage or titles without touching the database file.
+pub(crate) fn data_mtime(path: &Path) -> i64 {
+    let mut wal = path.as_os_str().to_os_string();
+    wal.push("-wal");
+    [path, Path::new(&wal)].into_iter()
+        .filter_map(|path| stat_file(path).map(|(_, stamp)| stamp))
+        .max().unwrap_or(0)
+}
 /// The CLI commits between our open and our query when a turn lands; a short
 /// wait beats silently reporting nothing for that pass.
 pub(crate) const BUSY_TIMEOUT: Duration = Duration::from_millis(250);
@@ -131,16 +151,24 @@ impl Db {
 /// private temp directory and read that, where SQLite may rebuild the wal-index.
 /// Neither path writes to the source directory.
 pub(crate) fn open(path: &Path) -> Option<Db> {
-    match try_open(path) {
+    open_checked(path, USABLE_SQL)
+}
+
+pub(crate) fn open_summary(path: &Path) -> Option<Db> {
+    open_checked(path, "SELECT max(rowid) FROM conversation_summaries")
+}
+
+fn open_checked(path: &Path, check: &str) -> Option<Db> {
+    match try_open_checked(path, check) {
         Ok(conn) => Some(Db { conn, _copy: None }),
         // A database we can read but that has no `gen_metadata` is another tool's
         // file, or the summaries database; copying it cannot change the answer.
         Err(Open::NotOurDatabase) => None,
-        Err(Open::Unavailable) => open_via_copy(path),
+        Err(Open::Unavailable) => open_via_copy(path, check),
     }
 }
 
-fn open_via_copy(path: &Path) -> Option<Db> {
+fn open_via_copy(path: &Path, check: &str) -> Option<Db> {
     let copy = TempCopy::new(path)?;
     let conn = open_readonly(&copy.db_path).or_else(|| {
         // The copy sits in a directory we own, so rebuilding the wal-index is the
@@ -154,7 +182,7 @@ fn open_via_copy(path: &Path) -> Option<Db> {
             })
             .ok()
     })?;
-    conn.query_row(USABLE_SQL, [], |_| Ok(())).ok()?;
+    conn.query_row(check, [], |_| Ok(())).ok()?;
     Some(Db { conn, _copy: Some(copy) })
 }
 
@@ -167,9 +195,14 @@ enum Open {
     Unavailable,
 }
 
+#[cfg(test)]
 fn try_open(path: &Path) -> Result<Connection, Open> {
+    try_open_checked(path, USABLE_SQL)
+}
+
+fn try_open_checked(path: &Path, check: &str) -> Result<Connection, Open> {
     let conn = open_readonly(path).ok_or(Open::Unavailable)?;
-    match conn.query_row(USABLE_SQL, [], |row| row.get::<_, Option<i64>>(0)) {
+    match conn.query_row(check, [], |row| row.get::<_, Option<i64>>(0)) {
         Ok(_) => Ok(conn),
         Err(err) if missing_table(&err) => Err(Open::NotOurDatabase),
         Err(_) => Err(Open::Unavailable),

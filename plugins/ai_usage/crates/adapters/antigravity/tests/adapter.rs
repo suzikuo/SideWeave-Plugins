@@ -252,6 +252,54 @@ fn keys(files: &[SourceFile]) -> BTreeSet<String> {
 }
 
 #[test]
+fn summary_titles_and_wal_renames_enrich_usage_without_changing_counts_or_dates() {
+    let fix = Fixture::new();
+    let blobs = gen_blobs();
+    let refs: Vec<_> = blobs.iter().enumerate().map(|(i, blob)| (i as i64, blob.as_slice())).collect();
+    fix.build(SESSION, &refs, &[]);
+    let _env = EnvGuard::point_at(fix.path());
+    let initial = source_files();
+    let before = AntigravityAdapter.read(&initial[0], ReadCursor(0)).unwrap().events;
+    assert!(!before.is_empty());
+    assert!(before.iter().all(|event| event.session_title.is_none()));
+
+    let summary_path = fix.path().join("conversation_summaries.db");
+    let summary = Connection::open(&summary_path).unwrap();
+    summary.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;
+        CREATE TABLE conversation_summaries(conversation_id TEXT PRIMARY KEY, title TEXT);").unwrap();
+    summary.execute("INSERT INTO conversation_summaries VALUES(?1, '  Fixture session title  ')", [SESSION]).unwrap();
+    summary.execute("INSERT INTO conversation_summaries VALUES('unrelated', 'Wrong session')", []).unwrap();
+    let files = source_files();
+    assert_eq!(files.len(), 1, "the summary index is not a usage source");
+    let titled = AntigravityAdapter.read(&files[0], ReadCursor(0)).unwrap().events;
+    assert_eq!(titled.len(), before.len());
+    assert!(titled.iter().all(|event| event.session_title.as_deref() == Some("Fixture session title")));
+
+    summary.execute("UPDATE conversation_summaries SET title = 'Renamed session' WHERE conversation_id = ?1", [SESSION]).unwrap();
+    let wal = fix.path().join("conversation_summaries.db-wal");
+    // Make the metadata-only update observable independent of filesystem clock resolution.
+    let stamp = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+    std::fs::File::options().write(true).open(&wal).unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(stamp)).unwrap();
+    let renamed_files = source_files();
+    assert!(renamed_files[0].mtime_ms > files[0].mtime_ms, "a WAL-only rename must trigger re-ingest");
+    let renamed = AntigravityAdapter.read(&renamed_files[0], ReadCursor(0)).unwrap().events;
+    for (old, new) in before.iter().zip(&renamed) {
+        assert_eq!(new.session_title.as_deref(), Some("Renamed session"));
+        assert_eq!(new.dedupe_key, old.dedupe_key);
+        assert_eq!(new.ts_ms, old.ts_ms, "a title update must not change usage dates");
+        assert_eq!(new.counts, old.counts);
+    }
+    summary.execute("UPDATE conversation_summaries SET title = ' ' WHERE conversation_id = ?1", [SESSION]).unwrap();
+    let blank = AntigravityAdapter.read(&source_files()[0], ReadCursor(0)).unwrap().events;
+    assert!(blank.iter().all(|event| event.session_title.is_none()));
+    drop(summary);
+    std::fs::write(&summary_path, b"not sqlite").unwrap();
+    let corrupt = AntigravityAdapter.read(&source_files()[0], ReadCursor(0)).unwrap().events;
+    assert_eq!(corrupt.len(), before.len(), "unreadable titles must not hide usage");
+}
+
+#[test]
 fn probe_stops_at_the_first_readable_database() {
     let fix = Fixture::new();
     let gens: Vec<(i64, Vec<u8>)> = gen_blobs().into_iter().enumerate().map(|(i, b)| (i as i64, b)).collect();
@@ -303,7 +351,10 @@ fn discover_lists_one_entry_per_conversation_and_skips_sidecars() {
     }
 
     // A retention window prunes by the file's last write, without opening it.
-    let written = files[0].mtime_ms;
+    // Discovery's change stamp also watches summaries and WAL sidecars; the
+    // retention boundary still comes from the conversation's actual data.
+    let written = files.iter().map(|file| std::fs::metadata(&file.path).unwrap()
+        .modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64).min().unwrap();
     assert_eq!(
         AntigravityAdapter.discover(&DateFilter::new(Some(written), None)).len(),
         2,

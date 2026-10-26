@@ -1132,6 +1132,7 @@ struct RequestRow {
     counts: TokenCounts,
     total_tokens: f64,
     cost_usd: Option<f64>,
+    pricing_alias: Option<String>,
     credits_cost_usd: Option<f64>,
 }
 
@@ -1377,6 +1378,7 @@ fn request_rows_from_index(index: &Index, payload: &Value, now: i64, prices: &Pr
                     },
                     total_tokens: 0.0,
                     cost_usd: None,
+                    pricing_alias: None,
                     credits_cost_usd: None,
                 })
             },
@@ -1396,6 +1398,8 @@ fn request_rows_from_index(index: &Index, payload: &Value, now: i64, prices: &Pr
         }
         row.total_tokens = row.counts.total();
         row.cost_usd = prices.cost(row.model.as_deref(), &row.counts);
+        row.pricing_alias = row.model.as_deref().and_then(|model| prices.explain(model))
+            .and_then(|explanation| explanation.matched_alias).map(str::to_string);
         row.credits_cost_usd = usage_core::pricing::credit_rate(&row.tool)
             .map(|(rate, _)| row.counts.credits * rate);
     }
@@ -1418,6 +1422,21 @@ fn request_rows_from_index(index: &Index, payload: &Value, now: i64, prices: &Pr
 mod request_pagination_tests {
     use super::*;
     const NOW: i64 = 1_790_000_000_000;
+
+    #[test]
+    fn antigravity_requests_keep_titles_and_explain_internal_model_price_estimates() {
+        let index = Index::open_in_memory().unwrap();
+        index.conn().execute("INSERT INTO event(tool,ts_ms,session,session_title,model,meter,in_tok,cr_tok,out_tok,source) \
+            VALUES('antigravity',?1,'fixture','Fixture session','gemini-3.8-flash-n','tokens',1000,2000,500,'local')", [NOW - 1]).unwrap();
+        let prices = PricingMap::default();
+        let result = request_rows_from_index(&index, &json!({"tool": "antigravity"}), NOW, &prices, None).unwrap();
+        let row = &result["rows"][0];
+        assert_eq!(row["session_title"], "Fixture session");
+        assert_eq!(row["model"], "gemini-3.8-flash-n", "keep the original model id");
+        assert_eq!(row["pricing_alias"], "gemini-3.8-flash");
+        let expected = prices.cost(Some("gemini-3.8-flash"), &TokenCounts { input: 1000.0, cache_read: 2000.0, output: 500.0, ..Default::default() }).unwrap();
+        assert!((row["cost_usd"].as_f64().unwrap() - expected).abs() < 1e-12);
+    }
 
     fn add(index: &Index, session: &str, source: &str, account: &str, title: &str) {
         index.conn().execute("INSERT INTO event(tool,ts_ms,session,session_title,model,meter,in_tok,source) VALUES('codex',?1,?2,?3,'gpt-5','tokens',10,?4)",

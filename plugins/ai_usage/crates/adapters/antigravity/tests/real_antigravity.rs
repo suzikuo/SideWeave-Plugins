@@ -9,6 +9,32 @@ use usage_adapter_antigravity::{AntigravityAdapter, TOOL_ID};
 use usage_core::{DateFilter, ReadCursor, SourceAdapter};
 
 #[test]
+#[ignore = "reads local Antigravity databases; prints only aggregate coverage"]
+fn real_summary_title_and_price_coverage() {
+    let adapter = AntigravityAdapter;
+    let prices = usage_core::pricing::PricingMap::default();
+    let mut total = 0;
+    let mut titled = 0;
+    let mut priced = 0;
+    let mut models = BTreeMap::<String, usize>::new();
+    let files = adapter.discover(&DateFilter::default());
+    let audit = adapter.audit(&files);
+    eprintln!("Discovery: files={}, opened={}, unusable={}, rows={}, skipped={}", files.len(), audit.dbs, audit.unusable, audit.rows, audit.skipped.len());
+    for file in files {
+        for event in adapter.read(&file, ReadCursor(0)).unwrap().events {
+            total += 1;
+            titled += usize::from(event.session_title.as_deref().is_some_and(|title| !title.is_empty()));
+            priced += usize::from(prices.cost(event.model.as_deref(), &event.counts).is_some());
+            *models.entry(event.model.unwrap_or_else(|| "unknown".into())).or_default() += 1;
+        }
+    }
+    eprintln!("Antigravity coverage: events={total}, titled={titled}, priced={priced}, models={models:?}");
+    assert!(total > 0);
+    assert_eq!(titled, total, "each local conversation has a nonempty summary title");
+    assert_eq!(priced, total, "every billable model on this machine has an API-equivalent price");
+}
+
+#[test]
 #[ignore = "reads ~/.gemini/antigravity-cli, which only exists on a machine with the CLI installed"]
 fn real_antigravity_cli_conversations() {
     // The suite's other tests point this variable at temp installs; this one has
