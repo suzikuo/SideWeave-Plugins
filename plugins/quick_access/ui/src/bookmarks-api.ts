@@ -49,3 +49,8 @@ export const bmGetView = () => pluginCall<BookmarkViewStyle>('bookmarks.get_view
 export const bmSetView = (view: BookmarkViewStyle) =>
   pluginCall<void>('bookmarks.set_view', { view })
 
+export const bmGetTagColors = () => pluginCall<Record<string, string>>('bookmarks.get_tag_colors')
+
+export const bmSetTagColors = (colors: Record<string, string>) =>
+  pluginCall<Record<string, string>>('bookmarks.set_tag_colors', { colors })
+

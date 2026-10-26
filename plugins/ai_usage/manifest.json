@@ -13,7 +13,7 @@
   "requires_trust": true,
   "runtime": "dynamic_library",
   "backend": "plugin.dll",
-  "autoStart": false,
+  "autoStart": true,
   "capabilities": [
     "filesystem.read",
     "filesystem.write",

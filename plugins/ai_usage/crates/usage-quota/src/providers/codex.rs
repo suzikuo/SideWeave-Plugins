@@ -35,7 +35,16 @@ impl QuotaProbe for CodexQuota {
     }
 
     fn fetch(&self) -> Vec<QuotaSample> {
-        live().unwrap_or_default()
+        let before = super::codex_account_id();
+        let samples = live().unwrap_or_default();
+        if let Some(account) = before.filter(|account| super::codex_account_id().as_ref() == Some(account)) {
+            if !samples.is_empty() {
+                if let Some(cache) = crate::cache::Cache::open("tokenme/quota", crate::TTL) {
+                    cache.store(&crate::codex_account_cache_key(&account), &samples);
+                }
+            }
+        }
+        samples
     }
 }
 

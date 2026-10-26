@@ -2,7 +2,7 @@
 import { inject } from 'vue'
 import { aiUsageKey } from '../context'
 
-const { summary, formatTokens, formatMoney, period, report, trendDays, trendOptions, historyRows, hourMax, trendMax, quotaRows, toolInitial, toolName, percent, quotaWindow, resetLabel, toolRows, tokenShareTotal, recentSessions, formatTime, selectPage, payload, detectedCount } = inject(aiUsageKey)!
+const { summary, formatTokens, formatMoney, period, report, trendDays, trendOptions, historyRows, hourMax, trendMax, quotaRows, toolInitial, toolName, percent, quotaWindow, resetLabel, resetTimeText, quotaEstimate, toolRows, tokenShareTotal, recentSessions, formatTime, selectPage, payload, detectedCount } = inject(aiUsageKey)!
 </script>
 
 <template>
@@ -78,7 +78,8 @@ const { summary, formatTokens, formatMoney, period, report, trendDays, trendOpti
           <div v-for="quota in quotaRows.slice(0, 4)" :key="`${quota.tool}-${quota.id ?? quota.label}`" class="quota-row">
             <div class="quota-title"><span class="tool-avatar" :class="`avatar-${quota.tool}`">{{ toolInitial(quota.tool) }}</span><div><strong>{{ toolName(quota.tool) }}</strong><small>{{ quotaWindow(quota) }}</small></div><b>剩余 {{ percent(100 - quota.used_percent) }}</b></div>
             <div class="progress-track"><i :class="{ warning: quota.used_percent >= 75, danger: quota.used_percent >= 92 }" :style="{ width: `${Math.max(0, Math.min(100, 100 - quota.used_percent))}%` }"></i></div>
-            <div class="quota-reset">{{ resetLabel(quota.resets_at_ms) }}</div>
+            <div class="quota-reset">{{ resetTimeText(quota.resets_at_ms) }} · {{ resetLabel(quota.resets_at_ms) }}</div>
+            <div v-if="quotaEstimate(quota)?.total_cost_usd != null" class="quota-reset">预估满额 ≈ {{ formatMoney(quotaEstimate(quota)!.total_cost_usd!) }}</div>
           </div>
         </div>
         <div v-else class="empty-compact"><span>◷</span><strong>暂时没有实时配额</strong><small>有些工具仅保存本地用量记录。</small></div>

@@ -56,6 +56,10 @@
       .quota-track i.warning { background: var(--warning); }
       .quota-track i.danger { background: var(--danger); }
       .quota-reset, .quota-empty, .quota-more { color: var(--text-muted); font-size: 7px; }
+      .card { overflow-y: auto; scrollbar-width: thin; }
+      .card > * { flex-shrink: 0; }
+      .quota-reset { display: block; line-height: 1.6; }
+      .quota-estimate { display: block; color: var(--text); font-size: 8px; line-height: 1.6; }
     </style>
   </head>
   <body>
@@ -64,7 +68,8 @@
         <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
         <div class="brand"><strong>AI 用量</strong><small>LOCAL USAGE</small></div>
         <span id="updated" class="updated"><i></i>读取中</span>
-        <button id="refresh" class="refresh" type="button" title="刷新" aria-label="刷新预览"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7v5h-5"/><path d="M19 12a7 7 0 0 0-12-4L4 11m0 6v-5h5"/><path d="M5 12a7 7 0 0 0 12 4l3-3"/></svg></button>
+        <button id="refresh-quotas" class="refresh" type="button" title="刷新订阅额度" aria-label="刷新订阅额度">◷</button>
+        <button id="refresh" class="refresh" type="button" title="同步本地用量数据" aria-label="同步本地用量数据"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7v5h-5"/><path d="M19 12a7 7 0 0 0-12-4L4 11m0 6v-5h5"/><path d="M5 12a7 7 0 0 0 12 4l3-3"/></svg></button>
       </header>
       <section id="quotas" class="quotas" hidden><div class="section-title">&#x8BA2;&#x9605;&#x914D;&#x989D;</div><div id="quota-rows"></div></section>
       <section id="metrics" class="metrics" aria-label="用量汇总"></section>
@@ -73,10 +78,14 @@
       <footer id="foot" class="foot" hidden>费用按模型公开价格估算 · 点击插件图标打开详情</footer>
       <div id="empty" class="empty" hidden></div>
     </main>
-    <script>
+    <script type="module">
+      import { resetCountdown, resetTimeText } from './src/quota-display.ts'
       const pluginId = 'ai_usage'
       const pending = new Map()
       let nextId = 0
+      let syncTimer
+      let quotaTimer
+      let lastQuotaRefresh = 0
       const compactNumber = new Intl.NumberFormat('zh-CN', { notation: 'compact', maximumFractionDigits: 1 })
       const fullNumber = new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 0 })
       const knownTools = { claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode', gemini: 'Gemini CLI', antigravity: 'Antigravity' }
@@ -108,11 +117,7 @@
         return `${Math.round(minutes / 60)} \u5c0f\u65f6\u7a97\u53e3`
       }
       function resetLabel(timestamp) {
-        const minutes = Math.max(0, Math.round((Number(timestamp) - Date.now()) / 60000))
-        if (minutes === 0) return '\u5373\u5c06\u91cd\u7f6e'
-        if (minutes < 60) return `${minutes} \u5206\u949f\u540e\u91cd\u7f6e`
-        if (minutes < 1440) return `${Math.floor(minutes / 60)} \u5c0f\u65f6 ${minutes % 60} \u5206\u949f\u540e\u91cd\u7f6e`
-        return `${Math.floor(minutes / 1440)} \u5929\u540e\u91cd\u7f6e`
+        return resetCountdown(Number(timestamp))
       }
       function time(value) { return value ? new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit' }).format(value) : '尚未扫描' }
 
@@ -129,7 +134,12 @@
                 const used = Math.max(0, Math.min(100, Number(quota.used_percent) || 0))
                 const remaining = 100 - used
                 const tone = remaining <= 8 ? 'danger' : remaining <= 25 ? 'warning' : ''
-                return `<div class=\"quota-row\"><div class=\"quota-head\"><span class=\"quota-name\">${escapeHtml(toolName(quota.tool))} &#183; ${escapeHtml(quotaWindow(quota))}</span><strong class=\"quota-percent\">剩余 ${remaining.toFixed(remaining >= 10 ? 0 : 1)}%</strong></div><div class=\"quota-track\"><i class=\"${tone}\" style=\"width:${remaining}%\"></i></div><small class=\"quota-reset\">${escapeHtml(resetLabel(quota.resets_at_ms))}</small></div>`
+                const key = `${quota.tool}|${quota.window_minutes}|${quota.id ?? quota.label ?? 'default'}`
+                const estimate = (data.quota_estimates || []).find((item) => item.key === key)
+                const estimateText = estimate?.total_cost_usd != null
+                  ? `预估满额 ≈ $${Number(estimate.total_cost_usd).toFixed(2)} · API 等值`
+                  : (estimate?.reason || '等待窗口费用数据')
+                return `<div class="quota-row"><div class="quota-head"><span class="quota-name">${escapeHtml(toolName(quota.tool))} &#183; ${escapeHtml(quotaWindow(quota))}</span><strong class="quota-percent">剩余 ${remaining.toFixed(remaining >= 10 ? 0 : 1)}%</strong></div><div class="quota-track"><i class="${tone}" style="width:${remaining}%"></i></div><small class="quota-reset">${escapeHtml(resetTimeText(Number(quota.resets_at_ms)))}</small><small class="quota-reset">${escapeHtml(resetLabel(quota.resets_at_ms))}</small><small class="quota-estimate" title="根据当前账号本地记录及已用比例推算，并非订阅价格或账单">${escapeHtml(estimateText)}</small></div>`
               }).join('')
             : '<small class=\"quota-empty\">\u6682\u65f6\u6ca1\u6709\u8bfb\u53d6\u5230\u8ba2\u9605\u989d\u5ea6</small>'
         }
@@ -176,10 +186,44 @@
         if (!widgets.size) empty.textContent = '尚未选择展示内容，请在详情页配置预览。'
       }
 
-      async function refresh() {
-        const button = document.getElementById('refresh')
+      async function pollDataSync() {
+        if (document.visibilityState !== 'visible') return
+        try {
+          const status = await call('get_sync_status')
+          if (status.running) syncTimer = setTimeout(pollDataSync, 1000)
+          else render(await call('get_preview'))
+        } catch {}
+      }
+
+      async function refreshSubscriptions(force = false) {
+        const button = document.getElementById('refresh-quotas')
+        if (button.disabled) return
         button.disabled = true
-        try { render(await call('get_preview')) }
+        lastQuotaRefresh = Date.now()
+        try {
+          await call('get_quotas', { refresh: true, force })
+          render(await call('get_preview'))
+          clearTimeout(quotaTimer)
+          quotaTimer = setTimeout(() => {
+            if (document.visibilityState === 'visible') void call('get_preview').then(render).catch(() => {})
+          }, 30000)
+        } catch (error) {
+          lastQuotaRefresh = 0
+          button.title = error?.message || '订阅刷新失败，点击重试'
+        } finally { button.disabled = false }
+      }
+
+      async function refresh(force = false) {
+        const button = document.getElementById('refresh')
+        if (button.disabled) return
+        button.disabled = true
+        try {
+          render(await call('get_preview'))
+          const status = await call('sync_data', { force })
+          clearTimeout(syncTimer)
+          if (status.running) syncTimer = setTimeout(pollDataSync, 1000)
+          else render(await call('get_preview'))
+        }
         catch (error) {
           const empty = document.getElementById('empty')
           empty.hidden = false
@@ -192,7 +236,11 @@
         if (event.source !== window.parent) return
         const message = event.data
         if (!message || message.__agileTiles !== true || message.plugin_id !== pluginId) return
-        if (message.type === 'preview-update') { void refresh(); return }
+        if (message.type === 'preview-update') {
+          void refresh()
+          if (Date.now() - lastQuotaRefresh >= 300000) void refreshSubscriptions()
+          return
+        }
         if (message.type === 'theme' && message.theme) {
           for (const [name, value] of Object.entries(message.theme.variables || {})) {
             if (name.startsWith('--') && typeof value === 'string') document.documentElement.style.setProperty(name, value)
@@ -206,8 +254,9 @@
         if (message.error) task.reject(new Error(message.error))
         else task.resolve(message.result)
       })
-      document.getElementById('refresh').addEventListener('click', refresh)
-      refresh()
+      document.getElementById('refresh').addEventListener('click', () => void refresh(true))
+      document.getElementById('refresh-quotas').addEventListener('click', () => void refreshSubscriptions(true))
+      void refresh().then(() => refreshSubscriptions())
     </script>
   </body>
 </html>

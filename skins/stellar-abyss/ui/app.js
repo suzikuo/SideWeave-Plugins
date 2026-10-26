@@ -277,7 +277,31 @@
             await call('preview.refresh')
           })
         }
-        row.textContent = typeof item === 'string' ? item : (item.title || item.label || item.value || '')
+        const title = document.createElement('span')
+        title.className = 'preview-item-title'
+        title.textContent = typeof item === 'string' ? item : (item.title || item.label || item.value || '')
+        row.append(title)
+        row.title = item.tooltip || title.textContent
+        if (Array.isArray(item.tags) && item.tags.length) {
+          const tags = document.createElement('span')
+          tags.className = 'preview-item-tags'
+          for (const tag of item.tags.slice(0, 2)) {
+            const label = document.createElement('span')
+            label.className = 'preview-group-tag'
+            label.textContent = tag.label
+            label.title = tag.label
+            if (/^#[0-9a-f]{6}$/i.test(tag.color || '')) label.style.setProperty('--group-color', tag.color)
+            tags.append(label)
+          }
+          if (item.tags.length > 2) {
+            const more = document.createElement('span')
+            more.className = 'preview-tag-more'
+            more.textContent = `+${item.tags.length - 2}`
+            more.title = item.tags.slice(2).map((tag) => tag.label).join('、')
+            tags.append(more)
+          }
+          row.append(tags)
+        }
         items.append(row)
       }
     }

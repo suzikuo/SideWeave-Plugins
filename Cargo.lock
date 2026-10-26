@@ -1978,6 +1978,7 @@ dependencies = [
 name = "sideweave_plugin-ai_usage"
 version = "0.4.10"
 dependencies = [
+ "chrono",
  "rusqlite",
  "serde",
  "serde_json",

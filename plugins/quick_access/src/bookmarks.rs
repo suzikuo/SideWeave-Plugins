@@ -5,6 +5,7 @@ use sideweave_plugin_api::{
 use sideweave_plugin_sdk::{success_response, Plugin, PluginContext};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 
 const PLUGIN_ID: &str = "bookmarks";
 const STATE_KEY: &str = "quick_access_bookmarks";
@@ -151,23 +152,15 @@ impl BookmarksPlugin {
                 Ok(json!({ "id": id, "in_preview": in_preview }))
             }
             Some("get_preview") => {
-                let all = load(context);
+                let state = load_state(context);
+                let all = state.bookmarks;
                 let preview_bookmarks: Vec<_> = all.iter().filter(|b| b.in_preview).collect();
                 let total_count = all.len();
                 let selected_count = preview_bookmarks.len();
 
                 let items: Vec<Value> = preview_bookmarks
                     .into_iter()
-                    .map(|bm| {
-                        json!({
-                            "id": bm.id,
-                            "title": bm.name,
-                            "tooltip": bm.url,
-                            "icon": bookmark_avatar_svg(&bm.name),
-                            "method": "launch",
-                            "payload": { "id": bm.id }
-                        })
-                    })
+                    .map(|bm| preview_item(bm, &state.tag_colors))
                     .collect();
 
                 Ok(json!({
@@ -199,6 +192,15 @@ impl BookmarksPlugin {
                 state.view = view;
                 save_state(context, &state)?;
                 Ok(Value::Null)
+            }
+            Some("get_tag_colors") => Ok(json!(load_state(context).tag_colors)),
+            Some("set_tag_colors") => {
+                let colors: BTreeMap<String, String> = parse_payload(request, "colors")?;
+                let colors = normalize_tag_colors(colors)?;
+                let mut state = load_state(context);
+                state.tag_colors = colors;
+                save_state(context, &state)?;
+                Ok(json!(state.tag_colors))
             }
             Some(method) => Err(format!("不支持的书签方法: {method}")),
             None => Err("缺少插件方法".into()),
@@ -236,6 +238,7 @@ impl Plugin for BookmarksPlugin {
 struct BookmarkState {
     bookmarks: Vec<Bookmark>,
     view: String,
+    tag_colors: BTreeMap<String, String>,
 }
 
 fn load_state(context: &PluginContext) -> BookmarkState {
@@ -261,6 +264,7 @@ fn load_state(context: &PluginContext) -> BookmarkState {
         .unwrap_or_else(|| BookmarkState {
             bookmarks: Vec::new(),
             view: "card".into(),
+            tag_colors: BTreeMap::new(),
         })
 }
 
@@ -330,6 +334,53 @@ fn clean_tags(tags: &[String]) -> Vec<String> {
     output
 }
 
+fn valid_tag_color(color: &str) -> bool {
+    color.len() == 7 && color.starts_with('#') && color.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit)
+}
+
+fn normalize_tag_colors(colors: BTreeMap<String, String>) -> Result<BTreeMap<String, String>, String> {
+    let mut normalized = BTreeMap::new();
+    for (tag, color) in colors {
+        if tag.trim().is_empty() {
+            return Err("分组标签不能为空".into());
+        }
+        if !valid_tag_color(&color) {
+            return Err("分组颜色必须为 #RRGGBB 格式".into());
+        }
+        normalized.insert(tag.trim().to_string(), color.to_ascii_lowercase());
+    }
+    Ok(normalized)
+}
+
+fn tag_color<'a>(tag: &str, colors: &'a BTreeMap<String, String>) -> &'a str {
+    if let Some(color) = colors.get(tag).filter(|color| valid_tag_color(color)) {
+        return color;
+    }
+    // Keep this palette and Unicode hash in sync with bookmark-groups.ts.
+    const COLORS: [&str; 8] = [
+        "#60a5fa", "#34d399", "#fbbf24", "#f472b6",
+        "#a78bfa", "#22d3ee", "#fb923c", "#94a3b8",
+    ];
+    let hash = tag.chars().fold(0_u32, |hash, ch| hash.wrapping_mul(31).wrapping_add(ch as u32));
+    COLORS[hash as usize % COLORS.len()]
+}
+
+fn preview_item(bookmark: &Bookmark, colors: &BTreeMap<String, String>) -> Value {
+    let tags: Vec<Value> = bookmark.tags.iter().map(|tag| {
+        json!({ "label": tag, "color": tag_color(tag, colors) })
+    }).collect();
+    let group_text = if bookmark.tags.is_empty() { "未分组".into() } else { bookmark.tags.join("、") };
+    json!({
+        "id": bookmark.id,
+        "title": bookmark.name,
+        "tooltip": format!("{}\n分组：{}", bookmark.url, group_text),
+        "icon": bookmark_avatar_svg(&bookmark.name),
+        "tags": if tags.is_empty() { vec![json!({ "label": "未分组", "color": "#94a3b8" })] } else { tags },
+        "method": "launch",
+        "payload": { "id": bookmark.id }
+    })
+}
+
 fn now_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -396,5 +447,49 @@ mod tests {
         let json_data = r#"{"id":"1","name":"Test","url":"https://example.com","tags":[],"pinned":false,"created_at":0}"#;
         let bookmark: Bookmark = serde_json::from_str(json_data).expect("should deserialize");
         assert!(!bookmark.in_preview);
+    }
+
+    #[test]
+    fn legacy_bookmark_state_round_trips_without_losing_groups_or_preferences() {
+        let mut state: BookmarkState = serde_json::from_value(json!({
+            "bookmarks": [{ "id": "saved", "name": "Docs", "url": "https://example.com", "tags": ["开发", "工具"], "pinned": true, "in_preview": true }],
+            "view": "compact"
+        })).unwrap();
+        assert!(state.tag_colors.is_empty());
+        state.tag_colors.insert("开发".into(), "#123abc".into());
+        let restored: BookmarkState = serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+        assert_eq!(restored.bookmarks[0].tags, ["开发", "工具"]);
+        assert!(restored.bookmarks[0].pinned && restored.bookmarks[0].in_preview);
+        assert_eq!(restored.view, "compact");
+        assert_eq!(restored.tag_colors["开发"], "#123abc");
+    }
+
+    #[test]
+    fn group_colors_validate_before_saving_and_support_reset() {
+        let colors = BTreeMap::from([(" 开发 ".into(), "#AABBCC".into())]);
+        assert_eq!(normalize_tag_colors(colors).unwrap()["开发"], "#aabbcc");
+        for (tag, color) in [("", "#123456"), ("开发", "red"), ("开发", "#123"), ("开发", "#xxxxxx"), ("开发", "#123456;display:none")] {
+            assert!(normalize_tag_colors(BTreeMap::from([(tag.into(), color.into())])).is_err());
+        }
+        assert!(normalize_tag_colors(BTreeMap::new()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn preview_includes_every_group_and_uses_saved_colors() {
+        let bookmark = Bookmark {
+            id: "saved".into(), name: "Docs".into(), url: "https://example.com".into(),
+            tags: vec!["开发".into(), "工具".into(), "阅读".into()], ..Default::default()
+        };
+        let colors = BTreeMap::from([("开发".into(), "#123abc".into())]);
+        let item = preview_item(&bookmark, &colors);
+        assert_eq!(item["tags"].as_array().unwrap().len(), 3);
+        assert_eq!(item["tags"][0], json!({"label": "开发", "color": "#123abc"}));
+        assert_eq!(item["tags"][1]["color"], tag_color("工具", &BTreeMap::new()));
+        assert!(item["tooltip"].as_str().unwrap().contains("开发、工具、阅读"));
+        assert_eq!(item["method"], "launch");
+        assert_eq!(item["payload"]["id"], "saved");
+        let ungrouped = preview_item(&Bookmark::default(), &colors);
+        assert_eq!(ungrouped["tags"][0]["label"], "未分组");
+        assert_eq!(tag_color("开发", &BTreeMap::from([("开发".into(), "invalid".into())])), tag_color("开发", &BTreeMap::new()));
     }
 }

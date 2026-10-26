@@ -4,8 +4,9 @@ import Button from '@ui-sdk/Button.vue'
 import { computed, onMounted, ref } from 'vue'
 import Icon from '../../../ui-sdk/Icon.vue'
 import Toast from '../../../ui-sdk/Toast.vue'
-import { bmAdd, bmGetView, bmList, bmOpen, bmRemove, bmSetView, bmTogglePreview, bmUpdate } from './bookmarks-api'
+import { bmAdd, bmGetTagColors, bmGetView, bmList, bmOpen, bmRemove, bmSetTagColors, bmSetView, bmTogglePreview, bmUpdate } from './bookmarks-api'
 import type { Bookmark, BookmarkInput, BookmarkViewStyle } from './bookmarks-api'
+import { groupColor } from './bookmark-groups'
 
 // ---------- 状态 ----------
 
@@ -13,6 +14,51 @@ const items = ref<Bookmark[]>([])
 const search = ref('')
 /** 当前选中的过滤标签；null = 全部 */
 const activeTag = ref<string | null>(null)
+const ungroupedOnly = ref(false)
+const tagColors = ref<Record<string, string>>({})
+const draftTagColors = ref<Record<string, string>>({})
+const showGroupColors = ref(false)
+const savingGroupColors = ref(false)
+const groupColorError = ref('')
+
+function tagStyle(tag: string) {
+  return { '--group-color': groupColor(tag, tagColors.value) }
+}
+
+function selectTag(tag: string | null) {
+  activeTag.value = tag
+  ungroupedOnly.value = false
+}
+
+function openGroupColors() {
+  draftTagColors.value = { ...tagColors.value }
+  groupColorError.value = ''
+  showGroupColors.value = true
+}
+
+function changeGroupColor(tag: string, event: Event) {
+  draftTagColors.value = { ...draftTagColors.value, [tag]: (event.target as HTMLInputElement).value }
+}
+
+function resetGroupColor(tag: string) {
+  const next = { ...draftTagColors.value }
+  delete next[tag]
+  draftTagColors.value = next
+}
+
+async function saveGroupColors() {
+  savingGroupColors.value = true
+  groupColorError.value = ''
+  try {
+    tagColors.value = await bmSetTagColors(draftTagColors.value)
+    showGroupColors.value = false
+    showToast('分组颜色已保存，悬浮预览同步生效', 'success')
+  } catch (e) {
+    groupColorError.value = String(e)
+  } finally {
+    savingGroupColors.value = false
+  }
+}
 /** 列表视图样式：卡片（默认）/ 单条 / 表格（跨会话记忆） */
 const view = ref<BookmarkViewStyle>('card')
 
@@ -38,7 +84,7 @@ const confirmId = ref<string | null>(null)
 let confirmTimer = 0
 
 function defaultForm() {
-  return { name: '', url: '', tags: '', pinned: false, in_preview: false }
+  return { name: '', url: '', tags: activeTag.value ?? '', pinned: false, in_preview: false }
 }
 
 function showToast(message: string, kind: 'info' | 'error' | 'success' = 'info') {
@@ -58,7 +104,9 @@ async function refresh() {
 }
 
 onMounted(async () => {
-  await refresh()
+  await Promise.all([refresh(), bmGetTagColors().then((colors) => {
+    tagColors.value = colors
+  }).catch((e) => showToast(String(e), 'error'))])
   try {
     const v = await bmGetView()
     if (v === 'card' || v === 'compact' || v === 'table') view.value = v
@@ -81,10 +129,20 @@ const allTags = computed(() => {
   return [...set].sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'))
 })
 
+const ungroupedCount = computed(() => items.value.filter((it) => !it.tags.length).length)
+const tagCounts = computed(() => {
+  const counts = new Map<string, number>()
+  for (const item of items.value) {
+    for (const tag of item.tags) counts.set(tag, (counts.get(tag) ?? 0) + 1)
+  }
+  return counts
+})
+
 const filtered = computed(() => {
   const tag = activeTag.value
   const q = search.value.trim().toLowerCase()
   return items.value.filter((it) => {
+    if (ungroupedOnly.value && it.tags.length) return false
     if (tag && !it.tags.includes(tag)) return false
     if (!q) return true
     return [it.name, it.url, it.tags.join(' ')].some((f) => f.toLowerCase().includes(q))
@@ -99,12 +157,12 @@ const normalList = computed(() =>
   filtered.value.filter((it) => !it.pinned).sort((a, b) => b.created_at - a.created_at)
 )
 
-/** 渲染分区：仅有置顶时出现"已置顶"，普通区标题固定为"全部" */
+/** Keep pinned entries separate while showing the selected group in the heading. */
 const sections = computed<{ title: string; rows: Bookmark[] }[]>(() => {
   const list: { title: string; rows: Bookmark[] }[] = []
   if (pinnedList.value.length) list.push({ title: '已置顶', rows: pinnedList.value })
-  if (normalList.value.length || !pinnedList.value.length) {
-    list.push({ title: '全部', rows: normalList.value })
+  if (normalList.value.length) {
+    list.push({ title: ungroupedOnly.value ? '未分组' : activeTag.value ?? '全部书签', rows: normalList.value })
   }
   return list
 })
@@ -278,25 +336,34 @@ function avatarChar(name: string): string {
       </div>
     </div>
 
-    <div v-if="allTags.length" class="tagbar">
-      <button class="chip" :class="{ active: activeTag === null }" @click="activeTag = null">
-        全部
+    <div v-if="items.length" class="tagbar" aria-label="按分组筛选书签">
+      <button class="chip" :class="{ active: activeTag === null && !ungroupedOnly }" @click="selectTag(null)">
+        全部 <span class="group-count">{{ items.length }}</span>
       </button>
       <button
         v-for="tag in allTags"
         :key="tag"
-        class="chip"
+        class="chip group-chip"
+        :style="tagStyle(tag)"
         :class="{ active: activeTag === tag }"
-        @click="activeTag = activeTag === tag ? null : tag"
+        :aria-pressed="activeTag === tag"
+        @click="selectTag(activeTag === tag ? null : tag)"
       >
-        {{ tag }}
+        <i class="group-dot" aria-hidden="true" /> {{ tag }}
+        <span class="group-count">{{ tagCounts.get(tag) }}</span>
+      </button>
+      <button v-if="ungroupedCount" class="chip" :class="{ active: ungroupedOnly }" @click="activeTag = null; ungroupedOnly = !ungroupedOnly">
+        未分组 <span class="group-count">{{ ungroupedCount }}</span>
+      </button>
+      <button v-if="allTags.length" class="chip group-settings" @click="openGroupColors">
+        <Icon name="pencil" :size="12" /> 分组颜色
       </button>
     </div>
 
     <div class="list">
       <template v-if="sections.length">
         <section v-for="sec in sections" :key="sec.title" class="section">
-          <div class="section-title">{{ sec.title }}</div>
+          <div class="section-title">{{ sec.title }} <span class="group-count">{{ sec.rows.length }}</span></div>
 
           <!-- 卡片 / 单条：同一行结构，样式随 view 切换 -->
           <div v-if="view !== 'table'" class="rows">
@@ -325,6 +392,13 @@ function avatarChar(name: string): string {
                   </span>
                 </span>
                 <span class="url" :title="it.url">{{ it.url }}</span>
+              </span>
+              <span class="row-tags" aria-label="所属分组">
+                <button v-for="tag in it.tags" :key="tag" class="group-tag" :style="tagStyle(tag)"
+                  :title="`筛选分组：${tag}`" @click.stop="selectTag(tag)" @dblclick.stop>
+                  <i class="group-dot" aria-hidden="true" /><span class="group-label">{{ tag }}</span>
+                </button>
+                <span v-if="!it.tags.length" class="ungrouped-label">未分组</span>
               </span>
               <span class="actions">
                 <Button variant="outline" size="sm" class="icon-btn" title="打开" @click.stop="open(it)">
@@ -367,7 +441,7 @@ function avatarChar(name: string): string {
             <div class="thead">
               <span>名称</span>
               <span>网址</span>
-              <span>标签</span>
+              <span>分组标签</span>
               <span class="th-ops">操作</span>
             </div>
             <div
@@ -391,7 +465,11 @@ function avatarChar(name: string): string {
               </span>
               <span class="td td-url" :title="it.url">{{ it.url }}</span>
               <span class="td td-tags">
-                <span v-for="t in it.tags" :key="t" class="mini-tag">{{ t }}</span>
+                <button v-for="tag in it.tags" :key="tag" class="group-tag" :style="tagStyle(tag)"
+                  :title="`筛选分组：${tag}`" @click.stop="selectTag(tag)" @dblclick.stop>
+                  <i class="group-dot" aria-hidden="true" /><span class="group-label">{{ tag }}</span>
+                </button>
+                <span v-if="!it.tags.length" class="ungrouped-label">未分组</span>
               </span>
               <span class="td td-ops">
                 <span class="actions inline">
@@ -441,6 +519,28 @@ function avatarChar(name: string): string {
     </div>
 
     <Teleport to="body">
+      <div v-if="showGroupColors" class="mask" @click.self="!savingGroupColors && (showGroupColors = false)" @keydown.esc.stop="!savingGroupColors && (showGroupColors = false)">
+        <div class="dialog group-dialog" role="dialog" aria-modal="true" aria-labelledby="group-colors-title">
+          <h2 id="group-colors-title">分组颜色</h2>
+          <p class="field-hint">同一分组的颜色会显示在书签和悬浮预览中。</p>
+          <div class="group-color-list">
+            <div v-for="tag in allTags" :key="tag" class="group-color-row">
+              <span class="group-tag" :style="{ '--group-color': groupColor(tag, draftTagColors) }">
+                <i class="group-dot" aria-hidden="true" /><span class="group-label" :title="tag">{{ tag }}</span>
+              </span>
+              <span class="group-count">{{ tagCounts.get(tag) }} 个书签</span>
+              <input type="color" :value="groupColor(tag, draftTagColors)" :aria-label="`${tag}分组颜色`"
+                :disabled="savingGroupColors" @input="changeGroupColor(tag, $event)" />
+              <button class="chip" :disabled="savingGroupColors" @click="resetGroupColor(tag)">恢复默认</button>
+            </div>
+          </div>
+          <p v-if="groupColorError" class="field-err" role="alert">{{ groupColorError }}</p>
+          <footer class="dialog-foot">
+            <Button variant="outline" size="sm" :disabled="savingGroupColors" @click="showGroupColors = false">取消</Button>
+            <Button size="sm" :disabled="savingGroupColors" @click="saveGroupColors">{{ savingGroupColors ? '保存中…' : '保存颜色' }}</Button>
+          </footer>
+        </div>
+      </div>
       <div v-if="showDialog" class="mask" @click.self="showDialog = false">
         <div class="dialog">
           <h2>{{ editingId ? '编辑书签' : '新增书签' }}</h2>
@@ -470,13 +570,14 @@ function avatarChar(name: string): string {
           </label>
 
           <label class="field">
-            <span>标签（逗号分隔）</span>
+            <span>分组标签（逗号分隔，可加入多个分组）</span>
             <input
               v-model="form.tags"
               type="text"
               placeholder="例如：开发, 工具"
               @keydown.enter="save"
             />
+            <span class="field-hint">相同标签属于同一分组，可在列表上方设置分组颜色。</span>
           </label>
 
           <div class="switch-row">
@@ -592,6 +693,9 @@ function avatarChar(name: string): string {
 }
 
 .chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   padding: 4px 13px;
   border-radius: 999px;
   border: 1px solid var(--border);
@@ -610,6 +714,44 @@ function avatarChar(name: string): string {
   color: var(--primary-foreground);
   font-weight: 600;
 }
+
+.group-count { opacity: .65; font-size: 10px; font-weight: 400; }
+.group-dot { width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--group-color, #94a3b8); }
+.group-chip { border-color: color-mix(in srgb, var(--group-color) 35%, var(--border)); }
+.group-chip.active {
+  color: var(--text);
+  background: color-mix(in srgb, var(--group-color) 20%, var(--surface-subtle));
+  border-color: var(--group-color);
+}
+.group-settings { margin-left: auto; }
+.group-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  min-width: 0;
+  padding: 2px 7px;
+  border: 1px solid color-mix(in srgb, var(--group-color) 35%, transparent);
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--group-color) 12%, transparent);
+  color: var(--text);
+  font: inherit;
+  font-size: 10.5px;
+  line-height: 16px;
+}
+button.group-tag { cursor: pointer; }
+button.group-tag:hover { border-color: var(--group-color); }
+.group-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row-tags { display: flex; flex: 0 1 28%; min-width: 0; flex-wrap: wrap; gap: 4px; justify-content: flex-end; }
+.ungrouped-label { color: var(--text-muted); font-size: 10.5px; }
+.field-hint { color: var(--text-muted); font-size: 11px; line-height: 1.6; }
+.group-color-list { max-height: 50vh; overflow: auto; margin: 14px 0; }
+.group-color-row { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--border); }
+.group-color-row > .group-tag { flex: 1; }
+.group-color-row > .group-count { flex: none; }
+.group-color-row input[type='color'] { width: 30px; height: 28px; flex: none; padding: 2px; border: 1px solid var(--border); border-radius: 5px; background: var(--surface-subtle); cursor: pointer; }
+.group-color-row .chip { flex: none; font-size: 10px; padding: 4px 8px; }
+.group-tag:focus-visible, .chip:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 
 /* ---------- 视图样式切换 ---------- */
 
@@ -778,14 +920,6 @@ function avatarChar(name: string): string {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
-}
-.mini-tag {
-  padding: 1px 8px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--primary) 14%, transparent);
-  color: var(--primary);
-  font-size: 10.5px;
-  white-space: nowrap;
 }
 .td-ops {
   justify-self: end;

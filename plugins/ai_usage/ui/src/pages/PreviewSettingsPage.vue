@@ -2,7 +2,7 @@
 import { inject } from 'vue'
 import { aiUsageKey } from '../context'
 
-const { previewSettingsError, previewSettings, previewWidgetOptions, hasPreviewWidget, togglePreviewWidget, previewSettingsMessage, previewSettingsLoading, resetPreviewSettings, savePreviewSettings, previewSettingsSaving, previewSample, formatTokens, formatMoney, toolName, formatTime, quotaWindow, percent, resetLabel } = inject(aiUsageKey)!
+const { previewSettingsError, previewSettings, previewWidgetOptions, hasPreviewWidget, togglePreviewWidget, previewSettingsMessage, previewSettingsLoading, resetPreviewSettings, savePreviewSettings, previewSettingsSaving, previewSample, formatTokens, formatMoney, toolName, formatTime, quotaWindow, percent, resetLabel, resetTimeText, previewQuotaEstimate } = inject(aiUsageKey)!
 </script>
 
 <template>
@@ -47,7 +47,8 @@ const { previewSettingsError, previewSettings, previewWidgetOptions, hasPreviewW
               <div v-for="quota in previewSample.quotas" :key="`${quota.tool}-${quota.id ?? quota.label ?? quota.window_minutes}`" class="preview-live-quota">
                 <div class="preview-live-quota-head"><span>{{ toolName(quota.tool) }} · {{ quotaWindow(quota) }}</span><strong>剩余 {{ percent(100 - quota.used_percent) }}</strong></div>
                 <i class="preview-live-quota-track"><b :class="{ warning: quota.used_percent >= 75, danger: quota.used_percent >= 92 }" :style="{ width: `${Math.max(0, Math.min(100, 100 - quota.used_percent))}%` }"></b></i>
-                <small>{{ resetLabel(quota.resets_at_ms) }}</small>
+                <small>{{ resetTimeText(quota.resets_at_ms) }} · {{ resetLabel(quota.resets_at_ms) }}</small>
+                <small v-if="previewQuotaEstimate(quota)?.total_cost_usd != null">预估满额 ≈ {{ formatMoney(previewQuotaEstimate(quota)!.total_cost_usd!) }}</small>
               </div>
             </template>
             <small v-else>暂时没有读取到订阅额度</small>

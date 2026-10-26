@@ -2,20 +2,31 @@
 import { inject } from 'vue'
 import { aiUsageKey } from '../context'
 
-const { requestSince, requestUntil, requestTool, requestTools, requestSearch, fetchRequests, requestError, requestLoading, requestRows, toolInitial, toolName, tokenBreakdownTitle, formatTokens, formatRequestCost, formatDuration, formatTime, percent } = inject(aiUsageKey)!
+const { requestSince, requestUntil, requestTool, requestTools, requestSearch, fetchRequests, requestError, requestLoading, requestRows, requestPage, requestPageSize, requestTotal, requestPageCount, goRequestPage, toolInitial, toolName, tokenBreakdownTitle, formatTokens, formatRequestCost, formatDuration, formatTime, percent } = inject(aiUsageKey)!
 </script>
 
 <template>
   <section class="page-content">
-    <div class="page-intro"><div><h2>请求明细</h2><p>显示会话标题、时间、工具、项目、模型和 Token 数量，不读取对话正文。</p></div><span class="subtle-pill">最多显示 200 条</span></div>
+    <div class="page-intro"><div><h2>请求明细</h2><p>显示会话标题、时间、工具、项目、模型和 Token 数量，不读取对话正文。</p></div><span class="subtle-pill">共 {{ requestTotal.toLocaleString() }} 条</span></div>
     <div class="panel request-filters">
       <label>开始日期<input v-model="requestSince" type="date" /></label>
       <label>结束日期<input v-model="requestUntil" type="date" /></label>
       <label>工具<select v-model="requestTool"><option value="">所有工具</option><option v-for="source in requestTools" :key="source.id" :value="source.id">{{ source.display }}</option></select></label>
-      <label class="search-filter">搜索会话标题、项目或模型<input v-model="requestSearch" type="search" placeholder="输入关键词" @keyup.enter="fetchRequests" /></label>
-      <button class="primary-button" :disabled="requestLoading" @click="fetchRequests">{{ requestLoading ? '读取中…' : '应用筛选' }}</button>
+      <label class="search-filter">搜索会话标题、项目或模型<input v-model="requestSearch" type="search" placeholder="输入关键词" @keyup.enter="fetchRequests()" /></label>
+      <button class="primary-button" :disabled="requestLoading" @click="fetchRequests()">{{ requestLoading ? '读取中…' : '应用筛选' }}</button>
     </div>
     <div v-if="requestError" class="notice-banner">{{ requestError }}</div>
+    <nav class="panel request-pagination" aria-label="请求明细分页">
+      <label>每页<select v-model.number="requestPageSize" :disabled="requestLoading" aria-label="每页请求数量"><option :value="50">50 条</option><option :value="100">100 条</option><option :value="200">200 条</option></select></label>
+      <span class="request-page-info">第 {{ requestPage }} / {{ requestPageCount }} 页 · {{ requestTotal ? (requestPage - 1) * requestPageSize + 1 : 0 }}–{{ Math.min(requestPage * requestPageSize, requestTotal) }} 条</span>
+      <div class="request-page-actions">
+        <button class="refresh-button" :disabled="requestLoading || requestPage <= 1" @click="goRequestPage(1)">首页</button>
+        <button class="refresh-button" :disabled="requestLoading || requestPage <= 1" @click="goRequestPage(requestPage - 1)">上一页</button>
+        <button class="refresh-button" :disabled="requestLoading || requestPage >= requestPageCount" @click="goRequestPage(requestPage + 1)">下一页</button>
+        <button class="refresh-button" :disabled="requestLoading || requestPage >= requestPageCount" @click="goRequestPage(requestPageCount)">末页</button>
+        <button class="refresh-button" :disabled="requestLoading" title="读取最新记录并回到第一页" @click="fetchRequests()">刷新明细</button>
+      </div>
+    </nav>
     <div class="panel table-panel request-table-panel">
       <div v-if="requestLoading && !requestRows.length" class="loading-table">正在读取请求明细…</div>
       <div v-else-if="requestRows.length" class="usage-table request-table">
@@ -48,5 +59,12 @@ const { requestSince, requestUntil, requestTool, requestTools, requestSearch, fe
       </div>
       <div v-else-if="!requestLoading" class="empty-state"><span>≡</span><strong>没有符合条件的请求</strong><small>调整日期或清除工具筛选后再试。</small></div>
     </div>
+    <nav v-if="requestTotal > 0" class="panel request-pagination" aria-label="请求明细底部分页">
+      <span class="request-page-info">第 {{ requestPage }} / {{ requestPageCount }} 页，共 {{ requestTotal.toLocaleString() }} 条</span>
+      <div class="request-page-actions">
+        <button class="refresh-button" :disabled="requestLoading || requestPage <= 1" @click="goRequestPage(requestPage - 1)">上一页</button>
+        <button class="refresh-button" :disabled="requestLoading || requestPage >= requestPageCount" @click="goRequestPage(requestPage + 1)">下一页</button>
+      </div>
+    </nav>
   </section>
 </template>

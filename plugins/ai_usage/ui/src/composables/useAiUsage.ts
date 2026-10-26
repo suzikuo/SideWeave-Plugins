@@ -1,5 +1,15 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { errorMessage, pluginCall } from '../../../../ui-sdk/runtime'
+import { errorMessage, onPluginLifecycle, pluginCall } from '../../../../ui-sdk/runtime'
+import { resetCountdown, resetTimeText } from '../quota-display'
+
+const DATA_REFRESH_MS = 60_000
+const QUOTA_REFRESH_MS = 300_000
+
+interface SyncStatus {
+  running: boolean
+  last_finished_ms: number | null
+  warning: string | null
+}
 
 type PeriodKey = 'day' | 'week' | 'month' | 'year'
 type PageKey = 'overview' | 'tools' | 'sources' | 'sessions' | 'requests' | 'quotas' | 'preview'
@@ -21,11 +31,13 @@ interface QuotaNotificationSettings {
 
 interface QuotaSubscriptionNotificationRule {
   enabled: boolean
+  reset_enabled: boolean
   remaining_thresholds_percent: number[]
 }
 
 interface QuotaSubscriptionNotificationDraft {
   enabled: boolean
+  reset_enabled: boolean
   thresholdsText: string
 }
 
@@ -37,6 +49,7 @@ interface PreviewData {
   last_ingest_ms: number | null
   tools: Array<{ tool: string; total_tokens: number; requests: number }>
   quotas: Quota[]
+  quota_estimates?: QuotaEstimate[]
   cost_usd: number
   credit_cost_usd: number
   unpriced_models: number
@@ -100,6 +113,14 @@ interface Quota {
   origin: string
 }
 
+interface QuotaEstimate {
+  key: string
+  used_cost_usd: number | null
+  total_cost_usd: number | null
+  remaining_cost_usd: number | null
+  reason: string | null
+}
+
 interface UsageReport {
   generated_at_ms: number
   utc_offset: string
@@ -130,6 +151,7 @@ interface UsageReport {
 
 interface DashboardPayload {
   report: UsageReport
+  quota_estimates?: QuotaEstimate[]
   indexed_events: number
   last_ingest_ms: number | null
   refresh_warning: string | null
@@ -151,6 +173,15 @@ interface RequestRow {
   total_tokens: number
   cost_usd: number | null
   credits_cost_usd: number | null
+}
+
+interface RequestFilters {
+  since_ms: number
+  until_ms: number
+  scope: string
+  account: string
+  tool: string
+  search: string
 }
 
 interface SessionRow {
@@ -213,9 +244,32 @@ export function useAiUsage() {
   const payload = ref<DashboardPayload | null>(null)
   const loading = ref(false)
   const error = ref('')
+  const syncing = ref(false)
+  const syncWarning = ref('')
+  const quotaLoading = ref(false)
+  const quotaError = ref('')
+  const liveQuotas = ref<Quota[] | null>(null)
+  const quotaEstimates = ref<QuotaEstimate[]>([])
+  let uiActive = false
+  let disposed = false
+  let stopLifecycle: (() => void) | undefined
+  let dataRefreshTimer: number | undefined
+  let quotaRefreshTimer: number | undefined
+  let syncPollTimer: number | undefined
+  let quotaSettleTimer: number | undefined
+  let lastQuotaRefresh = 0
+  let dashboardRequest = 0
+  let quotaRequest = 0
   const requestRows = ref<RequestRow[]>([])
   const requestLoading = ref(false)
   const requestError = ref('')
+  const requestPage = ref(1)
+  const requestPageSize = ref(100)
+  const requestTotal = ref(0)
+  const requestPageCount = ref(1)
+  const requestSnapshotMaxId = ref<number | null>(null)
+  let appliedRequestFilters: RequestFilters | null = null
+  let requestQuery = 0
   const sessionRows = ref<SessionRow[]>([])
   const sessionLoading = ref(false)
   const sessionError = ref('')
@@ -251,7 +305,13 @@ export function useAiUsage() {
   const requestTools = computed(() => report.value?.sources ?? [])
   const accounts = computed(() => payload.value?.accounts ?? [])
   const selectedAccount = computed(() => accounts.value.find((account) => account.selection === accountScope.value) ?? null)
-  const quotaRows = computed(() => report.value?.quotas ?? [])
+  const quotaRows = computed(() => {
+    const cached = report.value?.quotas ?? []
+    if (liveQuotas.value === null) return cached
+    const live = liveQuotas.value
+    return [...cached.filter((row) => row.origin !== 'probe' && !(row.origin === 'log'
+      && live.some((quota) => quota.tool === row.tool && quota.window_minutes === row.window_minutes))), ...live]
+  })
   const quotaNotificationSources = computed(() => {
     const current = new Map(quotaRows.value
       .filter((quota) => quota.origin === 'probe')
@@ -271,7 +331,7 @@ export function useAiUsage() {
       rule: QuotaSubscriptionNotificationDraft
     }>)
   const anyQuotaNotificationEnabled = computed(() => legacyQuotaNotificationEnabled.value
-    || Object.values(quotaNotificationRules.value).some((rule) => rule.enabled))
+    || Object.values(quotaNotificationRules.value).some((rule) => rule.enabled || rule.reset_enabled))
   const detectedCount = computed(() => report.value?.sources.filter((source) => source.detected).length ?? 0)
   const sourceCatalog = computed(() => payload.value?.supported_tools.map((tool) => {
     const status = report.value?.sources.find((source) => source.id === tool.id)
@@ -476,11 +536,15 @@ export function useAiUsage() {
   }
 
   function resetLabel(timestamp: number): string {
-    const minutes = Math.max(0, Math.round((timestamp - Date.now()) / 60_000))
-    if (minutes === 0) return '即将重置'
-    if (minutes < 60) return `${minutes} 分钟后重置`
-    if (minutes < 1_440) return `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分后重置`
-    return `${Math.floor(minutes / 1_440)} 天后重置`
+    return resetCountdown(timestamp)
+  }
+
+  function quotaEstimate(quota: Quota) {
+    return quotaEstimates.value.find((estimate) => estimate.key === quotaNotificationIdentity(quota))
+  }
+
+  function previewQuotaEstimate(quota: Quota) {
+    return previewSample.value?.quota_estimates?.find((estimate) => estimate.key === quotaNotificationIdentity(quota))
   }
 
   function quotaNotificationIdentity(quota: Quota): string {
@@ -498,6 +562,7 @@ export function useAiUsage() {
         : [50, 10, 0]
       next[key] = {
         enabled: legacyQuotaNotificationEnabled.value,
+        reset_enabled: false,
         thresholdsText: thresholds.join(',')
       }
       changed = true
@@ -520,9 +585,9 @@ export function useAiUsage() {
       window.clearInterval(quotaNotificationTimer)
       quotaNotificationTimer = undefined
     }
-    if (!anyQuotaNotificationEnabled.value) return
+    if (disposed || !anyQuotaNotificationEnabled.value) return
     quotaNotificationTimer = window.setInterval(() => {
-      if (document.visibilityState === 'visible') void checkQuotaNotifications().catch(() => {})
+      if (uiActive && document.visibilityState === 'visible') void checkQuotaNotifications().catch(() => {})
     }, 60_000)
   }
 
@@ -535,6 +600,7 @@ export function useAiUsage() {
       quotaNotificationRules.value = Object.fromEntries(
         Object.entries(settings.subscriptions ?? {}).map(([key, rule]) => [key, {
           enabled: rule.enabled,
+          reset_enabled: rule.reset_enabled ?? false,
           thresholdsText: rule.remaining_thresholds_percent.join(',')
         }])
       )
@@ -568,6 +634,7 @@ export function useAiUsage() {
       }
       subscriptions[key] = {
         enabled: rule.enabled,
+        reset_enabled: rule.reset_enabled,
         remaining_thresholds_percent: [...new Set(thresholds)].sort((a, b) => b - a)
       }
     }
@@ -581,6 +648,7 @@ export function useAiUsage() {
       quotaNotificationRules.value = Object.fromEntries(
         Object.entries(settings.subscriptions).map(([key, rule]) => [key, {
           enabled: rule.enabled,
+          reset_enabled: rule.reset_enabled ?? false,
           thresholdsText: rule.remaining_thresholds_percent.join(',')
         }])
       )
@@ -604,48 +672,161 @@ export function useAiUsage() {
     }
   }
 
-  function refresh(): Promise<void> {
+  function readDashboard(): Promise<void> {
+    const request = ++dashboardRequest
+    const selection = { scope: scope.value, account: accountScope.value }
     loading.value = true
     error.value = ''
-    return pluginCall<DashboardPayload>('dashboard', { scope: scope.value, account: accountScope.value }, 60_000)
+    return pluginCall<DashboardPayload>('dashboard', selection, 60_000)
       .then((value) => {
+        if (disposed || request !== dashboardRequest || selection.scope !== scope.value || selection.account !== accountScope.value) return
         payload.value = value
+        quotaEstimates.value = value.quota_estimates ?? []
         if (accountScope.value !== 'all' && !value.accounts.some((option) => option.selection === accountScope.value)) {
           accountScope.value = 'all'
         }
       })
       .catch((reason) => {
-        error.value = errorMessage(reason)
+        if (request === dashboardRequest) error.value = errorMessage(reason)
       })
       .finally(() => {
-        loading.value = false
+        if (request === dashboardRequest) loading.value = false
       })
   }
 
-  async function fetchRequests() {
-    if (!requestSince.value || !requestUntil.value) return
+  async function finishDataSync(status: SyncStatus) {
+    syncing.value = false
+    syncWarning.value = status.warning ?? ''
+    await readDashboard()
+    if (page.value === 'requests' && !requestLoading.value) await fetchRequests(requestPage.value === 1)
+    if (page.value === 'sessions') await fetchSessions()
+    if (page.value === 'preview') await loadPreviewSettings()
+  }
+
+  async function pollDataSync() {
+    syncPollTimer = undefined
+    if (disposed || !uiActive) return
+    try {
+      const status = await pluginCall<SyncStatus>('get_sync_status')
+      if (disposed) return
+      if (status.running) syncPollTimer = window.setTimeout(() => void pollDataSync(), 1_000)
+      else await finishDataSync(status)
+    } catch (reason) {
+      syncing.value = false
+      syncWarning.value = errorMessage(reason)
+    }
+  }
+
+  async function refresh(force = true): Promise<void> {
+    if (syncing.value || disposed) return
+    syncing.value = true
+    syncWarning.value = ''
+    try {
+      const status = await pluginCall<SyncStatus>('sync_data', { force })
+      if (disposed) return
+      if (status.running) {
+        syncPollTimer = window.setTimeout(() => void pollDataSync(), 1_000)
+      } else await finishDataSync(status)
+    } catch (reason) {
+      syncing.value = false
+      syncWarning.value = errorMessage(reason)
+    }
+  }
+
+  async function readQuotas(refresh: boolean, force = false) {
+    const request = ++quotaRequest
+    const selection = { scope: scope.value, account: accountScope.value }
+    quotaLoading.value = true
+    quotaError.value = ''
+    try {
+      const result = await pluginCall<{ quotas: Quota[]; quota_estimates?: QuotaEstimate[] }>('get_quotas', { ...selection, refresh, force }, 8_000)
+      if (disposed || request !== quotaRequest || selection.scope !== scope.value || selection.account !== accountScope.value) return
+      liveQuotas.value = result.quotas
+      quotaEstimates.value = result.quota_estimates ?? []
+      availableQuotaSubscriptions.value = result.quotas.filter((quota) => quota.origin === 'probe')
+        .map((quota) => ({ key: quotaNotificationIdentity(quota), quota }))
+    } catch (reason) {
+      if (request === quotaRequest) quotaError.value = errorMessage(reason)
+    } finally {
+      if (request === quotaRequest) quotaLoading.value = false
+    }
+  }
+
+  async function refreshQuotas(force = true) {
+    if (quotaLoading.value || disposed) return
+    if (quotaSettleTimer !== undefined) window.clearTimeout(quotaSettleTimer)
+    lastQuotaRefresh = Date.now()
+    await readQuotas(true, force)
+    // Slow providers finish into their cache after the two-second response
+    // budget. Pick those answers up without starting another network probe.
+    if (!disposed) quotaSettleTimer = window.setTimeout(() => {
+      if (uiActive && !quotaLoading.value) void readQuotas(false)
+    }, 30_000)
+  }
+
+  async function fetchRequests(reset = true, nextPage = requestPage.value) {
+    if ((reset || !appliedRequestFilters) && (!requestSince.value || !requestUntil.value)) {
+      requestError.value = '请选择开始日期和结束日期'
+      return
+    }
+    const query = ++requestQuery
+    const freshQuery = reset || !appliedRequestFilters
+    const filters: RequestFilters = freshQuery ? {
+        since_ms: dateStart(requestSince.value),
+        until_ms: dateEnd(requestUntil.value),
+        scope: scope.value,
+        account: accountScope.value,
+        tool: requestTool.value,
+        search: requestSearch.value.trim()
+      } : { ...appliedRequestFilters! }
+    if (freshQuery) nextPage = 1
+    const snapshotMaxId = freshQuery ? null : requestSnapshotMaxId.value
     requestLoading.value = true
     requestError.value = ''
     try {
       const result = await pluginCall<{
         rows: RequestRow[]
         refresh_warning: string | null
+        total: number
+        page: number
+        page_size: number
+        total_pages: number
+        snapshot_max_id: number
       }>('requests', {
-        since_ms: dateStart(requestSince.value),
-        until_ms: dateEnd(requestUntil.value),
-        scope: scope.value,
-        account: accountScope.value,
-        tool: requestTool.value,
-        search: requestSearch.value.trim(),
-        limit: 200
+        ...filters,
+        page: nextPage,
+        limit: requestPageSize.value,
+        ...(snapshotMaxId === null ? {} : { snapshot_max_id: snapshotMaxId })
       }, 60_000)
+      if (disposed || query !== requestQuery) return
+      appliedRequestFilters = filters
       requestRows.value = result.rows
+      requestPage.value = result.page
+      requestTotal.value = result.total
+      requestPageCount.value = result.total_pages
+      requestSnapshotMaxId.value = result.snapshot_max_id
       if (result.refresh_warning) requestError.value = result.refresh_warning
     } catch (reason) {
-      requestError.value = errorMessage(reason)
+      if (query === requestQuery) requestError.value = errorMessage(reason)
     } finally {
-      requestLoading.value = false
+      if (query === requestQuery) requestLoading.value = false
     }
+  }
+
+  function goRequestPage(next: number) {
+    if (requestLoading.value || !Number.isInteger(next) || next < 1 || next > requestPageCount.value) return
+    return fetchRequests(false, next)
+  }
+
+  function resetRequestPagination() {
+    requestQuery += 1
+    requestPage.value = 1
+    requestTotal.value = 0
+    requestPageCount.value = 1
+    requestSnapshotMaxId.value = null
+    appliedRequestFilters = null
+    requestRows.value = []
+    requestLoading.value = false
   }
 
   async function fetchSessions() {
@@ -700,19 +881,22 @@ export function useAiUsage() {
 
   function selectPage(next: PageKey) {
     page.value = next
-    if (next === 'requests') void fetchRequests()
+    if (next === 'requests') void fetchRequests(false)
     if (next === 'sessions') void fetchSessions()
     if (next === 'preview') void loadPreviewSettings()
   }
 
   function refreshCurrent() {
-    if (page.value === 'requests') return fetchRequests()
-    if (page.value === 'sessions') return fetchSessions()
-    if (page.value === 'preview') return loadPreviewSettings()
     return refresh()
   }
 
   watch([requestTool], () => {
+    if (page.value === 'requests') void fetchRequests()
+    else resetRequestPagination()
+  })
+
+  watch(requestPageSize, () => {
+    resetRequestPagination()
     if (page.value === 'requests') void fetchRequests()
   })
 
@@ -721,24 +905,52 @@ export function useAiUsage() {
   })
 
   watch([scope, accountScope], async () => {
-    if (payload.value) await refresh()
+    resetRequestPagination()
+    liveQuotas.value = null
+    quotaEstimates.value = []
+    if (payload.value) await readDashboard()
+    void readQuotas(false)
     if (page.value === 'requests') await fetchRequests()
     if (page.value === 'sessions') await fetchSessions()
   })
 
   onMounted(() => {
-    void refresh()
+    stopLifecycle = onPluginLifecycle((active) => {
+      uiActive = active
+      if (!active) return
+      if (syncing.value && syncPollTimer === undefined) void pollDataSync()
+      else if (payload.value) void refresh(false)
+      if (payload.value && Date.now() - lastQuotaRefresh >= QUOTA_REFRESH_MS) void refreshQuotas(false)
+    })
+    void readDashboard().then(() => {
+      if (disposed) return
+      void refresh(false)
+      void refreshQuotas(false)
+    })
     void loadQuotaNotificationSettings()
+    dataRefreshTimer = window.setInterval(() => {
+      if (uiActive && !loading.value) void refresh(true)
+    }, DATA_REFRESH_MS)
+    quotaRefreshTimer = window.setInterval(() => {
+      if (uiActive) void refreshQuotas(true)
+    }, QUOTA_REFRESH_MS)
   })
   onUnmounted(() => {
+    disposed = true
+    stopLifecycle?.()
     if (quotaNotificationTimer !== undefined) window.clearInterval(quotaNotificationTimer)
+    if (dataRefreshTimer !== undefined) window.clearInterval(dataRefreshTimer)
+    if (quotaRefreshTimer !== undefined) window.clearInterval(quotaRefreshTimer)
+    if (syncPollTimer !== undefined) window.clearTimeout(syncPollTimer)
+    if (quotaSettleTimer !== undefined) window.clearTimeout(quotaSettleTimer)
   })
   return {
     pages, previewWidgetOptions, defaultPreviewSettings, periodOptions, trendOptions,
     page, scope, accountScope, accountNameEditing, accountNameSaving, accountNameDraft,
     accountNameError, rootPathDraft, rootsSaving, rootsError, period, trendDays,
-    payload, loading, error, requestRows, requestLoading, requestError, sessionRows,
+    payload, loading, error, syncing, syncWarning, quotaLoading, quotaError, refreshQuotas, requestRows, requestLoading, requestError, sessionRows,
     sessionLoading, sessionError, requestTool, requestSearch, requestSince, requestUntil,
+    requestPage, requestPageSize, requestTotal, requestPageCount, goRequestPage,
     previewSettings, previewSettingsLoading, previewSettingsSaving, previewSettingsMessage,
     previewSettingsError, previewSample, report, selectedWindow, summary, toolRows,
     quotaNotificationRows, quotaNotificationSaving,
@@ -749,7 +961,7 @@ export function useAiUsage() {
     formatRequestCost, formatDuration, tokenBreakdownTitle, formatTime, formatDate, percent,
     toolName, toolInitial, quotaWindow, hasPreviewWidget, togglePreviewWidget,
     loadPreviewSettings, savePreviewSettings, resetPreviewSettings, quotaOrigin,
-    accountLabel, editAccountName, saveAccountName, resetLabel, refresh, fetchRequests,
+    accountLabel, editAccountName, saveAccountName, resetLabel, resetTimeText, quotaEstimate, previewQuotaEstimate, refresh, fetchRequests,
     fetchSessions, saveDataRoots, addDataRoot, removeDataRoot, selectPage, refreshCurrent,
     saveQuotaNotificationSettings,
   }

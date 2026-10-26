@@ -607,3 +607,16 @@ h1 { margin: 7px 0 3px; font-size: 23px; font-weight: 720; letter-spacing: -.035
   }
   .global-toolbar .updated-label { display: none; }
 }
+.quota-reset-details { align-items: flex-start; flex-direction: column; gap: 4px; }
+.quota-estimate-box { display: grid; gap: 6px; margin-top: 12px; padding: 10px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface-subtle); color: var(--text-muted); font-size: 9px; }
+.quota-estimate-box > div { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; }
+.quota-estimate-box strong { color: var(--text); font-size: 13px; }
+.quota-estimate-box small, .quota-estimate-note { color: var(--text-muted); font-size: 9px; line-height: 1.7; }
+.quota-alert-rule { flex-wrap: wrap; justify-content: flex-end; }
+.request-pagination { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; padding: 10px 12px; color: var(--text-muted); font-size: 10px; }
+.request-pagination > label { display: flex; align-items: center; gap: 7px; }
+.request-pagination select { height: 30px; padding: 0 7px; border: 1px solid var(--border); border-radius: 5px; background: var(--surface-subtle); color: var(--text); font: inherit; }
+.request-page-info { margin-right: auto; font-variant-numeric: tabular-nums; }
+.request-page-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.request-page-actions .refresh-button { min-height: 30px; font-size: 10px; }
+.request-page-actions button:disabled { cursor: default; opacity: .45; }

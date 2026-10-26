@@ -186,6 +186,27 @@ pub fn collect_within(budget: Duration) -> Vec<QuotaView> {
     collect_probes_within(budget, built_in(), cache::Cache::open("tokenme/quota", TTL))
 }
 
+/// Read-only snapshot: opening a dashboard must not spawn vendor probes.
+pub fn cached() -> Vec<QuotaView> {
+    cached_probes(built_in(), cache::Cache::open("tokenme/quota", TTL))
+}
+
+fn cached_probes(probes: Vec<Box<dyn QuotaProbe>>, cache: Option<cache::Cache>) -> Vec<QuotaView> {
+    let Some(cache) = cache else { return Vec::new() };
+    probes.iter().flat_map(|probe| cache.within(probe.tool(), cache::GRACE).unwrap_or_default()).collect()
+}
+
+/// Explicit subscription refresh bypasses freshness without deleting caches.
+pub fn refresh_within(budget: Duration) -> Vec<QuotaView> {
+    collect_probes_within(budget, built_in(), cache::Cache::open("tokenme/quota", Duration::ZERO))
+}
+
+pub fn cached_codex_for_account(account_id: &str) -> Vec<QuotaView> {
+    cache::Cache::open("tokenme/quota", TTL)
+        .and_then(|cache| cache.within(&codex_account_cache_key(account_id), cache::GRACE))
+        .map(codex_account_views).unwrap_or_default()
+}
+
 /// The identity of the account currently used by the local Codex credential.
 pub fn codex_account_id() -> Option<String> {
     providers::codex_account_id()
@@ -195,6 +216,14 @@ pub fn codex_account_id() -> Option<String> {
 /// bypasses the tool-wide quota cache: that cache predates account filtering
 /// and cannot prove which login produced its last answer.
 pub fn collect_codex_for_account(account_id: &str, budget: Duration) -> Vec<QuotaView> {
+    collect_codex_account(account_id, budget, false)
+}
+
+pub fn refresh_codex_for_account(account_id: &str, budget: Duration) -> Vec<QuotaView> {
+    collect_codex_account(account_id, budget, true)
+}
+
+fn collect_codex_account(account_id: &str, budget: Duration, force: bool) -> Vec<QuotaView> {
     let expected = account_id.to_string();
     if codex_account_id().as_deref() != Some(expected.as_str()) {
         return Vec::new();
@@ -202,8 +231,10 @@ pub fn collect_codex_for_account(account_id: &str, budget: Duration) -> Vec<Quot
 
     let cache_key = codex_account_cache_key(&expected);
     let cache = cache::Cache::open("tokenme/quota", TTL);
-    if let Some(rows) = cache.as_ref().and_then(|cache| cache.fresh(&cache_key)) {
-        return codex_account_views(rows);
+    if !force {
+        if let Some(rows) = cache.as_ref().and_then(|cache| cache.fresh(&cache_key)) {
+            return codex_account_views(rows);
+        }
     }
     let stale = cache
         .as_ref()
@@ -418,6 +449,24 @@ pub const BUDGET: Duration = Duration::from_secs(5);
 mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
+
+    #[test]
+    fn snapshot_reads_never_invoke_a_probe() {
+        struct NoFetch;
+        impl QuotaProbe for NoFetch {
+            fn tool(&self) -> &'static str { "snapshot-test" }
+            fn fetch(&self) -> Vec<QuotaSample> { panic!("snapshot must not contact vendors") }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let cache = cache::Cache::in_dir(dir.path().to_path_buf(), TTL);
+        cache.store("snapshot-test", &[QuotaSample {
+            used_percent: 42.0, window_minutes: 300, resets_at_ms: 0, label: None, id: None,
+        }]);
+        let rows = cached_probes(vec![Box::new(NoFetch)], Some(cache));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].used_percent, 42.0);
+        assert!(cached_probes(vec![Box::new(NoFetch)], None).is_empty());
+    }
 
     /// Tools that answer a quota question but have no log adapter (yet). The
     /// assertion below still catches a typo in any `tool()`.

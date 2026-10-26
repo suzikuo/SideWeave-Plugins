@@ -2,7 +2,7 @@
 import { inject } from 'vue'
 import { aiUsageKey } from '../context'
 
-const { accounts, accountScope, selectedAccount, accountLabel, editAccountName, scope, payload, updatedText, loading, requestLoading, refreshCurrent } = inject(aiUsageKey)!
+const { accounts, accountScope, selectedAccount, accountLabel, editAccountName, scope, payload, updatedText, loading, syncing, requestLoading, sessionLoading, refreshCurrent } = inject(aiUsageKey)!
 </script>
 
 <template>
@@ -19,9 +19,9 @@ const { accounts, accountScope, selectedAccount, accountLabel, editAccountName, 
       <option value="local">本机</option>
       <option v-for="root in payload?.data_roots ?? []" :key="root.id" :value="`origin:${root.id}`">{{ root.path }}</option>
     </select></label>
-    <span class="updated-label"><span class="sync-dot" :class="{ spinning: loading || requestLoading }"></span>{{ updatedText }}</span>
-    <button class="refresh-button global-refresh" title="刷新数据" aria-label="刷新数据" :disabled="loading || requestLoading" @click="refreshCurrent">
-      <span class="refresh-symbol" :class="{ spinning: loading || requestLoading }">↻</span>
+    <span class="updated-label" title="页面激活时，用量每 60 秒自动同步；订阅每 5 分钟独立刷新"><span class="sync-dot" :class="{ spinning: loading || syncing }"></span>{{ updatedText }}</span>
+    <button class="refresh-button global-refresh" title="同步本地用量数据（不刷新订阅）" aria-label="同步本地用量数据" :disabled="loading || syncing || requestLoading || sessionLoading" @click="refreshCurrent">
+      <span class="refresh-symbol" :class="{ spinning: loading || syncing }">↻</span>
     </button>
   </div>
 </template>

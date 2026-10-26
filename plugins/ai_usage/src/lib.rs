@@ -3,6 +3,11 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::time::Duration;
+use std::sync::OnceLock;
+
+mod data_sync;
+mod quota_estimates;
+mod quota_resets;
 
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
@@ -33,11 +38,14 @@ const QUOTA_NOTIFICATION_DAY_MS: i64 = 24 * 60 * 60 * 1_000;
 const QUOTA_RESET_DRIFT_TOLERANCE_MS: i64 = 15 * 60 * 1_000;
 static PRICING_REFRESH_ACTIVE: AtomicBool = AtomicBool::new(false);
 static PRICING_RETRY_AFTER_MS: AtomicI64 = AtomicI64::new(0);
+static DATA_SYNC: OnceLock<data_sync::DataSync> = OnceLock::new();
+const SOURCE_STATUS_KEY: &str = "ai_usage_source_status";
 
 sideweave_plugin_sdk::export_plugin_dylib!(AiUsagePlugin);
 
 pub struct AiUsagePlugin {
     manifest: PluginManifest,
+    reset_worker: Option<quota_resets::Worker>,
 }
 
 impl Default for AiUsagePlugin {
@@ -81,15 +89,19 @@ impl AiUsagePlugin {
                     data_method: None,
                     entry: Some("ui/preview.html".into()),
                 }),
-                auto_start: false,
+                auto_start: true,
                 minimum_host_version: None,
             },
+            reset_worker: None,
         }
     }
 
     fn call(&self, request: &PluginRequest, context: &PluginContext) -> Result<Value, String> {
         match request.method.as_deref() {
             Some("dashboard") => dashboard(&request.payload, context),
+            Some("sync_data") => Ok(json!(start_data_sync(request.payload.get("force").and_then(Value::as_bool).unwrap_or(false)))),
+            Some("get_sync_status") => Ok(json!(data_sync().status())),
+            Some("get_quotas") => quota_data(&request.payload, context),
             Some("requests") => request_rows(&request.payload),
             Some("sessions") => session_rows(&request.payload),
             Some("set_data_roots") => set_data_roots(&request.payload),
@@ -139,6 +151,7 @@ struct QuotaNotificationSettings {
 #[serde(default)]
 struct QuotaSubscriptionNotificationRule {
     enabled: bool,
+    reset_enabled: bool,
     remaining_thresholds_percent: Vec<u8>,
 }
 
@@ -146,6 +159,7 @@ impl Default for QuotaSubscriptionNotificationRule {
     fn default() -> Self {
         Self {
             enabled: false,
+            reset_enabled: false,
             remaining_thresholds_percent: vec![50, 10, 0],
         }
     }
@@ -229,10 +243,7 @@ fn read_quota_notification_settings(index: &Index) -> QuotaNotificationSettings 
 fn get_quota_notification_settings() -> Result<Value, String> {
     let index = open_index()?;
     let settings = read_quota_notification_settings(&index);
-    let quotas = catch_unwind(AssertUnwindSafe(|| {
-        usage_quota::collect_within(Duration::from_secs(2))
-    }))
-    .unwrap_or_default();
+    let quotas = usage_quota::cached();
     let subscriptions = quotas
         .iter()
         .filter(|quota| quota.origin == QuotaOrigin::Probe)
@@ -437,11 +448,9 @@ fn notify_quota_threshold(
 
 fn check_quota_notifications(context: &PluginContext) -> Result<Value, String> {
     let index = open_index()?;
-    let quotas = catch_unwind(AssertUnwindSafe(|| {
-        usage_quota::collect_within(Duration::from_secs(2))
-    }))
-    .unwrap_or_default();
-    let notifications_sent = notify_quota_threshold(&index, &quotas, context)?;
+    let quotas = usage_quota::cached();
+    let notifications_sent = notify_quota_threshold(&index, &quotas, context)?
+        + quota_resets::check(&index, context, &quotas)?;
     Ok(json!({ "notifications_sent": notifications_sent }))
 }
 
@@ -580,10 +589,7 @@ fn preview_data(context: &PluginContext) -> Result<Value, String> {
     let now = usage_core::report::now_ms();
     let since = now - 24 * 60 * 60 * 1000;
     let settings = read_preview_settings(&index);
-    let polled_quotas = catch_unwind(AssertUnwindSafe(|| {
-        usage_quota::collect_within(Duration::from_secs(2))
-    }))
-    .unwrap_or_default();
+    let polled_quotas = usage_quota::cached();
     let _ = notify_quota_threshold(&index, &polled_quotas, context);
     let last_ingest_ms = index
         .meta_value("last_ingest_ms")
@@ -675,6 +681,7 @@ fn preview_data(context: &PluginContext) -> Result<Value, String> {
     }
 
     let quotas = polled_quotas;
+    let quota_estimates = quota_estimates::collect(&index, &quotas, "all", &prices);
 
     serde_json::to_value(json!({
         "generated_at_ms": now,
@@ -684,8 +691,10 @@ fn preview_data(context: &PluginContext) -> Result<Value, String> {
         "output_tokens": output_tokens,
         "latest_ms": latest_ms,
         "last_ingest_ms": last_ingest_ms,
+        "sync_status": data_sync().status(),
         "tools": tools,
         "quotas": quotas,
+        "quota_estimates": quota_estimates,
         "cost_usd": cost_usd,
         "credit_cost_usd": credit_cost_usd,
         "unpriced_models": unpriced_models.len(),
@@ -700,10 +709,23 @@ impl Plugin for AiUsagePlugin {
     }
 
     fn handle(&mut self, request: PluginRequest, context: &PluginContext) -> PluginResponse {
-        if !matches!(&request.kind, PluginRequestKind::Call) {
-            return success_response(&request, Value::Null);
-        }
-        match self.call(&request, context) {
+        let result = match &request.kind {
+            PluginRequestKind::Activate => {
+                if self.reset_worker.is_none() {
+                    match quota_resets::Worker::start(context) {
+                        Ok(worker) => { self.reset_worker = Some(worker); Ok(Value::Null) },
+                        Err(error) => Err(error),
+                    }
+                } else { Ok(Value::Null) }
+            }
+            PluginRequestKind::Deactivate | PluginRequestKind::Shutdown => {
+                self.reset_worker = None;
+                Ok(Value::Null)
+            }
+            PluginRequestKind::Call => self.call(&request, context),
+            _ => Ok(Value::Null),
+        };
+        match result {
             Ok(value) => success_response(&request, value),
             Err(message) => PluginResponse {
                 request_id: request.request_id,
@@ -722,6 +744,7 @@ impl Plugin for AiUsagePlugin {
 #[derive(Serialize)]
 struct DashboardPayload {
     report: Report,
+    quota_estimates: Vec<quota_estimates::Estimate>,
     indexed_events: u64,
     last_ingest_ms: Option<i64>,
     refresh_warning: Option<String>,
@@ -910,6 +933,56 @@ fn ingest(index: &mut Index, adapters: &[Box<dyn usage_core::SourceAdapter>]) ->
     }
 }
 
+fn data_sync() -> &'static data_sync::DataSync {
+    DATA_SYNC.get_or_init(data_sync::DataSync::default)
+}
+
+fn start_data_sync(force: bool) -> data_sync::SyncStatus {
+    data_sync().start(force, || {
+        let mut index = open_index()?;
+        let adapters = adapters_for_roots(&read_data_roots(&index));
+        if let Some(warning) = ingest(&mut index, &adapters) {
+            return Err(warning);
+        }
+        let detected = catch_unwind(AssertUnwindSafe(usage_adapter_all::detect_all)).unwrap_or_default();
+        let sources = index.source_statuses(&detected).map_err(|error| error.to_string())?;
+        let value = serde_json::to_string(&sources).map_err(|error| error.to_string())?;
+        index.conn().execute("INSERT OR REPLACE INTO meta(key, value) VALUES(?1, ?2)", params![SOURCE_STATUS_KEY, value])
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    })
+}
+
+fn quotas_for_selection(payload: &Value, refresh: bool) -> Vec<QuotaView> {
+    if matches!(parse_scope(payload.get("scope").and_then(Value::as_str).unwrap_or("all")), MachineScope::Origin { .. }) {
+        return Vec::new();
+    }
+    let force = payload.get("force").and_then(Value::as_bool).unwrap_or(false);
+    let account = AccountFilter::from_selection(payload.get("account").and_then(Value::as_str).unwrap_or("all"));
+    catch_unwind(AssertUnwindSafe(|| match account {
+        AccountFilter::All if !refresh => usage_quota::cached(),
+        AccountFilter::All if force => usage_quota::refresh_within(Duration::from_secs(2)),
+        AccountFilter::All => usage_quota::collect_within(Duration::from_secs(2)),
+        AccountFilter::Account { tool, id } if tool == "codex" => {
+            if !refresh { usage_quota::cached_codex_for_account(&id) }
+            else if force { usage_quota::refresh_codex_for_account(&id, Duration::from_secs(2)) }
+            else { usage_quota::collect_codex_for_account(&id, Duration::from_secs(2)) }
+        }
+        _ => Vec::new(),
+    })).unwrap_or_default()
+}
+
+fn quota_data(payload: &Value, context: &PluginContext) -> Result<Value, String> {
+    let refresh = payload.get("refresh").and_then(Value::as_bool).unwrap_or(false);
+    let quotas = quotas_for_selection(payload, refresh);
+    let index = open_index()?;
+    let _ = notify_quota_threshold(&index, &quotas, context);
+    quota_resets::check(&index, context, &quotas)?;
+    let estimates = quota_estimates::collect(&index, &quotas,
+        payload.get("account").and_then(Value::as_str).unwrap_or("all"), &pricing());
+    Ok(json!({ "quotas": quotas, "quota_estimates": estimates }))
+}
+
 fn pricing() -> PricingMap {
     let mut options = usage_core::pricing::PricingOptions {
         offline: true,
@@ -956,10 +1029,9 @@ fn parse_scope(value: &str) -> MachineScope {
     }
 }
 
-fn dashboard(payload: &Value, context: &PluginContext) -> Result<Value, String> {
+fn dashboard(payload: &Value, _context: &PluginContext) -> Result<Value, String> {
     let mut index = open_index()?;
     let data_roots = read_data_roots(&index);
-    let adapters = adapters_for_roots(&data_roots);
     let supported_tools = usage_adapter_all::builtin_adapters()
         .iter()
         .map(|adapter| SupportedTool {
@@ -967,31 +1039,17 @@ fn dashboard(payload: &Value, context: &PluginContext) -> Result<Value, String> 
             display: adapter.display_name().to_string(),
         })
         .collect();
-    let warning = ingest(&mut index, &adapters);
-    let detected =
-        catch_unwind(AssertUnwindSafe(|| usage_adapter_all::detect_all())).unwrap_or_default();
-    let sources = index
-        .source_statuses(&detected)
-        .map_err(|error| format!("无法读取来源状态：{error}"))?;
+    let warning = data_sync().status().warning;
+    let cached_sources = index.meta_value(SOURCE_STATUS_KEY).ok().flatten()
+        .and_then(|value| serde_json::from_str::<Vec<usage_core::SourceStatus>>(&value).ok());
+    let sources = match cached_sources {
+        Some(sources) => sources,
+        None => index.source_statuses(&[]).map_err(|error| error.to_string())?,
+    };
     let scope = parse_scope(payload.get("scope").and_then(Value::as_str).unwrap_or("all"));
     let account_selection = payload.get("account").and_then(Value::as_str).unwrap_or("all");
     let account_filter = AccountFilter::from_selection(account_selection);
-    let quotas = if matches!(scope, MachineScope::Origin { .. }) {
-        Vec::new()
-    } else {
-        match &account_filter {
-            AccountFilter::All => {
-                catch_unwind(AssertUnwindSafe(|| usage_quota::collect_within(Duration::from_secs(2))))
-                    .unwrap_or_default()
-            }
-            AccountFilter::Account { tool, id: account_id } if tool == "codex" => catch_unwind(AssertUnwindSafe(|| {
-                usage_quota::collect_codex_for_account(account_id, Duration::from_secs(2))
-            }))
-            .unwrap_or_default(),
-            AccountFilter::Account { .. } | AccountFilter::Unknown(_) => Vec::new(),
-        }
-    };
-    let _ = notify_quota_threshold(&index, &quotas, context);
+    let quotas = quotas_for_selection(payload, false);
     let now = usage_core::report::now_ms();
     let plan = AggregatePlan::build(now, 200);
     let facts = index
@@ -1038,6 +1096,7 @@ fn dashboard(payload: &Value, context: &PluginContext) -> Result<Value, String> 
     options.budgets = load_budgets();
     options.recent_session_limit = 200;
     let report = summarize_facts(&facts, &options);
+    let quota_estimates = quota_estimates::collect(&index, &report.quotas, account_selection, &prices);
 
     let indexed_events = index
         .event_count()
@@ -1049,6 +1108,7 @@ fn dashboard(payload: &Value, context: &PluginContext) -> Result<Value, String> 
         .and_then(|value| value.parse::<i64>().ok());
     serde_json::to_value(DashboardPayload {
         report,
+        quota_estimates,
         indexed_events,
         last_ingest_ms,
         refresh_warning: warning,
@@ -1097,10 +1157,8 @@ struct SessionUsageAccumulator {
 }
 
 fn session_rows(payload: &Value) -> Result<Value, String> {
-    let mut index = open_index()?;
-    let data_roots = read_data_roots(&index);
-    let adapters = adapters_for_roots(&data_roots);
-    let warning = ingest(&mut index, &adapters);
+    let index = open_index()?;
+    let warning = data_sync().status().warning;
     let now = usage_core::report::now_ms();
     let since_ms = payload
         .get("since_ms")
@@ -1229,11 +1287,13 @@ fn session_rows(payload: &Value) -> Result<Value, String> {
 }
 
 fn request_rows(payload: &Value) -> Result<Value, String> {
-    let mut index = open_index()?;
-    let data_roots = read_data_roots(&index);
-    let adapters = adapters_for_roots(&data_roots);
-    let warning = ingest(&mut index, &adapters);
+    let index = open_index()?;
+    let warning = data_sync().status().warning;
     let now = usage_core::report::now_ms();
+    request_rows_from_index(&index, payload, now, &pricing(), warning)
+}
+
+fn request_rows_from_index(index: &Index, payload: &Value, now: i64, prices: &PricingMap, warning: Option<String>) -> Result<Value, String> {
     let retention_start = retention_cutoff(now);
     let since_ms = payload
         .get("since_ms")
@@ -1261,28 +1321,42 @@ fn request_rows(payload: &Value) -> Result<Value, String> {
         .unwrap_or(DEFAULT_REQUEST_LIMIT)
         .clamp(1, MAX_REQUEST_LIMIT);
 
+    // Count and fetch from the same SQLite read snapshot. Keep the highest
+    // event ID across pages so an ingest cannot shift new rows into that set.
+    let transaction = index.conn().unchecked_transaction().map_err(|error| error.to_string())?;
+    let snapshot_max_id = match payload.get("snapshot_max_id").and_then(Value::as_i64).filter(|id| *id >= 0) {
+        Some(id) => id,
+        None => transaction.query_row("SELECT COALESCE(MAX(id),0) FROM event", [], |row| row.get::<_, i64>(0))
+            .map_err(|error| error.to_string())?,
+    };
+    const FILTER: &str = "FROM event e LEFT JOIN event_extra extra ON extra.event_id = e.id \
+        WHERE e.ts_ms >= ?1 AND e.ts_ms <= ?2 AND e.id <= ?8 \
+          AND (?3 = '' OR e.tool = ?3) \
+          AND (?4 = 'all' OR (?4 = 'local' AND e.source NOT LIKE 'linux:%') \
+               OR (substr(?4, 1, 7) = 'origin:' AND e.source LIKE 'linux:' || substr(?4, 8) || ':%')) \
+          AND (?5 = '' OR instr(lower(COALESCE(e.session_title, '') || ' ' || COALESCE(e.project, '') || ' ' || COALESCE(e.model, '')), lower(?5)) > 0) \
+          AND (?6 = 'all' OR (?6 = 'account' AND e.tool || '|' || extra.account_id = ?7) \
+               OR (?6 = 'unknown' AND e.tool || '|' || COALESCE(extra.account_id, '') = ?7))";
+    let total = transaction.query_row(&format!("SELECT COUNT(*) {FILTER}"),
+        params![since_ms, until_ms, tool, scope, search, account_kind, account_key, snapshot_max_id],
+        |row| row.get::<_, i64>(0)).map_err(|error| format!("无法统计请求明细：{error}"))? as u64;
+    let total_pages = total.div_ceil(limit as u64).max(1);
+    let page = payload.get("page").and_then(Value::as_u64).unwrap_or(1).clamp(1, total_pages);
+    let offset = (page - 1) * limit as u64;
+
     // This query reads only event metadata and source-provided session titles
     // already in the local index; prompts and responses are never returned.
-    let mut statement = index
-        .conn()
+    let mut statement = transaction
         .prepare(
-            "SELECT e.tool, e.ts_ms, e.session, e.session_title, e.project, e.model, extra.account_id, extra.duration_ms, \
+            &format!("SELECT e.tool, e.ts_ms, e.session, e.session_title, e.project, e.model, extra.account_id, extra.duration_ms, \
                     COALESCE(e.in_tok, 0), COALESCE(e.cc_tok, 0), COALESCE(e.cr_tok, 0), \
                     COALESCE(e.out_tok, 0), COALESCE(e.reason_tok, 0), COALESCE(e.credits, 0) \
-             FROM event e LEFT JOIN event_extra extra ON extra.event_id = e.id \
-             WHERE e.ts_ms >= ?1 AND e.ts_ms <= ?2 \
-               AND (?3 = '' OR e.tool = ?3) \
-               AND (?4 = 'all' OR (?4 = 'local' AND e.source NOT LIKE 'linux:%') \
-                    OR (substr(?4, 1, 7) = 'origin:' AND e.source LIKE 'linux:' || substr(?4, 8) || ':%')) \
-               AND (?5 = '' OR instr(lower(COALESCE(e.session_title, '') || ' ' || COALESCE(e.project, '') || ' ' || COALESCE(e.model, '')), lower(?5)) > 0) \
-               AND (?7 = 'all' OR (?7 = 'account' AND e.tool || '|' || extra.account_id = ?8) \
-                    OR (?7 = 'unknown' AND e.tool || '|' || COALESCE(extra.account_id, '') = ?8)) \
-             ORDER BY e.ts_ms DESC, e.id DESC LIMIT ?6",
+             {FILTER} ORDER BY e.ts_ms DESC, e.id DESC LIMIT ?9 OFFSET ?10"),
         )
         .map_err(|error| format!("无法读取请求明细：{error}"))?;
     let records = statement
         .query_map(
-            params![since_ms, until_ms, tool, scope, search, limit as i64, account_kind, account_key],
+            params![since_ms, until_ms, tool, scope, search, account_kind, account_key, snapshot_max_id, limit as i64, offset as i64],
             |row| {
                 Ok(RequestRow {
                     tool: row.get(0)?,
@@ -1312,8 +1386,8 @@ fn request_rows(payload: &Value) -> Result<Value, String> {
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| format!("无法读取请求明细：{error}"))?;
     drop(statement);
+    transaction.commit().map_err(|error| error.to_string())?;
 
-    let prices = pricing();
     for row in &mut rows {
         // Codex only records duration for a whole task, so it cannot be shown
         // as a per-request duration in this event-level list.
@@ -1328,9 +1402,87 @@ fn request_rows(payload: &Value) -> Result<Value, String> {
 
     Ok(json!({
         "rows": rows,
+        "total": total,
+        "page": page,
+        "page_size": limit,
+        "total_pages": total_pages,
+        "snapshot_max_id": snapshot_max_id,
         "since_ms": since_ms,
         "until_ms": until_ms,
         "refresh_warning": warning,
         "scope": scope,
     }))
+}
+
+#[cfg(test)]
+mod request_pagination_tests {
+    use super::*;
+    const NOW: i64 = 1_790_000_000_000;
+
+    fn add(index: &Index, session: &str, source: &str, account: &str, title: &str) {
+        index.conn().execute("INSERT INTO event(tool,ts_ms,session,session_title,model,meter,in_tok,source) VALUES('codex',?1,?2,?3,'gpt-5','tokens',10,?4)",
+            params![NOW - 1, session, title, source]).unwrap();
+        let id = index.conn().last_insert_rowid();
+        index.conn().execute("INSERT INTO event_extra(event_id,account_id) VALUES(?1,?2)", params![id, account]).unwrap();
+    }
+
+    #[test]
+    fn pages_reach_every_record_past_200_without_new_ingests_shifting_them() {
+        let index = Index::open_in_memory().unwrap();
+        for id in 0..425 { add(&index, &format!("s-{id}"), "local", "a", "Task"); }
+        let prices = PricingMap::default();
+        let first = request_rows_from_index(&index, &json!({"limit": 200}), NOW, &prices, None).unwrap();
+        assert_eq!(first["total"], 425);
+        assert_eq!(first["total_pages"], 3);
+        let mut sessions: HashSet<String> = first["rows"].as_array().unwrap().iter().map(|row| row["session"].as_str().unwrap().into()).collect();
+        assert_eq!(sessions.len(), 200);
+        add(&index, "new-after-first-page", "local", "a", "Task");
+        for page in [2, 3] {
+            let result = request_rows_from_index(&index, &json!({"limit": 200, "page": page, "snapshot_max_id": first["snapshot_max_id"]}), NOW, &prices, None).unwrap();
+            assert_eq!(result["total"], 425);
+            assert_eq!(result["rows"].as_array().unwrap().len(), if page == 2 { 200 } else { 25 });
+            for row in result["rows"].as_array().unwrap() { assert!(sessions.insert(row["session"].as_str().unwrap().into())); }
+        }
+        assert_eq!(sessions.len(), 425);
+        assert!(!sessions.contains("new-after-first-page"));
+        let fresh = request_rows_from_index(&index, &json!({"limit": 100}), NOW, &prices, None).unwrap();
+        assert_eq!(fresh["total"], 426);
+        assert_eq!(fresh["rows"][0]["session"], "new-after-first-page");
+    }
+
+    #[test]
+    fn count_and_page_rows_share_search_source_account_and_date_filters() {
+        let index = Index::open_in_memory().unwrap();
+        add(&index, "match-1", "local", "a", "Match title");
+        add(&index, "match-2", "local", "a", "Match title");
+        add(&index, "other-account", "local", "b", "Match title");
+        add(&index, "other-source", "linux:remote:file", "a", "Match title");
+        add(&index, "other-title", "local", "a", "Other title");
+        let prices = PricingMap::default();
+        let query = json!({"limit": 1, "page": u64::MAX, "scope": "local", "account": "account:codex|a", "search": "match", "since_ms": NOW - 60_000, "until_ms": NOW});
+        let result = request_rows_from_index(&index, &query, NOW, &prices, None).unwrap();
+        assert_eq!(result["total"], 2);
+        assert_eq!(result["total_pages"], 2);
+        assert_eq!(result["page"], 2);
+        assert_eq!(result["rows"][0]["session"], "match-1");
+        let mut no_match = query.clone();
+        no_match["tool"] = json!("claude");
+        assert_eq!(request_rows_from_index(&index, &no_match, NOW, &prices, None).unwrap()["total"], 0);
+        no_match = query;
+        no_match["since_ms"] = json!(NOW);
+        assert_eq!(request_rows_from_index(&index, &no_match, NOW, &prices, None).unwrap()["total"], 0);
+    }
+
+    #[test]
+    fn empty_queries_and_invalid_page_sizes_are_bounded() {
+        let index = Index::open_in_memory().unwrap();
+        let prices = PricingMap::default();
+        let result = request_rows_from_index(&index, &json!({"page": u64::MAX, "limit": 0}), NOW, &prices, None).unwrap();
+        assert_eq!(result["total"], 0);
+        assert_eq!(result["page"], 1);
+        assert_eq!(result["total_pages"], 1);
+        assert_eq!(result["page_size"], 1);
+        let result = request_rows_from_index(&index, &json!({"limit": u64::MAX}), NOW, &prices, None).unwrap();
+        assert_eq!(result["page_size"], MAX_REQUEST_LIMIT);
+    }
 }
