@@ -4,7 +4,7 @@
   "id": "quick_access",
   "name": "快捷入口",
   "icon": "ui/icon.svg",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "统一管理本地应用与网页书签的快速访问入口",
   "author": "SideWeave",
   "type": "native",

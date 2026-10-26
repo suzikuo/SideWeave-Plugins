@@ -10,6 +10,7 @@ param(
     [string]$SigningKeyPath = "",
     [string]$MinisignExe = "",
     [string]$Notes = "",
+    [switch]$AutoBumpVersion,
     [switch]$LocalOnly,
     [switch]$SkipBuild,
     [switch]$SkipMarketplaceUpdate,
@@ -17,6 +18,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot 'package-version.ps1')
 $RepoRoot = Split-Path $PSScriptRoot -Parent
 $WorkspaceRoot = Split-Path $RepoRoot -Parent
 $ReleaseBuildScript = Join-Path $RepoRoot "tools/release-package-local.ps1"
@@ -671,9 +673,6 @@ foreach ($plugin in $selectedPlugins) {
 }
 
 if (-not $LocalOnly -and -not (Get-Command gh -ErrorAction SilentlyContinue)) { throw "未找到 GitHub CLI。请安装 gh 并运行 gh auth login。" }
-if (-not (Test-Path -LiteralPath $MinisignExe -PathType Leaf)) { throw "未找到 Minisign。请安装 minisign 或使用 -MinisignExe 指定路径。" }
-if (-not (Test-Path -LiteralPath $SigningKeyPath -PathType Leaf)) { throw "未找到 SideWeave publisher 私钥：$SigningKeyPath" }
-
 if ($LocalOnly) {
     Write-Host ""
     Write-Host "本地打包模式：允许未提交改动，不检查 GitHub 登录，也不会上传。" -ForegroundColor Cyan
@@ -682,8 +681,44 @@ else {
     Write-Host ""
     Write-Host "检查 GitHub 登录和插件源码状态..." -ForegroundColor Cyan
     Invoke-Gh @("auth", "status", "--hostname", "github.com")
-    $sourceCommit = Assert-LocalSourceMatchesGitHub
 }
+
+# Resolve all selected versions before asking for a key password or building any package.
+$headCommit = Get-GitText $RepoRoot @('rev-parse', 'HEAD')
+$versionPlan = @(Get-PackageVersionPlan -Plugins $selectedPlugins -LocalMode ([bool]$LocalOnly) -Commit $headCommit)
+if ($versionPlan.Count -gt 0) {
+    Write-Host ""
+    Write-Host "以下版本需要升级（建议递增补丁版本）：" -ForegroundColor Yellow
+    foreach ($item in $versionPlan) {
+        Write-Host "  $($item.Plugin.kind)/$($item.Plugin.id)：$($item.OldVersion) -> $($item.NewVersion)"
+        Write-Host "    $($item.Reason)"
+    }
+    if ($PreviewOnly) {
+        Write-Host "PreviewOnly：仅显示版本升级建议，未修改版本、构建或上传。" -ForegroundColor Yellow
+        return
+    }
+    if ($SkipBuild) { throw "版本升级后需要重新构建签名包；请移除 -SkipBuild 后重试。" }
+    if (-not $AutoBumpVersion -and -not (Read-YesNo "自动更新以上版本及关联的 Cargo 文件？")) {
+        Write-Host "已取消；未修改版本，也未开始构建。"
+        return
+    }
+    $updatedPaths = @(Update-PackageVersions -Plan $versionPlan)
+    Write-Host "版本已更新：" -ForegroundColor Green
+    foreach ($path in $updatedPaths) { Write-Host "  $path" }
+    if (-not $LocalOnly) {
+        Write-Host "请先提交并推送上述版本改动，再重新运行发布向导；本次尚未构建或上传。" -ForegroundColor Yellow
+        return
+    }
+}
+if (-not $LocalOnly) {
+    $sourceCommit = Assert-LocalSourceMatchesGitHub
+    foreach ($plugin in $selectedPlugins) {
+        $tag = "$($plugin.kind)-$($plugin.id)-v$($plugin.version)"
+        Assert-TagTargetsCommit -Tag $tag -Commit $sourceCommit -ReleaseInfo (Get-ReleaseInfo $tag)
+    }
+}
+if (-not (Test-Path -LiteralPath $MinisignExe -PathType Leaf)) { throw "未找到 Minisign。请安装 minisign 或使用 -MinisignExe 指定路径。" }
+if (-not (Test-Path -LiteralPath $SigningKeyPath -PathType Leaf)) { throw "未找到 SideWeave publisher 私钥：$SigningKeyPath" }
 
 $builtPackages = @()
 $signingKeyPassword = $null
@@ -693,7 +728,7 @@ if (-not $SkipBuild) {
 try {
     foreach ($plugin in $selectedPlugins) {
         $pluginId = [string]$plugin.id
-        $pluginVersion = if ($Version) { $Version } else { [string]$plugin.version }
+        $pluginVersion = [string]$plugin.version
         if (-not $SkipBuild) {
             Write-Host ""
             Write-Host "开始构建并签名 $($plugin.kind)/$pluginId v$pluginVersion..." -ForegroundColor Cyan

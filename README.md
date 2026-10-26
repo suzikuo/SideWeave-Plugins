@@ -68,7 +68,12 @@ Common non-interactive forms:
     # Publish a package without changing the Marketplace or deleting old Releases.
     powershell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-wizard.ps1 -SkipBuild -SkipMarketplaceUpdate -Id time
 
-The version comes from each item's `manifest.json`; native plugin versions must also match their Cargo package. Bump and commit the applicable version fields before publishing. `-Id all` or a comma-separated ID list selects multiple plugins and skins; batch mode uses each item's manifest version. `-SkipMarketplaceUpdate` is for an intentional release-only operation; it also keeps older Releases and tags.
+The version comes from each item's `manifest.json`; native plugin versions must also match their Cargo package. Before building, the wizard checks tags for all selected items. If a version is already tagged at a different source commit or would regress, it proposes an unused patch version and asks whether to update the manifest, Cargo package, and lockfile together. Use `-AutoBumpVersion` to accept these version updates automatically. Local builds continue with the new versions; publishing stops after updating files so you can commit and push them, then rerun the wizard. Existing tags are never overwritten. `-PreviewOnly` only shows suggestions, and `-SkipBuild` requires a rebuild when a version conflict is found. Local mode checks remote tags when reachable and falls back to local tags with a warning when offline.
+
+    # Automatically accept required version bumps before packaging.
+    powershell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-wizard.ps1 -LocalOnly -Id quick_access -AutoBumpVersion
+
+`-Id all` or a comma-separated ID list selects multiple plugins and skins; batch mode uses each item's manifest version. `-SkipMarketplaceUpdate` is for an intentional release-only operation; it also keeps older Releases and tags.
 
 ## SDK dependencies
 
