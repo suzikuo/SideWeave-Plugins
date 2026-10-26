@@ -71,24 +71,23 @@ impl Attribution {
         }
         match parser::parse_record(raw)? {
             Record::SessionMeta { session, account_id, cwd, model, title } => {
-                // A second `session_meta` is a new session boundary inside the same
-                // file (a resumed or forked rollout), so a stale turn model must not
-                // leak across it.
-                self.turn_model = None;
-                self.current_turn_id = None;
-                self.task_started_ms = None;
-                self.previous_usage = None;
+                // Codex can repeat the SAME session header just after a
+                // turn_context, without a model. It must not erase that turn's
+                // attribution. Only an explicitly different session is a boundary.
+                if session.as_deref().is_some_and(|id| id != self.session) {
+                    *self = Self { session: self.session.clone(), ..Self::default() };
+                }
                 if let Some(s) = session {
                     self.session = s;
                 }
-                self.account_id = account_id;
+                if account_id.is_some() { self.account_id = account_id; }
                 if cwd.is_some() {
                     self.project = cwd;
                 }
                 if model.is_some() {
                     self.meta_model = model;
                 }
-                self.session_title = title;
+                if title.is_some() { self.session_title = title; }
                 None
             }
             Record::TurnContext { turn_id, model, cwd } => {
@@ -536,6 +535,27 @@ mod tests {
         assert!(a.apply(&token_count(500.0, 500.0)).is_some());
         a.apply(&meta("s2"));
         assert!(a.apply(&token_count(500.0, 500.0)).is_some());
+    }
+
+    #[test]
+    fn repeated_meta_keeps_dedupe_and_new_session_clears_all_attribution() {
+        let mut state = new_state();
+        state.apply(&meta("s1"));
+        state.apply(r#"{"type":"session_meta","payload":{"id":"s1","model":"meta-model","creator_account_id":"account-a","title":"Title"}}"#);
+        state.apply(r#"{"type":"turn_context","payload":{"turn_id":"turn-a","model":"gpt-6-luna"}}"#);
+        assert!(state.apply(&token_count(500.0, 500.0)).is_some());
+        state.apply(&meta("s1"));
+        assert_eq!(state.model().as_deref(), Some("gpt-6-luna"));
+        assert_eq!(state.account_id.as_deref(), Some("account-a"));
+        assert_eq!(state.current_turn_id.as_deref(), Some("turn-a"));
+        assert_eq!(state.session_title.as_deref(), Some("Title"));
+        assert!(state.apply(&token_count(500.0, 500.0)).is_none(), "repeated metadata must not bill repeated usage");
+        state.apply(&meta("s2"));
+        assert_eq!(state.model(), None, "a different session must not inherit either model");
+        assert_eq!(state.account_id, None);
+        assert_eq!(state.current_turn_id, None);
+        assert_eq!(state.session_title, None);
+        assert!(state.apply(&token_count(500.0, 500.0)).is_some());
     }
 
     #[test]

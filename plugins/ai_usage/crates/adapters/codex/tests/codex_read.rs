@@ -55,9 +55,8 @@ fn fixture_maps_the_verified_sample_exactly() {
     assert_eq!(usage_core::parse_ts_ms("2026-09-23T11:32:31.944Z").unwrap(), e.ts_ms);
     assert_eq!(e.source, source_file(&fixture_path()).key());
     assert!(e.calls.is_empty());
-    // dedupe_key: None on purpose — Codex records carry no per-call id, so
-    // idempotency comes from the byte cursor instead.
-    assert_eq!(e.dedupe_key, None);
+    // Stable line identity also allows later metadata repairs without rebilling.
+    assert_eq!(e.dedupe_key.as_deref(), Some("codex#01a0ce03-33ce-7172-848c-7199f1589e2e#865"));
     assert!(cursor.0 > 0 && cursor.0 <= source_file(&fixture_path()).size);
     assert_eq!(events[1].model.as_deref(), Some("gpt-5.5-codex"), "later turn_context wins");
     assert_eq!(events[1].counts.total(), 8402.0);
@@ -158,6 +157,56 @@ fn model_attribution_follows_turn_then_meta_then_nothing() {
         events[0].session, "00000000-0000-0000-0000-000000000003",
         "session id falls back to the uuid in the file name"
     );
+}
+
+#[test]
+fn repeated_session_headers_preserve_turn_model_across_full_and_incremental_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let session = "01a176bc-18e2-7721-939d-6fc1be2eb32f";
+    let header = format!(r#"{{"type":"session_meta","payload":{{"id":"{session}","cwd":"/fixture"}}}}"#);
+    let context = r#"{"type":"turn_context","payload":{"turn_id":"turn-a","model":"gpt-6-luna"}}"#;
+    let usage = |input: u64| format!(r#"{{"timestamp":"2026-10-26T05:49:51.807Z","type":"event_msg","payload":{{"type":"token_count","info":{{"last_token_usage":{{"input_tokens":{input},"cached_input_tokens":100,"output_tokens":10,"total_tokens":{}}}}}}}}}"#, input + 10);
+    let prefix = format!("{header}\n{context}\n{}\n", usage(200));
+    let suffix = format!("{header}\n{}\n", usage(300));
+    let path = write_tmp(dir.path(), &format!("rollout-2026-10-26T13-43-21-{session}.jsonl"), &(prefix.clone() + &suffix));
+    let (full, _) = read(&path, ReadCursor(0));
+    let (incremental, _) = read(&path, ReadCursor(prefix.len() as u64));
+    assert_eq!(full.len(), 2);
+    assert_eq!(incremental.len(), 1);
+    for event in full.iter().chain(&incremental) {
+        assert_eq!(event.model.as_deref(), Some("gpt-6-luna"));
+        assert_eq!(event.turn_id.as_deref(), Some("turn-a"));
+    }
+    assert_eq!(full[1].dedupe_key, incremental[0].dedupe_key);
+    assert_eq!(full[1].counts, incremental[0].counts);
+
+    // A real model switch in the same session still takes effect immediately.
+    let switched = format!("{prefix}{header}\n{{\"type\":\"turn_context\",\"payload\":{{\"turn_id\":\"turn-b\",\"model\":\"gpt-6.1-sol\"}}}}\n{header}\n{}\n", usage(400));
+    std::fs::write(&path, switched).unwrap();
+    let (events, _) = read(&path, ReadCursor(0));
+    assert_eq!(events[0].model.as_deref(), Some("gpt-6-luna"));
+    assert_eq!(events[1].model.as_deref(), Some("gpt-6.1-sol"));
+}
+
+#[test]
+#[ignore = "reads CODEX_MODEL_REGRESSION_ROLLOUT; prints aggregate metadata only"]
+fn real_repeated_meta_model_regression() {
+    let path = PathBuf::from(std::env::var_os("CODEX_MODEL_REGRESSION_ROLLOUT").expect("set the regression rollout path"));
+    let (events, _) = read(&path, ReadCursor(0));
+    assert!(!events.is_empty());
+    let missing = events.iter().filter(|event| event.model.is_none()).count();
+    let mut models = std::collections::BTreeMap::<String, usize>::new();
+    for event in &events {
+        *models.entry(event.model.clone().unwrap_or_else(|| "unknown".into())).or_default() += 1;
+    }
+    eprintln!("Codex model regression: requests={}, unknown={missing}, models={models:?}", events.len());
+    assert_eq!(missing, 0, "this regression rollout explicitly names each turn's model");
+    for event in &events {
+        let offset = event.dedupe_key.as_ref().unwrap().rsplit('#').next().unwrap().parse().unwrap();
+        let (resumed, _) = read(&path, ReadCursor(offset));
+        let same = resumed.iter().find(|item| item.dedupe_key == event.dedupe_key).unwrap();
+        assert_eq!(same.model, event.model, "full and incremental scans must agree");
+    }
 }
 
 #[test]

@@ -567,6 +567,20 @@ impl Index {
             )
             .map_err(sql_err)?;
         }
+        let codex_models: Option<String> = conn
+            .query_row("SELECT value FROM meta WHERE key = 'codex_repeated_meta_models_v1'", [], |row| row.get(0))
+            .optional().map_err(sql_err)?;
+        if codex_models.as_deref() != Some("1") {
+            // Replay only files with missing model labels and stable line keys.
+            // Configured WSL roots also use linux: keys, so include them. Imported
+            // events without a matching live file_state need no cursor repair.
+            conn.execute("DELETE FROM file_state WHERE tool = 'codex' AND EXISTS \
+                (SELECT 1 FROM event e WHERE e.tool = 'codex' AND e.source = file_state.source_key \
+                 AND NULLIF(TRIM(e.model), '') IS NULL AND e.dedupe_key LIKE 'codex#%')", [])
+                .map_err(sql_err)?;
+            conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('codex_repeated_meta_models_v1', '1')", [])
+                .map_err(sql_err)?;
+        }
         let antigravity_titles: Option<String> = conn
             .query_row("SELECT value FROM meta WHERE key = 'antigravity_titles_v1'", [], |row| row.get(0))
             .optional().map_err(sql_err)?;
@@ -1382,6 +1396,33 @@ mod tests {
         assert_eq!(idx.event_count().unwrap(), 0);
         assert_eq!(idx.meta_value("schema_version").unwrap().as_deref(), Some(SCHEMA_VERSION));
         assert!(idx.meta_value("index_id").unwrap().is_some());
+    }
+
+    #[test]
+    fn codex_model_repair_replays_only_keyed_unknown_sources_including_live_wsl() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        {
+            let idx = Index::open(&path).unwrap();
+            idx.conn().execute_batch("DELETE FROM meta WHERE key = 'codex_repeated_meta_models_v1';
+                INSERT INTO event(tool,ts_ms,session,model,meter,in_tok,source,dedupe_key) VALUES
+                    ('codex',1,'s',NULL,'tokens',123,'linux:root-live:file','codex#s#123'),
+                    ('codex',1,'s','known','tokens',456,'local-known','codex#s#456'),
+                    ('codex',1,'s',NULL,'tokens',789,'legacy-unkeyed',NULL),
+                    ('codex',1,'s',NULL,'tokens',12,'linux:imported:file','codex#s#12');
+                INSERT INTO file_state(source_key,tool) VALUES('linux:root-live:file','codex'),('local-known','codex'),('legacy-unkeyed','codex');").unwrap();
+        }
+        {
+            let idx = Index::open(&path).unwrap();
+            assert_eq!(idx.event_count().unwrap(), 4, "repair must not delete usage");
+            let keys: Vec<String> = idx.conn().prepare("SELECT source_key FROM file_state ORDER BY source_key").unwrap()
+                .query_map([], |row| row.get(0)).unwrap().collect::<std::result::Result<_, _>>().unwrap();
+            assert_eq!(keys, vec!["legacy-unkeyed", "local-known"]);
+            idx.conn().execute("INSERT INTO file_state(source_key,tool) VALUES('linux:root-live:file','codex')", []).unwrap();
+        }
+        let idx = Index::open(&path).unwrap();
+        let files: i64 = idx.conn().query_row("SELECT COUNT(*) FROM file_state", [], |row| row.get(0)).unwrap();
+        assert_eq!(files, 3, "replay is requested only once");
     }
 
     #[test]
