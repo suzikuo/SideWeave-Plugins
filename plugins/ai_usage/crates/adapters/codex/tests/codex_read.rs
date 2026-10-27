@@ -35,6 +35,37 @@ fn write_tmp(dir: &Path, name: &str, body: &str) -> PathBuf {
     p
 }
 
+#[test]
+fn recorded_effort_and_speed_survive_incremental_reads_and_turn_switches() {
+    use serde_json::json;
+    use std::io::Write;
+    let usage = |n: i64| json!({"timestamp":"2026-09-23T12:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":40,"output_tokens":10,"reasoning_output_tokens":8,"total_tokens":50},"total_token_usage":{"total_tokens":n}}}}).to_string();
+    let settings = |effort: Option<&str>, tier: Option<&str>| json!({"type":"event_msg","payload":{"type":"thread_settings_applied","thread_settings":{"reasoning_effort":effort,"service_tier":tier}}}).to_string();
+    let context = |turn: &str, effort: Option<&str>| json!({"type":"turn_context","payload":{"turn_id":turn,"model":"gpt-6-luna","effort":effort}}).to_string();
+    let prefix = [
+        r#"{"type":"session_meta","payload":{"id":"00000000-0000-0000-0000-000000000001","creator_account_id":"account"}}"#.to_string(),
+        usage(50), // Startup usage without settings is genuinely unknown.
+        settings(Some("high"),Some("priority")), context("a",Some("high")),usage(100),
+    ].join("\n") + "\n";
+    let suffix = [
+        settings(Some("low"),Some("default")),usage(150), // Future defaults do not relabel turn a.
+        context("b",Some("low")),usage(200),
+        settings(None,None),context("c",None),usage(250), // Clears must not inherit Fast/high.
+        r#"{"type":"turn_context","payload":{"turn_id":"d","model":"gpt-6-luna","collaboration_mode":{"settings":{"reasoning_effort":"xhigh"}},"service_tier":"fast"}}"#.to_string(),usage(300),
+        r#"{"type":"turn_context","payload":{"turn_id":"e","model":"gpt-6-luna","effort":null,"service_tier":null}}"#.to_string(),usage(350),
+    ].join("\n") + "\n";
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_tmp(dir.path(),"rollout-2026-09-23T12-00-00-00000000-0000-0000-0000-000000000001.jsonl",&prefix);
+    let (mut incremental,cursor) = read(&path,ReadCursor(0));
+    std::fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(suffix.as_bytes()).unwrap();
+    incremental.extend(read(&path,cursor).0);
+    let (full,_) = read(&path,ReadCursor(0));
+    assert_eq!(incremental,full,"cursor resume must reproduce the same labels and stable dedupe keys");
+    let modes: Vec<_> = full.iter().map(|e|(e.reasoning_effort.as_deref(),e.service_tier.as_deref())).collect();
+    assert_eq!(modes,vec![(None,None),(Some("high"),Some("priority")),(Some("high"),Some("priority")),(Some("low"),Some("default")),(None,None),(Some("xhigh"),Some("fast")),(None,None)]);
+    assert!(full.iter().all(|e|e.counts.total()==50.0 && e.counts.output==10.0 && e.counts.reasoning==8.0),"settings cannot change measured tokens or count reasoning twice");
+}
+
 /// The three numeric traps asserted together on the verified real record.
 #[test]
 fn fixture_maps_the_verified_sample_exactly() {

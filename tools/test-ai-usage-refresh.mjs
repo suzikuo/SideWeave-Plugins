@@ -90,6 +90,48 @@ test('initial snapshot is available while the first scan is still running', asyn
   assert.equal(host.calls.filter((call) => call.method === 'dashboard').length, 2)
 })
 
+test('preview range changes refresh real sample data and persist only on save', async (t) => {
+  const host = await mount(t)
+  let saved = { widgets: ['tokens', 'requests'], display_mode: 'compact', time_range: 'today' }
+  const sample = (range) => ({ settings: { ...saved, time_range: range }, requests: range === 'today' ? 1 : 24, quotas: [], tools: [] })
+  host.responses.get_preview = payload => sample(payload?.time_range ?? saved.time_range)
+  host.responses.set_preview_settings = payload => { saved = { ...payload }; return saved }
+  await host.state.loadPreviewSettings()
+  assert.equal(host.state.previewSettings.value.time_range, 'today')
+  assert.equal(host.state.previewSample.value.requests, 1)
+  host.calls.length = 0
+  host.state.setPreviewTimeRange('last_24h')
+  await flush()
+  assert.equal(host.state.previewSample.value.requests, 24)
+  assert.equal(host.state.previewRangeLabel.value, '最近 24 小时')
+  assert.ok(!host.calls.some(call => call.method === 'set_preview_settings'))
+  await host.state.savePreviewSettings()
+  assert.equal(saved.time_range, 'last_24h')
+  assert.equal(saved.display_mode, 'compact')
+  await host.state.loadPreviewSettings()
+  assert.equal(host.state.previewSettings.value.time_range, 'last_24h')
+  host.state.resetPreviewSettings()
+  await flush()
+  assert.equal(host.state.previewSample.value.requests, 1)
+  assert.equal(host.state.previewRangeLabel.value, '今天')
+  assert.equal(saved.time_range, 'last_24h', 'reset is a draft until saved')
+})
+
+test('slow preview responses cannot replace the most recently selected range', async (t) => {
+  const host = await mount(t)
+  const pending = {}
+  host.responses.get_preview = payload => new Promise(resolve => { pending[payload.time_range] = resolve })
+  host.state.setPreviewTimeRange('last_24h')
+  host.state.setPreviewTimeRange('today')
+  pending.today({ settings: { time_range: 'today' }, requests: 1 })
+  await flush()
+  pending.last_24h({ settings: { time_range: 'last_24h' }, requests: 24 })
+  await flush()
+  assert.equal(host.state.previewSample.value.requests, 1)
+  assert.equal(host.state.previewRangeLabel.value, '今天')
+  assert.equal(host.state.previewSampleLoading.value, false)
+})
+
 test('data and subscription refresh use separate endpoints and manual quota bypasses TTL', async (t) => {
   const host = await mount(t)
   await host.finishScan()

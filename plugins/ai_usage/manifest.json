@@ -4,7 +4,7 @@
   "id": "ai_usage",
   "name": "AI 用量",
   "icon": "ui/icon.svg",
-  "version": "0.4.13",
+  "version": "0.4.14",
   "description": "汇总本机 AI 编程工具的 Token、估算费用、会话和订阅配额。",
   "author": "SideWeave",
   "type": "native",

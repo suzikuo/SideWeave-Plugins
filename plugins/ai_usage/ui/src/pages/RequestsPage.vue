@@ -3,6 +3,11 @@ import { inject } from 'vue'
 import { aiUsageKey } from '../context'
 
 const { requestSince, requestUntil, requestTool, requestTools, requestSearch, fetchRequests, requestError, requestLoading, requestRows, requestPage, requestPageSize, requestTotal, requestPageCount, goRequestPage, toolInitial, toolName, tokenBreakdownTitle, formatTokens, formatRequestCost, formatTime, percent } = inject(aiUsageKey)!
+
+function tierLabel(tier?: string | null): string {
+  if (!tier) return '速度未记录'
+  return ({ priority: 'Fast', fast: 'Fast', default: '标准', standard: '标准', flex: 'Flex', ultrafast: 'Ultrafast' } as Record<string, string>)[tier] || tier
+}
 </script>
 
 <template>
@@ -16,6 +21,7 @@ const { requestSince, requestUntil, requestTool, requestTools, requestSearch, fe
       <button class="primary-button" :disabled="requestLoading" @click="fetchRequests()">{{ requestLoading ? '读取中…' : '应用筛选' }}</button>
     </div>
     <div v-if="requestError" class="notice-banner">{{ requestError }}</div>
+    <p class="request-pricing-note">费用按标准 API 单价折算，推理 Token 已计入输出；速度标签表示日志记录的设置，订阅额度消耗以实际配额为准。</p>
     <nav class="panel request-pagination" aria-label="请求明细分页">
       <label>每页<select v-model.number="requestPageSize" :disabled="requestLoading" aria-label="每页请求数量"><option :value="50">50 条</option><option :value="100">100 条</option><option :value="200">200 条</option></select></label>
       <span class="request-page-info">第 {{ requestPage }} / {{ requestPageCount }} 页 · {{ requestTotal ? (requestPage - 1) * requestPageSize + 1 : 0 }}–{{ Math.min(requestPage * requestPageSize, requestTotal) }} 条</span>
@@ -37,7 +43,13 @@ const { requestSince, requestUntil, requestTool, requestTools, requestSearch, fe
             <strong class="request-title" :title="row.session_title || row.session">{{ row.session_title || '未命名会话' }}</strong>
             <small class="request-project">{{ row.project || '未标记项目' }} · {{ row.session.slice(0, 16) }}</small>
           </div>
-          <div class="request-model-group"><strong class="request-model" :title="row.model || ''">{{ row.model || '未知模型' }}</strong></div>
+          <div class="request-model-group">
+            <strong class="request-model" :title="row.model || ''">{{ row.model || '未知模型' }}</strong>
+            <div v-if="row.tool === 'codex' || row.reasoning_effort || row.service_tier" class="request-model-tags">
+              <span :title="'日志中的推理等级；等级本身没有固定费用倍率'">{{ row.reasoning_effort ? `推理 ${row.reasoning_effort}` : '推理等级未记录' }}</span>
+              <span :class="{ 'request-fast-tag': ['fast', 'priority', 'ultrafast'].includes(row.service_tier || '') }" title="日志中的请求速度设置，服务端实际处理档位可能不同">{{ tierLabel(row.service_tier) }}</span>
+            </div>
+          </div>
           <div class="request-token-group">
             <div class="request-token-primary">
               <div class="request-token-flow"><span class="token-down"><i>↓</i>{{ formatTokens(row.counts.input + row.counts.cache_creation + row.counts.cache_read) }}</span><span class="token-up"><i>↑</i>{{ formatTokens(row.counts.output) }}</span></div>

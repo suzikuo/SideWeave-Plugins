@@ -137,6 +137,12 @@ pub struct UsageEvent {
     /// aggregate multiple token snapshots into one user task.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<String>,
+    /// Source-recorded reasoning setting, independent of measured reasoning tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    /// Requested service tier recorded in the log; not a guarantee of the tier served.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<String>,
     /// Workspace/project label when the source knows it.
     pub project: Option<String>,
     pub model: Option<String>,
@@ -161,6 +167,8 @@ impl UsageEvent {
             session_title: None,
             duration_ms: None,
             turn_id: None,
+            reasoning_effort: None,
+            service_tier: None,
             project: None,
             model: None,
             counts: TokenCounts::default(),

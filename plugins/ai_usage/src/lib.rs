@@ -111,7 +111,7 @@ impl AiUsagePlugin {
             Some("sessions") => session_rows(&request.payload),
             Some("set_data_roots") => set_data_roots(&request.payload),
             Some("set_account_name") | Some("set_codex_account_name") => set_account_name(&request.payload),
-            Some("get_preview") => preview_data(context),
+            Some("get_preview") => preview_data(context, &request.payload),
             Some("get_preview_settings") => get_preview_settings(),
             Some("set_preview_settings") => set_preview_settings(&request.payload),
             Some("get_quota_notification_settings") => get_quota_notification_settings(),
@@ -135,6 +135,7 @@ struct PreviewTool {
 struct PreviewSettings {
     widgets: Vec<String>,
     display_mode: String,
+    time_range: String,
     #[serde(default)]
     schema_version: u8,
 }
@@ -475,6 +476,7 @@ impl Default for PreviewSettings {
                 "updated".into(),
             ],
             display_mode: "cards".into(),
+            time_range: "today".into(),
             schema_version: 1,
         }
     }
@@ -499,6 +501,7 @@ fn read_preview_settings(index: &Index) -> PreviewSettings {
         settings.widgets.insert(0, "quotas".into());
     }
     settings.schema_version = 1;
+    settings.time_range = preview_time_range(&settings.time_range).into();
     settings
 }
 
@@ -522,6 +525,7 @@ fn set_preview_settings(payload: &Value) -> Result<Value, String> {
         _ => "cards".into(),
     };
     settings.schema_version = 1;
+    settings.time_range = preview_time_range(&settings.time_range).into();
     let serialized = serde_json::to_string(&settings)
         .map_err(|error| format!("无法保存预览设置：{error}"))?;
     index
@@ -592,11 +596,71 @@ fn set_account_name(payload: &Value) -> Result<Value, String> {
         .map_err(|error| format!("无法返回账号名称：{error}"))
 }
 
-fn preview_data(context: &PluginContext) -> Result<Value, String> {
+fn preview_time_range(value: &str) -> &'static str {
+    match value {
+        "last_24h" => "last_24h",
+        _ => "today",
+    }
+}
+
+fn preview_since_ms<Tz: chrono::TimeZone>(now: &chrono::DateTime<Tz>, time_range: &str) -> Result<i64, String> {
+    if time_range == "last_24h" {
+        return Ok(now.timestamp_millis().saturating_sub(86_400_000));
+    }
+    // Resolve a calendar boundary in the local zone, rather than subtracting
+    // elapsed hours (which would retain yesterday's requests after midnight).
+    // Some zones skip midnight during DST; use that date's first valid minute.
+    let zone = now.timezone();
+    (0..1440).find_map(|minute| {
+        let local = now.date_naive().and_hms_opt(minute / 60, minute % 60, 0)?;
+        zone.from_local_datetime(&local).earliest().map(|t| t.timestamp_millis())
+    }).ok_or_else(|| "无法确定今天的本地起始时间".into())
+}
+
+#[cfg(test)]
+mod preview_time_range_tests {
+    use super::*;
+    use chrono::{FixedOffset, TimeZone};
+
+    #[test]
+    fn today_uses_local_midnight_while_24_hours_crosses_yesterday() {
+        let zone = FixedOffset::east_opt(8 * 3600).unwrap();
+        let now = zone.with_ymd_and_hms(2026,10,27,0,15,0).single().unwrap();
+        let today = preview_since_ms(&now,"today").unwrap();
+        let rolling = preview_since_ms(&now,"last_24h").unwrap();
+        assert_eq!(today,chrono::DateTime::parse_from_rfc3339("2026-10-26T16:00:00Z").unwrap().timestamp_millis());
+        assert_eq!(rolling,chrono::DateTime::parse_from_rfc3339("2026-10-25T16:15:00Z").unwrap().timestamp_millis());
+        let yesterday = zone.with_ymd_and_hms(2026,10,26,23,59,59).single().unwrap().timestamp_millis();
+        assert!(yesterday < today && yesterday >= rolling);
+        let midnight = zone.with_ymd_and_hms(2027,1,1,0,0,0).single().unwrap();
+        assert_eq!(preview_since_ms(&midnight,"today").unwrap(),midnight.timestamp_millis());
+        assert_eq!(preview_since_ms(&midnight,"last_24h").unwrap(),midnight.timestamp_millis()-86_400_000);
+    }
+
+    #[test]
+    fn legacy_preview_settings_default_to_today_and_keep_existing_choices() {
+        let index = Index::open_in_memory().unwrap();
+        index.conn().execute("INSERT INTO meta(key,value) VALUES(?1,?2)",params![PREVIEW_SETTINGS_KEY,r#"{"widgets":["tokens"],"display_mode":"compact","schema_version":1}"#]).unwrap();
+        let settings = read_preview_settings(&index);
+        assert_eq!(settings.time_range,"today");
+        assert_eq!(settings.widgets,vec!["tokens"]);
+        assert_eq!(settings.display_mode,"compact");
+        index.conn().execute("UPDATE meta SET value=?2 WHERE key=?1",params![PREVIEW_SETTINGS_KEY,r#"{"widgets":["tools"],"time_range":"last_24h","schema_version":1}"#]).unwrap();
+        assert_eq!(read_preview_settings(&index).time_range,"last_24h");
+        assert_eq!(preview_time_range("invalid"),"today");
+    }
+}
+
+fn preview_data(context: &PluginContext, payload: &Value) -> Result<Value, String> {
     let index = open_index()?;
     let now = usage_core::report::now_ms();
-    let since = now - 24 * 60 * 60 * 1000;
-    let settings = read_preview_settings(&index);
+    let mut settings = read_preview_settings(&index);
+    if let Some(time_range) = payload.get("time_range").and_then(Value::as_str) {
+        settings.time_range = preview_time_range(time_range).into();
+    }
+    let local_now = chrono::DateTime::from_timestamp_millis(now)
+        .ok_or("无法确定当前时间")?.with_timezone(&chrono::Local);
+    let since = preview_since_ms(&local_now, &settings.time_range)?;
     let polled_quotas = quotas_for_selection(&json!({}), false);
     let _ = notify_quota_threshold(&index, &polled_quotas, context);
     let last_ingest_ms = index
@@ -693,6 +757,8 @@ fn preview_data(context: &PluginContext) -> Result<Value, String> {
 
     serde_json::to_value(json!({
         "generated_at_ms": now,
+        "since_ms": since,
+        "until_ms": now,
         "requests": requests,
         "total_tokens": total_tokens,
         "input_tokens": input_tokens,
@@ -1150,6 +1216,8 @@ struct RequestRow {
     total_tokens: f64,
     cost_usd: Option<f64>,
     pricing_alias: Option<String>,
+    reasoning_effort: Option<String>,
+    service_tier: Option<String>,
     credits_cost_usd: Option<f64>,
 }
 
@@ -1374,7 +1442,7 @@ fn request_rows_from_index(index: &Index, payload: &Value, now: i64, prices: &Pr
         .prepare(
             &format!("SELECT e.tool, e.ts_ms, e.session, e.session_title, e.project, e.model, extra.account_id, extra.duration_ms, \
                     COALESCE(e.in_tok, 0), COALESCE(e.cc_tok, 0), COALESCE(e.cr_tok, 0), \
-                    COALESCE(e.out_tok, 0), COALESCE(e.reason_tok, 0), COALESCE(e.credits, 0) \
+                    COALESCE(e.out_tok, 0), COALESCE(e.reason_tok, 0), COALESCE(e.credits, 0), extra.reasoning_effort, extra.service_tier \
              {FILTER} ORDER BY e.ts_ms DESC, e.id DESC LIMIT ?9 OFFSET ?10"),
         )
         .map_err(|error| format!("无法读取请求明细：{error}"))?;
@@ -1402,6 +1470,8 @@ fn request_rows_from_index(index: &Index, payload: &Value, now: i64, prices: &Pr
                     total_tokens: 0.0,
                     cost_usd: None,
                     pricing_alias: None,
+                    reasoning_effort: row.get(14)?,
+                    service_tier: row.get(15)?,
                     credits_cost_usd: None,
                 })
             },
@@ -1445,6 +1515,22 @@ fn request_rows_from_index(index: &Index, payload: &Value, now: i64, prices: &Pr
 mod request_pagination_tests {
     use super::*;
     const NOW: i64 = 1_790_000_000_000;
+
+    #[test]
+    fn request_modes_are_exposed_without_changing_standard_api_equivalent_cost() {
+        let index = Index::open_in_memory().unwrap();
+        add(&index,"mode","local","a","Mode");
+        index.conn().execute("UPDATE event SET out_tok=100,reason_tok=80",[]).unwrap();
+        index.conn().execute("UPDATE event_extra SET reasoning_effort='xhigh',service_tier='priority'",[]).unwrap();
+        let prices = PricingMap::default();
+        let result = request_rows_from_index(&index,&json!({}),NOW,&prices,None).unwrap();
+        let row = &result["rows"][0];
+        assert_eq!(row["reasoning_effort"],"xhigh");
+        assert_eq!(row["service_tier"],"priority");
+        assert_eq!(row["total_tokens"],110.0);
+        let expected = prices.cost(Some("gpt-5"),&TokenCounts{input:10.0,output:100.0,reasoning:80.0,..Default::default()}).unwrap();
+        assert!((row["cost_usd"].as_f64().unwrap()-expected).abs()<1e-12,"output price already includes reasoning; allowance multiplier is not an API price");
+    }
 
     #[test]
     fn group_request_filters_include_only_member_sources_with_no_duplicate_rows() {

@@ -22,6 +22,35 @@ fn sorted(mut events: Vec<UsageEvent>) -> Vec<UsageEvent> {
 }
 
 #[test]
+fn settings_upgrade_replays_metadata_without_erasing_or_rebilling_events() {
+    let dir = tempfile::tempdir().unwrap();
+    let logs = dir.path().join("logs");
+    std::fs::create_dir(&logs).unwrap();
+    let now = usage_core::report::now_ms();
+    let row = serde_json::json!({"ts":now,"session":"s","id":"codex#s#0","model":"gpt-5","in":100,"out":10,"reason":8,"reasoning_effort":"high","service_tier":"fast"});
+    std::fs::write(logs.join("usage.jsonl"),format!("{row}\n")).unwrap();
+    let db = dir.path().join("index.db");
+    let adapter = Mock::new("codex",&logs);
+    let mut idx = Index::open(&db).unwrap();
+    idx.ingest_adapter(&adapter,&DateFilter::default()).unwrap();
+    assert_eq!(idx.event_count().unwrap(),1);
+    idx.conn().execute_batch("ALTER TABLE event_extra DROP COLUMN reasoning_effort; ALTER TABLE event_extra DROP COLUMN service_tier; DELETE FROM meta WHERE key='codex_request_settings_v1';").unwrap();
+    drop(idx);
+    let mut idx = Index::open(&db).unwrap();
+    assert_eq!(idx.event_count().unwrap(),1,"additive upgrade retains history");
+    let report = idx.ingest_adapter(&adapter,&DateFilter::default()).unwrap();
+    assert_eq!((report.new_events,report.purged),(0,0));
+    let events = idx.all_events().unwrap();
+    assert_eq!(events.len(),1);
+    assert_eq!(events[0].reasoning_effort.as_deref(),Some("high"));
+    assert_eq!(events[0].service_tier.as_deref(),Some("fast"));
+    assert_eq!(events[0].counts.total(),110.0);
+    drop(idx);
+    let mut idx = Index::open(&db).unwrap();
+    assert_eq!(idx.ingest_adapter(&adapter,&DateFilter::default()).unwrap().files_changed,0,"replay is one-time");
+}
+
+#[test]
 fn cold_ingest_inserts_every_event_and_the_next_pass_is_free() {
     let dir = staged(&["basic.jsonl", "second.jsonl"]);
     let adapter = Mock::new("mocka", dir.path());

@@ -17,13 +17,16 @@ pub(super) struct Estimate {
     pub coverage_note: Option<String>,
     pub quota_account_id: Option<String>,
     pub quota_source_id: Option<i64>,
+    pub fast_requests: u64,
+    pub unknown_speed_requests: u64,
+    pub speed_note: Option<String>,
 }
 
 impl Estimate {
     fn unavailable(quota: &QuotaView, reason: &str) -> Self {
         Self { key: super::quota_notification_identity(quota), used_cost_usd: None,
             total_cost_usd: None, remaining_cost_usd: None, reason: Some(reason.into()),
-            group_id: None, sources:Vec::new(),included_requests:0,excluded_unknown_requests:0,coverage_note:None,quota_account_id:None,quota_source_id:None }
+            group_id: None, sources:Vec::new(),included_requests:0,excluded_unknown_requests:0,coverage_note:None,quota_account_id:None,quota_source_id:None,fast_requests:0,unknown_speed_requests:0,speed_note:None }
     }
 }
 
@@ -83,6 +86,29 @@ fn calculate(index: &Index, quota: &QuotaView, account: &str, prices: &PricingMa
 
 fn calculate_for(index: &Index, quota: &QuotaView, account: &str, group:Option<&str>, prices: &PricingMap, now: i64) -> Result<Estimate, String> {
     let mut estimate=calculate_cost(index,quota,account,group,prices,now)?;
+    if quota.tool == "codex" {
+        let start = quota.resets_at_ms.saturating_sub(quota.window_minutes.saturating_mul(60_000));
+        let origin = "CASE WHEN substr(e.source,1,6)='linux:' AND instr(substr(e.source,7),':')>0 THEN substr(e.source,7,instr(substr(e.source,7),':')-1) ELSE '' END";
+        let member = usage_index::account_groups::group_clause("'group'", "?4", "e.tool", "extra.account_id", origin);
+        let sql = format!(
+            "SELECT COALESCE(SUM(LOWER(extra.service_tier) IN ('fast','priority')),0), \
+                    COALESCE(SUM(CASE WHEN COALESCE(LOWER(extra.service_tier),'') \
+                        NOT IN ('fast','priority','standard','default','flex','ultrafast') THEN 1 ELSE 0 END),0) \
+             FROM event e LEFT JOIN event_extra extra ON extra.event_id=e.id \
+             WHERE e.tool='codex' AND e.ts_ms>=?1 AND e.ts_ms<=?2 \
+               AND ((?4='' AND e.source NOT LIKE 'linux:%' AND NULLIF(TRIM(extra.account_id),'')=?3) \
+                    OR (?4<>'' AND {member}))"
+        );
+        let (fast, unknown): (i64, i64) = index.conn().query_row(&sql,
+            params![start,quota.sampled_at_ms.min(now),account,group.unwrap_or("")],
+            |r|Ok((r.get(0)?,r.get(1)?))).map_err(|e|e.to_string())?;
+        estimate.fast_requests = fast.max(0) as u64;
+        estimate.unknown_speed_requests = unknown.max(0) as u64;
+        // This is Standard API-equivalent value, as in the dashboard. Fast's
+        // allowance premium is already reflected in the observed percentage;
+        // multiplying the numerator by that premium would change the metric.
+        estimate.speed_note = Some(format!("按标准 API 单价折算，输出已含推理 Token；Fast 的额度消耗由实际已用百分比反映 · {} 条 Fast 设置 · {} 条速度未记录",estimate.fast_requests,estimate.unknown_speed_requests));
+    }
     if let Some(group)=group {
         estimate.group_id=Some(group.to_string());
         let start=quota.resets_at_ms.saturating_sub(quota.window_minutes.saturating_mul(60_000));
@@ -155,7 +181,7 @@ fn calculate_cost(index: &Index, quota: &QuotaView, account: &str, group:Option<
     let total = used_cost / (quota.used_percent / 100.0);
     let estimate=Estimate { key: super::quota_notification_identity(quota), used_cost_usd: Some(used_cost),
         total_cost_usd: Some(total), remaining_cost_usd: Some((total - used_cost).max(0.0)), reason: None,
-        group_id:group.map(str::to_string),sources:Vec::new(),included_requests:requests as u64,excluded_unknown_requests:0,coverage_note:None,quota_account_id:None,quota_source_id:None };
+        group_id:group.map(str::to_string),sources:Vec::new(),included_requests:requests as u64,excluded_unknown_requests:0,coverage_note:None,quota_account_id:None,quota_source_id:None,fast_requests:0,unknown_speed_requests:0,speed_note:None };
     Ok(estimate)
 }
 
@@ -216,6 +242,7 @@ mod tests {
         insert(&index,NOW-1,"x","linux:unrelated:file","gpt-5",9_000_000.0);
         insert(&index,NOW+1,"a","local","gpt-5",9_000_000.0);
         insert(&index,NOW-1,"","linux:wsl:file","gpt-5",9_000_000.0);
+        index.conn().execute("UPDATE event_extra SET service_tier='fast' WHERE event_id IN(SELECT id FROM event WHERE source IN('local','linux:wsl:file'))",[]).unwrap();
         let identities=index.source_accounts().unwrap();
         let members=identities.iter().filter(|i|i.account_id!="x").map(|i|i.id).collect();
         let group=usage_index::account_groups::AccountGroup {id:"g".into(),tool:"codex".into(),name:"Group".into(),members,quota_identity_id:None};
@@ -228,6 +255,9 @@ mod tests {
         assert_eq!(result.excluded_unknown_requests,1);
         assert_eq!(result.sources,vec!["","remote","wsl"]);
         assert_eq!(result.group_id.as_deref(),Some("g"));
+        assert_eq!(result.fast_requests,2,"only linked, known-account requests before the sample count");
+        assert_eq!(result.unknown_speed_requests,1);
+        assert!(result.speed_note.as_deref().unwrap().contains("标准 API"));
         assert!(result.coverage_note.unwrap().contains("仅基于已关联用量"));
     }
 }

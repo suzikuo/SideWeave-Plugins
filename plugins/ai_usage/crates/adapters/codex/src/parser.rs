@@ -1,6 +1,6 @@
 //! Decoding of one rollout line into something the loader can attribute.
 //!
-//! Only three record kinds matter and they are gated by substring before any
+//! Usage and attribution records are gated by substring before any
 //! JSON parsing: ~4.9 GB of `response_item` payload must never be deserialised
 //! just to find out it carries no usage.
 
@@ -23,6 +23,13 @@ pub(crate) enum Record {
         turn_id: Option<String>,
         model: Option<String>,
         cwd: Option<String>,
+        /// Missing preserves recorded thread defaults; explicit null is unknown.
+        reasoning_effort: Option<Option<String>>,
+        service_tier: Option<Option<String>>,
+    },
+    SettingsApplied {
+        reasoning_effort: Option<String>,
+        service_tier: Option<String>,
     },
     TaskStarted {
         turn_id: Option<String>,
@@ -52,6 +59,7 @@ pub(crate) fn worth_parsing(raw: &str) -> bool {
         || raw.contains("task_started")
         || raw.contains("task_complete")
         || raw.contains("turn_complete")
+        || raw.contains("thread_settings_applied")
 }
 
 fn string_field(v: &Value, k: &str) -> Option<String> {
@@ -60,6 +68,13 @@ fn string_field(v: &Value, k: &str) -> Option<String> {
 
 fn num_field(v: &Value, k: &str) -> f64 {
     v.get(k).and_then(Value::as_f64).unwrap_or(0.0)
+}
+
+fn reasoning_effort(v: &Value) -> Option<String> {
+    string_field(v, "effort").or_else(|| string_field(v, "reasoning_effort"))
+        .or_else(|| v.pointer("/collaboration_mode/settings/reasoning_effort").and_then(Value::as_str).map(str::to_string))
+        .or_else(|| v.pointer("/collaboration_mode/reasoning_effort").and_then(Value::as_str).map(str::to_string))
+        .filter(|s| !s.trim().is_empty()).map(|s| s.trim().to_ascii_lowercase())
 }
 
 /// `TokenCounts` from a Codex usage object.
@@ -129,7 +144,21 @@ pub(crate) fn parse_record(raw: &str) -> Option<Record> {
             turn_id: string_field(payload, "turn_id"),
             model: string_field(payload, "model"),
             cwd: string_field(payload, "cwd"),
+            reasoning_effort: {
+                let effort = reasoning_effort(payload);
+                (effort.is_some() || payload.get("effort").is_some() || payload.get("reasoning_effort").is_some())
+                    .then_some(effort)
+            },
+            service_tier: payload.get("service_tier")
+                .map(|_| string_field(payload, "service_tier").map(|s| s.to_ascii_lowercase())),
         }),
+        "event_msg" if payload.get("type").and_then(Value::as_str) == Some("thread_settings_applied") => {
+            let settings = payload.get("thread_settings")?;
+            Some(Record::SettingsApplied {
+                reasoning_effort: reasoning_effort(settings),
+                service_tier: string_field(settings, "service_tier").map(|s| s.to_ascii_lowercase()),
+            })
+        }
         "event_msg" if payload.get("type").and_then(Value::as_str) == Some("task_started") => {
             Some(Record::TaskStarted {
                 turn_id: string_field(payload, "turn_id"),

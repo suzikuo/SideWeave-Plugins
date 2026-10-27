@@ -124,6 +124,8 @@ fn parse_line(tool: &str, source: &Path, text: &str) -> Option<UsageEvent> {
     let mut ev = UsageEvent::new(tool, v.get("ts")?.as_i64()?, v.get("session")?.as_str()?);
     ev.project = v.get("project").and_then(Value::as_str).map(|s| s.to_string());
     ev.model = v.get("model").and_then(Value::as_str).map(|s| s.to_string());
+    ev.reasoning_effort = v.get("reasoning_effort").and_then(Value::as_str).map(str::to_string);
+    ev.service_tier = v.get("service_tier").and_then(Value::as_str).map(str::to_string);
     ev.counts = TokenCounts {
         input: num("in"),
         cache_creation: num("cc"),

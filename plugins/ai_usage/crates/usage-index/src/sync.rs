@@ -207,6 +207,10 @@ struct ExportRow {
     session: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     account_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    service_tier: Option<String>,
     #[serde(default)]
     project: Option<String>,
     #[serde(default)]
@@ -357,7 +361,7 @@ impl Index {
             let mut stmt = tx
                 .prepare(
                     "SELECT e.id, e.tool, e.ts_ms, e.session, e.project, e.model, e.meter, \
-                            e.in_tok, e.cc_tok, e.cr_tok, e.out_tok, e.reason_tok, e.credits, e.dedupe_key, e.source, extra.account_id \
+                            e.in_tok, e.cc_tok, e.cr_tok, e.out_tok, e.reason_tok, e.credits, e.dedupe_key, e.source, extra.account_id, extra.reasoning_effort, extra.service_tier \
                      FROM event e LEFT JOIN event_extra extra ON extra.event_id = e.id \
                      WHERE e.ts_ms >= ?1 AND e.ts_ms < ?2 ORDER BY e.id",
                 )
@@ -381,11 +385,13 @@ impl Index {
                         r.get::<_, Option<String>>(13)?,
                         r.get::<_, String>(14)?,
                         r.get::<_, Option<String>>(15)?,
+                        r.get::<_, Option<String>>(16)?,
+                        r.get::<_, Option<String>>(17)?,
                     ))
                 })
                 .map_err(sql_err)?;
             for ev in evs {
-                let (id, tool, ts_ms, session, project, model, meter, in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, dedupe_key, source, account_id) =
+                let (id, tool, ts_ms, session, project, model, meter, in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, dedupe_key, source, account_id, reasoning_effort, service_tier) =
                     ev.map_err(sql_err)?;
                 let mut row = ExportRow {
                     key: String::new(),
@@ -393,6 +399,8 @@ impl Index {
                     ts_ms,
                     session,
                     account_id,
+                    reasoning_effort,
+                    service_tier,
                     project,
                     model,
                     meter,
@@ -591,7 +599,7 @@ impl Index {
             "CREATE TEMP TABLE sync_batch(\
                  key TEXT PRIMARY KEY, tool TEXT NOT NULL, ts_ms INTEGER NOT NULL, \
                  session TEXT NOT NULL, project TEXT, model TEXT, meter TEXT NOT NULL, \
-                 account_id TEXT, \
+                 account_id TEXT, reasoning_effort TEXT, service_tier TEXT, \
                  source TEXT NOT NULL, \
                  in_tok REAL NOT NULL, cc_tok REAL NOT NULL, cr_tok REAL NOT NULL, \
                  out_tok REAL NOT NULL, reason_tok REAL NOT NULL, credits REAL NOT NULL, \
@@ -611,8 +619,8 @@ impl Index {
             let mut ins = tx
                 .prepare(
                     "INSERT INTO sync_batch(key, tool, ts_ms, session, project, model, meter, source, account_id, \
-                        in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, calls) \
-                     VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+                        in_tok, cc_tok, cr_tok, out_tok, reason_tok, credits, calls, reasoning_effort, service_tier) \
+                     VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
                 )
                 .map_err(sql_err)?;
             loop {
@@ -674,6 +682,8 @@ impl Index {
                     row.reason_tok,
                     row.credits,
                     calls_json,
+                    row.reasoning_effort,
+                    row.service_tier,
                 ])
                 .map_err(|e| Error::Sync(format!("{file_name}: duplicate or bad key {:?}: {e}", row.key)))?;
                 sums.add(&SyncSums {
@@ -758,11 +768,14 @@ impl Index {
             .map_err(sql_err)? as u64;
 
         tx.execute(
-            "INSERT INTO event_extra(event_id, account_id) \
-             SELECT e.id, b.account_id FROM sync_batch b \
+            "INSERT INTO event_extra(event_id, account_id, reasoning_effort, service_tier) \
+             SELECT e.id, CASE WHEN b.applied=1 THEN b.account_id END, b.reasoning_effort, b.service_tier FROM sync_batch b \
              JOIN event e ON e.dedupe_key = b.key \
-             WHERE b.applied = 1 AND b.account_id IS NOT NULL \
-             ON CONFLICT(event_id) DO UPDATE SET account_id = excluded.account_id",
+             WHERE (b.applied = 1 AND b.account_id IS NOT NULL) OR b.reasoning_effort IS NOT NULL OR b.service_tier IS NOT NULL \
+             ON CONFLICT(event_id) DO UPDATE SET \
+                account_id = COALESCE(excluded.account_id,event_extra.account_id), \
+                reasoning_effort = COALESCE(excluded.reasoning_effort,event_extra.reasoning_effort), \
+                service_tier = COALESCE(excluded.service_tier,event_extra.service_tier)",
             [],
         )
         .map_err(sql_err)?;
@@ -1000,6 +1013,24 @@ mod tests {
         let first = hostname();
         assert!(!first.trim().is_empty());
         assert_eq!(first, hostname());
+    }
+
+    #[test]
+    fn request_settings_roundtrip_and_metadata_only_updates_keep_identity_and_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = Index::open_in_memory().unwrap();
+        seed(&src,"codex","s",ts(1),Some("codex#s#1"),100.0,10.0,0.0,&[]);
+        let mut tgt = Index::open_in_memory().unwrap();
+        import(&mut tgt,&export_to(&src,dir.path(),"mode-origin"));
+        src.conn().execute("INSERT INTO event_extra(event_id,reasoning_effort,service_tier) VALUES(1,'xhigh','fast')",[]).unwrap();
+        let report = import(&mut tgt,&export_to(&src,dir.path(),"mode-origin"));
+        assert_eq!((report.inserted,report.updated),(0,0));
+        let events = tgt.all_events().unwrap();
+        assert_eq!(events.len(),1);
+        assert_eq!(events[0].reasoning_effort.as_deref(),Some("xhigh"));
+        assert_eq!(events[0].service_tier.as_deref(),Some("fast"));
+        assert_eq!(events[0].dedupe_key.as_deref(),Some("codex#s#1"));
+        assert_eq!(events[0].counts.total(),110.0);
     }
 
     #[test]

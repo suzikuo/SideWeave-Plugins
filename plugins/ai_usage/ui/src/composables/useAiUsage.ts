@@ -15,10 +15,12 @@ type PeriodKey = 'day' | 'week' | 'month' | 'year'
 type PageKey = 'overview' | 'tools' | 'sources' | 'accounts' | 'sessions' | 'requests' | 'quotas' | 'preview'
 type PreviewWidget = 'tokens' | 'cost' | 'requests' | 'quotas' | 'tools' | 'split' | 'updated'
 type PreviewDisplayMode = 'cards' | 'compact'
+type PreviewTimeRange = 'today' | 'last_24h'
 
 interface PreviewSettings {
   widgets: PreviewWidget[]
   display_mode: PreviewDisplayMode
+  time_range: PreviewTimeRange
 }
 
 interface QuotaNotificationSettings {
@@ -126,6 +128,9 @@ interface QuotaEstimate {
   coverage_note?: string | null
   quota_account_id?: string | null
   quota_source_id?: number | null
+  fast_requests?: number
+  unknown_speed_requests?: number
+  speed_note?: string | null
 }
 
 interface UsageReport {
@@ -181,6 +186,8 @@ interface RequestRow {
   cost_usd: number | null
   credits_cost_usd: number | null
   pricing_alias?: string | null
+  reasoning_effort?: string | null
+  service_tier?: string | null
 }
 
 interface RequestFilters {
@@ -219,9 +226,9 @@ export function useAiUsage() {
     { id: 'preview', label: '悬停预览', icon: '▧' }
   ]
   const previewWidgetOptions: Array<{ id: PreviewWidget; title: string; description: string }> = [
-    { id: 'tokens', title: 'Token 总量', description: '显示最近 24 小时的输入和输出 Token' },
+    { id: 'tokens', title: 'Token 总量', description: '显示所选时段的输入和输出 Token' },
     { id: 'cost', title: '费用估算', description: '显示可匹配价格的模型费用估算' },
-    { id: 'requests', title: '请求次数', description: '显示最近 24 小时的用量记录数' },
+    { id: 'requests', title: '请求次数', description: '显示所选时段的用量记录数' },
     { id: 'quotas', title: '订阅配额', description: '显示各工具的剩余额度、额度窗口和重置时间' },
     { id: 'tools', title: '工具排行', description: '显示 Token 用量最高的工具' },
     { id: 'split', title: '输入 / 输出', description: '用进度条对比输入和输出 Token' },
@@ -229,7 +236,8 @@ export function useAiUsage() {
   ]
   const defaultPreviewSettings: PreviewSettings = {
     widgets: ['tokens', 'cost', 'requests', 'quotas', 'tools', 'split', 'updated'],
-    display_mode: 'cards'
+    display_mode: 'cards',
+    time_range: 'today'
   }
   const periodOptions: Array<{ id: PeriodKey; label: string }> = [
     { id: 'day', label: '今天' },
@@ -290,6 +298,9 @@ export function useAiUsage() {
   const requestUntil = ref(defaultDate(0))
   const previewSettings = ref<PreviewSettings>({ ...defaultPreviewSettings })
   const previewSettingsLoading = ref(false)
+  const previewSampleLoading = ref(false)
+  let previewSampleQuery = 0
+  const previewRangeLabel = computed(() => (previewSample.value?.settings.time_range ?? previewSettings.value.time_range) === 'last_24h' ? '最近 24 小时' : '今天')
   const previewSettingsSaving = ref(false)
   const previewSettingsMessage = ref('')
   const previewSettingsError = ref('')
@@ -424,7 +435,7 @@ export function useAiUsage() {
       `输入：${formatTokens(row.counts.input, false)}`,
       `缓存写入：${formatTokens(row.counts.cache_creation, false)}`,
       `缓存读取：${formatTokens(row.counts.cache_read, false)}`,
-      `输出：${formatTokens(row.counts.output, false)}`,
+      `输出（已含推理）：${formatTokens(row.counts.output, false)}`,
       `其中推理：${formatTokens(row.counts.reasoning, false)}`,
       `总 Token：${formatTokens(row.total_tokens, false)}`,
       `Credits：${formatTokens(row.counts.credits, false)}`
@@ -474,21 +485,46 @@ export function useAiUsage() {
   }
 
   async function loadPreviewSettings() {
+    const query = ++previewSampleQuery
     previewSettingsLoading.value = true
+    previewSampleLoading.value = true
     previewSettingsError.value = ''
     try {
       const sample = await pluginCall<PreviewData>('get_preview')
+      if (query !== previewSampleQuery || disposed) return
       const saved = sample.settings
       previewSettings.value = {
         widgets: previewWidgetOptions.map((option) => option.id).filter((id) => saved.widgets?.includes(id)),
-        display_mode: saved.display_mode === 'compact' ? 'compact' : 'cards'
+        display_mode: saved.display_mode === 'compact' ? 'compact' : 'cards',
+        time_range: saved.time_range === 'last_24h' ? 'last_24h' : 'today'
       }
       previewSample.value = sample
     } catch (reason) {
-      previewSettingsError.value = errorMessage(reason)
+      if (query === previewSampleQuery && !disposed) previewSettingsError.value = errorMessage(reason)
     } finally {
       previewSettingsLoading.value = false
+      if (query === previewSampleQuery) previewSampleLoading.value = false
     }
+  }
+
+  async function refreshPreviewSample(timeRange: PreviewTimeRange) {
+    const query = ++previewSampleQuery
+    previewSampleLoading.value = true
+    previewSettingsError.value = ''
+    try {
+      const sample = await pluginCall<PreviewData>('get_preview', { time_range: timeRange })
+      if (query === previewSampleQuery && !disposed) previewSample.value = sample
+    } catch (reason) {
+      if (query === previewSampleQuery && !disposed) previewSettingsError.value = errorMessage(reason)
+    } finally {
+      if (query === previewSampleQuery) previewSampleLoading.value = false
+    }
+  }
+
+  function setPreviewTimeRange(timeRange: PreviewTimeRange) {
+    previewSettings.value.time_range = timeRange
+    previewSettingsMessage.value = ''
+    void refreshPreviewSample(timeRange)
   }
 
   async function savePreviewSettings() {
@@ -498,6 +534,7 @@ export function useAiUsage() {
     try {
       const saved = await pluginCall<PreviewSettings>('set_preview_settings', previewSettings.value)
       previewSettings.value = saved
+      await refreshPreviewSample(saved.time_range)
       previewSettingsMessage.value = '悬停预览设置已保存'
     } catch (reason) {
       previewSettingsError.value = errorMessage(reason)
@@ -509,6 +546,7 @@ export function useAiUsage() {
   function resetPreviewSettings() {
     previewSettings.value = { ...defaultPreviewSettings, widgets: [...defaultPreviewSettings.widgets] }
     previewSettingsMessage.value = ''
+    void refreshPreviewSample(defaultPreviewSettings.time_range)
   }
 
   function quotaOrigin(quota: Quota): string {
@@ -977,7 +1015,7 @@ export function useAiUsage() {
     sessionLoading, sessionError, requestTool, requestSearch, requestSince, requestUntil,
     requestPage, requestPageSize, requestTotal, requestPageCount, goRequestPage,
     previewSettings, previewSettingsLoading, previewSettingsSaving, previewSettingsMessage,
-    previewSettingsError, previewSample, report, selectedWindow, summary, toolRows,
+    previewSettingsError, previewSample, previewSampleLoading, previewRangeLabel, setPreviewTimeRange, report, selectedWindow, summary, toolRows,
     quotaNotificationRows, quotaNotificationSaving,
     quotaNotificationLoading, quotaNotificationMessage, quotaNotificationError,
     historyRows, trendMax, hourMax, recentSessions, requestTools, accounts,

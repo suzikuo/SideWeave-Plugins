@@ -66,7 +66,7 @@
     <main class="card" aria-live="polite">
       <header class="header">
         <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
-        <div class="brand"><strong>AI 用量</strong><small>LOCAL USAGE</small></div>
+        <div class="brand"><strong>AI 用量</strong><small id="time-range">今天</small></div>
         <span id="updated" class="updated"><i></i>读取中</span>
         <button id="refresh-quotas" class="refresh" type="button" title="刷新订阅额度" aria-label="刷新订阅额度">◷</button>
         <button id="refresh" class="refresh" type="button" title="同步本地用量数据" aria-label="同步本地用量数据"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7v5h-5"/><path d="M19 12a7 7 0 0 0-12-4L4 11m0 6v-5h5"/><path d="M5 12a7 7 0 0 0 12 4l3-3"/></svg></button>
@@ -122,7 +122,9 @@
       function time(value) { return value ? new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit' }).format(value) : '尚未扫描' }
 
       function render(data) {
-        const settings = data.settings || { widgets: ['tokens', 'cost', 'requests', 'quotas', 'tools', 'split', 'updated'], display_mode: 'cards' }
+        const settings = data.settings || { widgets: ['tokens', 'cost', 'requests', 'quotas', 'tools', 'split', 'updated'], display_mode: 'cards', time_range: 'today' }
+        const rangeLabel = settings.time_range === 'last_24h' ? '最近 24 小时' : '今天'
+        document.getElementById('time-range').textContent = rangeLabel
         const widgets = new Set(settings.widgets || [])
         const mode = settings.display_mode === 'compact' ? 'compact' : 'cards'
         const quotaSection = document.getElementById('quotas')
@@ -136,11 +138,10 @@
                 const tone = remaining <= 8 ? 'danger' : remaining <= 25 ? 'warning' : ''
                 const key = `${quota.tool}|${quota.window_minutes}|${quota.id ?? quota.label ?? 'default'}`
                 const estimate = (data.quota_estimates || []).find((item) => item.key === key)
-                const estimateText = estimate?.total_cost_usd != null
-                  ? `预估满额 ≈ $${Number(estimate.total_cost_usd).toFixed(2)} · API 等值`
-                  : (estimate?.reason || '等待窗口费用数据')
-                const coverage = estimate?.coverage_note ? `<small class="quota-estimate">${escapeHtml(estimate.coverage_note)}</small>` : ''
-                return `<div class="quota-row"><div class="quota-head"><span class="quota-name">${escapeHtml(toolName(quota.tool))} &#183; ${escapeHtml(quotaWindow(quota))}</span><strong class="quota-percent">剩余 ${remaining.toFixed(remaining >= 10 ? 0 : 1)}%</strong></div><div class="quota-track"><i class="${tone}" style="width:${remaining}%"></i></div><small class="quota-reset">${escapeHtml(resetTimeText(Number(quota.resets_at_ms)))}</small><small class="quota-reset">${escapeHtml(resetLabel(quota.resets_at_ms))}</small><small class="quota-estimate" title="根据已关联账号记录及已用比例推算，并非订阅价格或账单">${escapeHtml(estimateText)}</small>${coverage}</div>`
+                const estimateHtml = estimate?.total_cost_usd != null
+                  ? `<small class="quota-estimate">预估满额 ≈ $${Number(estimate.total_cost_usd).toFixed(2)} · API 等值</small>`
+                  : ''
+                return `<div class="quota-row"><div class="quota-head"><span class="quota-name">${escapeHtml(toolName(quota.tool))} &#183; ${escapeHtml(quotaWindow(quota))}</span><strong class="quota-percent">剩余 ${remaining.toFixed(remaining >= 10 ? 0 : 1)}%</strong></div><div class="quota-track"><i class="${tone}" style="width:${remaining}%"></i></div><small class="quota-reset">${escapeHtml(resetTimeText(Number(quota.resets_at_ms)))}</small><small class="quota-reset">${escapeHtml(resetLabel(quota.resets_at_ms))}</small>${estimateHtml}</div>`
               }).join('')
             : '<small class=\"quota-empty\">\u6682\u65f6\u6ca1\u6709\u8bfb\u53d6\u5230\u8ba2\u9605\u989d\u5ea6</small>'
         }
@@ -152,7 +153,7 @@
         const items = {
           tokens: { label: 'TOKEN 总量', value: short(data.total_tokens), hint: `${short(input)} 输入 · ${short(output)} 输出` },
           cost: { label: '费用估算', value: money((Number(data.cost_usd) || 0) + (Number(data.credit_cost_usd) || 0)), hint: data.unpriced_models ? `${data.unpriced_models} 个模型未匹配价格` : '按本机价格表估算' },
-          requests: { label: '请求次数', value: fullNumber.format(num(data.requests)), hint: '最近 24 小时记录' }
+          requests: { label: '请求次数', value: fullNumber.format(num(data.requests)), hint: `${rangeLabel}记录` }
         }
         metrics.innerHTML = ['tokens', 'cost', 'requests'].filter((id) => widgets.has(id)).map((id) => {
           const item = items[id]
@@ -175,7 +176,7 @@
           const rows = data.tools || []
           document.getElementById('tool-rows').innerHTML = rows.length
             ? rows.slice(0, 2).map((item) => `<div class="tool-row"><span class="tool-name">${escapeHtml(toolName(item.tool))}</span><span class="tool-detail">${short(item.total_tokens)} tokens · ${num(item.requests)} 次</span></div>`).join('')
-            : '<div class="empty">最近 24 小时没有用量记录</div>'
+            : `<div class="empty">${rangeLabel}没有用量记录</div>`
         }
 
         const updated = document.getElementById('updated')

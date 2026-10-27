@@ -252,6 +252,10 @@ h1 { margin: 7px 0 3px; font-size: 23px; font-weight: 720; letter-spacing: -.035
 .token-up i { color: color-mix(in srgb, var(--primary) 78%, var(--text)); }
 .request-cache { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; color: var(--text-muted); font-size: 8px; }
 .request-cache strong { color: var(--text-secondary); font-size: 9px; font-weight: 600; }
+.request-pricing-note { margin: 0; color: var(--text-muted); font-size: 10px; line-height: 1.6; }
+.request-model-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; color: var(--text-muted); font-size: 9px; }
+.request-model-tags span { padding: 2px 5px; border: 1px solid var(--border); border-radius: 4px; }
+.request-model-tags .request-fast-tag { color: var(--primary); border-color: color-mix(in srgb, var(--primary) 35%, var(--border)); }
 .request-cost-group > strong { color: var(--text); font-family: var(--font-mono); font-size: 13px; font-weight: 600; white-space: nowrap; }
 .request-cost-group > strong.cost-unpriced { color: var(--text-muted); font-family: var(--font-ui); font-size: 10px; }
 .request-cost-group > small { color: var(--text-muted); font-size: 8px; }

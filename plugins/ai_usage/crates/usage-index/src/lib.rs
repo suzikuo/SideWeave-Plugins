@@ -115,7 +115,9 @@ CREATE TABLE IF NOT EXISTS event_extra(
     event_id   INTEGER PRIMARY KEY,
     duration_ms INTEGER,
     turn_id TEXT,
-    account_id TEXT
+    account_id TEXT,
+    reasoning_effort TEXT,
+    service_tier TEXT
 );
 CREATE TABLE IF NOT EXISTS file_state(
     source_key TEXT    PRIMARY KEY,
@@ -547,6 +549,27 @@ impl Index {
             .map_err(sql_err)?;
         }
         conn.execute_batch(account_groups::SCHEMA).map_err(sql_err)?;
+        let extra_columns = conn.prepare("PRAGMA table_info(event_extra)").map_err(sql_err)?
+            .query_map([], |row| row.get::<_, String>(1)).map_err(sql_err)?
+            .collect::<std::result::Result<HashSet<_>, _>>().map_err(sql_err)?;
+        for column in ["reasoning_effort", "service_tier"] {
+            if !extra_columns.contains(column) {
+                conn.execute(&format!("ALTER TABLE event_extra ADD COLUMN {column} TEXT"), []).map_err(sql_err)?;
+            }
+        }
+        let settings_backfill: Option<String> = conn.query_row(
+            "SELECT value FROM meta WHERE key='codex_request_settings_v1'", [], |r| r.get(0),
+        ).optional().map_err(sql_err)?;
+        if settings_backfill.as_deref() != Some("1") {
+            // Stable Codex line keys make a metadata replay idempotent. Keep
+            // all events, account links and imported records in place.
+            conn.execute_batch(
+                "BEGIN IMMEDIATE; \
+                 UPDATE file_state SET cursor=0, mtime_ms=0 WHERE tool='codex'; \
+                 INSERT OR REPLACE INTO meta(key,value) VALUES('codex_request_settings_v1','1'); \
+                 COMMIT;",
+            ).map_err(sql_err)?;
+        }
         // Rebuild only local Codex rows once: older indexes have neither names
         // from session_index/state_5 nor task duration. Imported machine rows
         // remain intact and keep their original origin.
@@ -1026,11 +1049,11 @@ impl Index {
     fn fetch(&self, since_ms: Option<i64>) -> Result<Vec<UsageEvent>> {
         let (event_sql, ts_filter) = match since_ms {
             Some(_) => (
-                format!("SELECT {SELECT_EVENT_COLS}, extra.duration_ms, extra.turn_id, extra.account_id FROM event LEFT JOIN event_extra extra ON extra.event_id = event.id WHERE ts_ms >= ?1 ORDER BY id"),
+                format!("SELECT {SELECT_EVENT_COLS}, extra.duration_ms, extra.turn_id, extra.account_id, extra.reasoning_effort, extra.service_tier FROM event LEFT JOIN event_extra extra ON extra.event_id = event.id WHERE ts_ms >= ?1 ORDER BY id"),
                 "WHERE event_id IN (SELECT id FROM event WHERE ts_ms >= ?1) ORDER BY event_id",
             ),
             None => (
-                format!("SELECT {SELECT_EVENT_COLS}, extra.duration_ms, extra.turn_id, extra.account_id FROM event LEFT JOIN event_extra extra ON extra.event_id = event.id ORDER BY id"),
+                format!("SELECT {SELECT_EVENT_COLS}, extra.duration_ms, extra.turn_id, extra.account_id, extra.reasoning_effort, extra.service_tier FROM event LEFT JOIN event_extra extra ON extra.event_id = event.id ORDER BY id"),
                 "ORDER BY event_id",
             ),
         };
@@ -1057,6 +1080,8 @@ impl Index {
                         account_id: r.get(18)?,
                         duration_ms: r.get(16)?,
                         turn_id: r.get(17)?,
+                        reasoning_effort: r.get(19)?,
+                        service_tier: r.get(20)?,
                         project: r.get(5)?,
                         model: r.get(6)?,
                         counts,

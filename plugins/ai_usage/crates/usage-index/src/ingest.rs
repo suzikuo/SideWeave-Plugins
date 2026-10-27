@@ -703,11 +703,13 @@ fn persist(
             .map_err(sql_err)?;
         let mut up_extra = tx
             .prepare(
-                "INSERT INTO event_extra(event_id, duration_ms, turn_id, account_id) VALUES(?1, ?2, ?3, ?4) \
+                "INSERT INTO event_extra(event_id, duration_ms, turn_id, account_id, reasoning_effort, service_tier) VALUES(?1, ?2, ?3, ?4, ?5, ?6) \
                  ON CONFLICT(event_id) DO UPDATE SET \
                     duration_ms = COALESCE(excluded.duration_ms, event_extra.duration_ms), \
                     turn_id = COALESCE(excluded.turn_id, event_extra.turn_id), \
-                    account_id = COALESCE(excluded.account_id, event_extra.account_id)",
+                    account_id = COALESCE(excluded.account_id, event_extra.account_id), \
+                    reasoning_effort = COALESCE(excluded.reasoning_effort, event_extra.reasoning_effort), \
+                    service_tier = COALESCE(excluded.service_tier, event_extra.service_tier)",
             )
             .map_err(sql_err)?;
         // Prepared once per persist, not once per event: on a first ingest of a
@@ -760,9 +762,9 @@ fn persist(
                     .account_id
                     .as_deref()
                     .is_some_and(|account_id| old_account_id.as_deref() != Some(account_id));
-                if ev.duration_ms.is_some() || ev.turn_id.is_some() || ev.account_id.is_some() {
+                if ev.duration_ms.is_some() || ev.turn_id.is_some() || ev.account_id.is_some() || ev.reasoning_effort.is_some() || ev.service_tier.is_some() {
                     up_extra
-                        .execute(params![old_id, ev.duration_ms, ev.turn_id, ev.account_id])
+                        .execute(params![old_id, ev.duration_ms, ev.turn_id, ev.account_id, ev.reasoning_effort, ev.service_tier])
                         .map_err(sql_err)?;
                 }
                 if new_total > old_total {
@@ -874,9 +876,9 @@ fn persist(
             *acc.new_by_tool.entry(tool.to_string()).or_default() += 1;
             inserted += 1;
             let id = tx.last_insert_rowid();
-            if ev.duration_ms.is_some() || ev.turn_id.is_some() || ev.account_id.is_some() {
+            if ev.duration_ms.is_some() || ev.turn_id.is_some() || ev.account_id.is_some() || ev.reasoning_effort.is_some() || ev.service_tier.is_some() {
                 up_extra
-                    .execute(params![id, ev.duration_ms, ev.turn_id, ev.account_id])
+                    .execute(params![id, ev.duration_ms, ev.turn_id, ev.account_id, ev.reasoning_effort, ev.service_tier])
                     .map_err(sql_err)?;
             }
             for call in &ev.calls {

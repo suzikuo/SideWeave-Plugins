@@ -25,6 +25,10 @@ struct Attribution {
     turn_model: Option<String>,
     session_title: Option<String>,
     current_turn_id: Option<String>,
+    reasoning_effort: Option<String>,
+    service_tier: Option<String>,
+    thread_effort: Option<String>,
+    thread_tier: Option<String>,
     task_started_ms: Option<i64>,
     completed_duration: Option<(String, i64)>,
     /// Identity of the previous `token_count`: the session accumulator plus the
@@ -90,7 +94,7 @@ impl Attribution {
                 if title.is_some() { self.session_title = title; }
                 None
             }
-            Record::TurnContext { turn_id, model, cwd } => {
+            Record::TurnContext { turn_id, model, cwd, reasoning_effort, service_tier } => {
                 if turn_id.is_some() {
                     self.current_turn_id = turn_id;
                 }
@@ -100,6 +104,15 @@ impl Attribution {
                 if self.project.is_none() {
                     self.project = cwd;
                 }
+                self.reasoning_effort = reasoning_effort.unwrap_or_else(|| self.thread_effort.clone());
+                self.service_tier = service_tier.unwrap_or_else(|| self.thread_tier.clone());
+                None
+            }
+            Record::SettingsApplied { reasoning_effort, service_tier } => {
+                // This checkpoint selects defaults for future contexts. It must
+                // not relabel an already running turn when settings are changed.
+                self.thread_effort = reasoning_effort;
+                self.thread_tier = service_tier;
                 None
             }
             Record::TaskStarted { turn_id, ts_ms } => {
@@ -149,6 +162,8 @@ impl Attribution {
         ev.account_id = self.account_id.clone();
         ev.duration_ms = usage.duration_ms;
         ev.turn_id = usage.turn_id.clone();
+        ev.reasoning_effort = self.reasoning_effort.clone();
+        ev.service_tier = self.service_tier.clone();
         ev.project = self.project.clone();
         ev.model = self.model();
         ev.meter = Meter::Tokens;
@@ -191,6 +206,7 @@ fn try_read(path: &Path, cursor: ReadCursor, source_key: &str) -> std::io::Resul
         state.turn_model = model;
         state.project = cwd;
         state.current_turn_id = turn_id;
+        recover_request_settings(&mut file, start, &mut state);
         state.task_started_ms = recover_task_started(&mut file, start);
         state.account_id = recover_account_id(&mut file);
     }
@@ -256,6 +272,29 @@ const SEED_CHUNK: u64 = 256 * 1024;
 const SEED_CAP: u64 = 8 * 1024 * 1024;
 const MARKER: &[u8] = b"turn_context";
 const START_MARKER: &[u8] = b"task_started";
+
+/// Restore only recorded settings on an incremental read. Never read today's
+/// config.toml to infer a historical request. Older checkpoints outside this
+/// bounded window leave the tier unknown rather than borrowing stale settings.
+fn recover_request_settings(file: &mut std::fs::File, cursor: u64, state: &mut Attribution) {
+    let base = cursor.saturating_sub(SEED_CAP);
+    let mut bytes = vec![0u8; (cursor - base) as usize];
+    if file.seek(SeekFrom::Start(base)).is_err() || file.read_exact(&mut bytes).is_err() {
+        return;
+    }
+    let mut settings = Attribution::default();
+    for (i, line) in bytes.split(|b| *b == b'\n').enumerate() {
+        if i == 0 && base > 0 { continue; }
+        let Ok(raw) = std::str::from_utf8(line) else { continue };
+        if raw.contains("turn_context") || raw.contains("thread_settings_applied") {
+            settings.apply(raw);
+        }
+    }
+    state.reasoning_effort = settings.reasoning_effort;
+    state.service_tier = settings.service_tier;
+    state.thread_effort = settings.thread_effort;
+    state.thread_tier = settings.thread_tier;
+}
 
 /// Finds the current turn's start line near the cursor. A `task_complete` can
 /// arrive in a later append after its token_count was already indexed.
@@ -424,7 +463,7 @@ fn scan_for_turn_context(buf: &[u8], at_bof: bool) -> Scan {
         };
         let line_end = rel + nl;
         if let Ok(line) = std::str::from_utf8(&buf[line_start..line_end]) {
-            if let Some(Record::TurnContext { turn_id, model, cwd }) = parser::parse_record(line) {
+            if let Some(Record::TurnContext { turn_id, model, cwd, .. }) = parser::parse_record(line) {
                 return Scan::Found((turn_id, model, cwd));
             }
         }

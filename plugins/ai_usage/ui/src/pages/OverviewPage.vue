@@ -81,6 +81,7 @@ const { summary, formatTokens, formatMoney, period, report, trendDays, trendOpti
             <div class="quota-reset">{{ resetTimeText(quota.resets_at_ms) }} · {{ resetLabel(quota.resets_at_ms) }}</div>
             <div v-if="quotaEstimate(quota)?.total_cost_usd != null" class="quota-reset">预估满额 ≈ {{ formatMoney(quotaEstimate(quota)!.total_cost_usd!) }}</div>
             <div v-if="quotaEstimate(quota)?.coverage_note" class="quota-reset">{{ quotaEstimate(quota)!.coverage_note }}</div>
+            <div v-if="quotaEstimate(quota)?.speed_note" class="quota-reset">{{ quotaEstimate(quota)!.speed_note }}</div>
           </div>
         </div>
         <div v-else class="empty-compact"><span>◷</span><strong>暂时没有实时配额</strong><small>有些工具仅保存本地用量记录。</small></div>

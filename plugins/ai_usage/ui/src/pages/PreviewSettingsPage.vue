@@ -2,7 +2,7 @@
 import { inject } from 'vue'
 import { aiUsageKey } from '../context'
 
-const { previewSettingsError, previewSettings, previewWidgetOptions, hasPreviewWidget, togglePreviewWidget, previewSettingsMessage, previewSettingsLoading, resetPreviewSettings, savePreviewSettings, previewSettingsSaving, previewSample, formatTokens, formatMoney, toolName, formatTime, quotaWindow, percent, resetLabel, resetTimeText, previewQuotaEstimate } = inject(aiUsageKey)!
+const { previewSettingsError, previewSettings, previewWidgetOptions, hasPreviewWidget, togglePreviewWidget, previewSettingsMessage, previewSettingsLoading, resetPreviewSettings, savePreviewSettings, previewSettingsSaving, previewSample, previewSampleLoading, previewRangeLabel, setPreviewTimeRange, formatTokens, formatMoney, toolName, formatTime, quotaWindow, percent, resetLabel, resetTimeText, previewQuotaEstimate } = inject(aiUsageKey)!
 </script>
 
 <template>
@@ -11,7 +11,13 @@ const { previewSettingsError, previewSettings, previewWidgetOptions, hasPreviewW
     <div v-if="previewSettingsError" class="notice-banner">{{ previewSettingsError }}</div>
     <div class="preview-settings-layout">
       <article class="panel preview-settings-panel">
-        <div class="settings-heading"><div><div class="section-kicker">CONTENT</div><h3>展示内容</h3></div><span class="subtle-pill">{{ previewSettings.widgets.length }} 项已选</span></div>
+        <div class="settings-heading"><div><div class="section-kicker">PERIOD</div><h3>统计范围</h3></div></div>
+        <div class="display-mode-options">
+          <button class="display-mode-option" :class="{ selected: previewSettings.time_range === 'today' }" :disabled="previewSettingsLoading || previewSettingsSaving" @click="setPreviewTimeRange('today')"><strong>今天</strong><small>本地时间 00:00 至现在</small></button>
+          <button class="display-mode-option" :class="{ selected: previewSettings.time_range === 'last_24h' }" :disabled="previewSettingsLoading || previewSettingsSaving" @click="setPreviewTimeRange('last_24h')"><strong>最近 24 小时</strong><small>从当前时间向前滚动统计</small></button>
+        </div>
+
+        <div class="settings-heading display-heading"><div><div class="section-kicker">CONTENT</div><h3>展示内容</h3></div><span class="subtle-pill">{{ previewSettings.widgets.length }} 项已选</span></div>
         <div class="preview-option-list">
           <button v-for="option in previewWidgetOptions" :key="option.id" class="preview-option" :class="{ selected: hasPreviewWidget(option.id) }" @click="togglePreviewWidget(option.id)">
             <span class="option-check" aria-hidden="true">{{ hasPreviewWidget(option.id) ? '✓' : '' }}</span>
@@ -39,8 +45,9 @@ const { previewSettingsError, previewSettings, previewWidgetOptions, hasPreviewW
 
       <article class="preview-demo-column">
         <div class="preview-demo-label"><div><div class="section-kicker">LIVE PREVIEW</div><h3>预览效果</h3></div><span class="subtle-pill">360 × 260</span></div>
-        <div class="preview-live-card" :class="previewSettings.display_mode">
-          <div class="preview-live-head"><span class="preview-live-mark"><i></i><i></i><i></i></span><div><strong>AI 用量</strong><small>最近 24 小时</small></div><span class="live-indicator"><i></i> 本机</span></div>
+        <div v-if="previewSampleLoading" class="loading-table">正在读取预览数据…</div>
+        <div v-else class="preview-live-card" :class="previewSettings.display_mode">
+          <div class="preview-live-head"><span class="preview-live-mark"><i></i><i></i><i></i></span><div><strong>AI 用量</strong><small>{{ previewRangeLabel }}</small></div><span class="live-indicator"><i></i> 本机</span></div>
           <div v-if="hasPreviewWidget('quotas')" class="preview-live-quotas">
             <div class="preview-live-section-title">订阅配额</div>
             <template v-if="previewSample?.quotas.length">
@@ -49,7 +56,6 @@ const { previewSettingsError, previewSettings, previewWidgetOptions, hasPreviewW
                 <i class="preview-live-quota-track"><b :class="{ warning: quota.used_percent >= 75, danger: quota.used_percent >= 92 }" :style="{ width: `${Math.max(0, Math.min(100, 100 - quota.used_percent))}%` }"></b></i>
                 <small>{{ resetTimeText(quota.resets_at_ms) }} · {{ resetLabel(quota.resets_at_ms) }}</small>
                 <small v-if="previewQuotaEstimate(quota)?.total_cost_usd != null">预估满额 ≈ {{ formatMoney(previewQuotaEstimate(quota)!.total_cost_usd!) }}</small>
-                <small v-if="previewQuotaEstimate(quota)?.coverage_note">{{ previewQuotaEstimate(quota)!.coverage_note }}</small>
               </div>
             </template>
             <small v-else>暂时没有读取到订阅额度</small>
@@ -57,14 +63,14 @@ const { previewSettingsError, previewSettings, previewWidgetOptions, hasPreviewW
           <div class="preview-live-metrics" :class="previewSettings.display_mode">
             <div v-if="hasPreviewWidget('tokens')" class="preview-live-metric"><small>TOKEN 总量</small><strong>{{ formatTokens(previewSample?.total_tokens ?? 0) }}</strong><span>输入 {{ formatTokens(previewSample?.input_tokens ?? 0) }} · 输出 {{ formatTokens(previewSample?.output_tokens ?? 0) }}</span></div>
             <div v-if="hasPreviewWidget('cost')" class="preview-live-metric"><small>费用估算</small><strong>{{ formatMoney((previewSample?.cost_usd ?? 0) + (previewSample?.credit_cost_usd ?? 0)) }}</strong><span>{{ previewSample?.unpriced_models ? `${previewSample.unpriced_models} 个模型缺少价格` : '按模型价格估算' }}</span></div>
-            <div v-if="hasPreviewWidget('requests')" class="preview-live-metric"><small>请求次数</small><strong>{{ formatTokens(previewSample?.requests ?? 0, false) }}</strong><span>最近 24 小时记录</span></div>
+            <div v-if="hasPreviewWidget('requests')" class="preview-live-metric"><small>请求次数</small><strong>{{ formatTokens(previewSample?.requests ?? 0, false) }}</strong><span>{{ previewRangeLabel }}记录</span></div>
           </div>
           <div v-if="hasPreviewWidget('split')" class="preview-live-split"><div><span>输入</span><i><b :style="{ width: `${Math.max(2, (previewSample?.input_tokens ?? 0) / Math.max(1, (previewSample?.input_tokens ?? 0) + (previewSample?.output_tokens ?? 0)) * 100)}%` }"></b></i><span>输出</span></div></div>
           <div v-if="hasPreviewWidget('tools')" class="preview-live-tools"><div class="preview-live-section-title">工具排行</div><template v-if="previewSample?.tools.length"><div v-for="tool in previewSample.tools.slice(0, 2)" :key="tool.tool" class="preview-live-tool"><span>{{ toolName(tool.tool) }}</span><strong>{{ formatTokens(tool.total_tokens) }}</strong></div></template><small v-else>暂无工具用量记录</small></div>
           <div v-if="hasPreviewWidget('updated')" class="preview-live-foot">{{ previewSample?.last_ingest_ms ? `更新于 ${formatTime(previewSample.last_ingest_ms)}` : '尚未扫描本机日志' }}</div>
           <div v-if="!previewSettings.widgets.length" class="preview-live-empty">尚未选择展示内容</div>
         </div>
-        <p class="preview-demo-note">实际预览读取最近 24 小时的本机索引；费用仅统计匹配到价格的模型。</p>
+        <p class="preview-demo-note">当前效果读取{{ previewRangeLabel }}的本机索引；保存后应用到悬停预览。</p>
       </article>
     </div>
   </section>

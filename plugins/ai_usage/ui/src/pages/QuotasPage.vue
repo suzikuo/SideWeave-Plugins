@@ -47,6 +47,7 @@ const { quotaRows, toolInitial, toolName, quotaWindow, quotaOrigin, percent, res
           </template>
           <span v-else>{{ quotaEstimate(quota)?.reason ?? '等待窗口费用数据' }}</span>
           <small v-if="quotaEstimate(quota)?.coverage_note">{{ quotaEstimate(quota)!.coverage_note }}</small>
+          <small v-if="quotaEstimate(quota)?.speed_note">{{ quotaEstimate(quota)!.speed_note }}</small>
         </div>
         <div class="quota-sampled">最近读取 {{ formatTime(quota.sampled_at_ms) }}</div>
       </article>
