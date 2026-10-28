@@ -3,6 +3,8 @@ resolver = "2"
 members = [
     "plugins/app_launcher",
     "plugins/ai_usage",
+    "plugins/ai_manager",
+    "plugins/ai_manager/core",
     "plugins/bookmarks",
     "plugins/clipboard",
     "plugins/cloudflare_tunnel",

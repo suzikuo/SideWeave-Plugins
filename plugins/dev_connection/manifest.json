@@ -4,7 +4,7 @@
   "id": "dev_connection",
   "name": "开发连接台",
   "icon": "ui/icon.svg",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "集中管理 SSH 会话、本地端口转发与 Cloudflare Tunnel",
   "author": "SideWeave",
   "type": "native",

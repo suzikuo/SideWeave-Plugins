@@ -150,6 +150,7 @@ async function toggleRun(rule: GwRuleView) {
     if (!rule.running) showToast(`「${rule.name}」已开始转发`, 'success')
   } catch (e) {
     showToast(String(e), 'error')
+    await refresh(true)
   }
 }
 
@@ -369,6 +370,7 @@ async function save() {
               <span class="arrow">→</span>
               <span>{{ r.target_host }}:{{ r.target_port }}</span>
             </div>
+            <div v-if="r.last_error" class="rule-error" role="alert">{{ r.last_error }}</div>
           </div>
           <div class="ops">
             <Button variant="default" size="sm" v-if="!r.running" class="btn primary sm" @click="toggleRun(r)">
@@ -899,6 +901,13 @@ async function save() {
 }
 .request-hint {
   color: var(--text-muted);
+}
+.rule-error {
+  margin-top: 5px;
+  color: var(--danger);
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 .connection-error {
   overflow-wrap: anywhere;

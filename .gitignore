@@ -6,3 +6,4 @@ dist/
 *.log
 *.tmp
 *.bak
+plugins\ai_manager

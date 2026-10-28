@@ -2,6 +2,9 @@ mod cloudflare_tunnel;
 mod port_forward;
 mod ssh;
 
+#[cfg(test)]
+mod tests;
+
 use serde_json::{json, Value};
 use sideweave_plugin_api::{
     ErrorCode, PluginError, PluginManifest, PluginRequest, PluginRequestKind, PluginResponse,

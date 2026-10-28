@@ -577,6 +577,13 @@ fn handle_connection(
         .map(|address| address.to_string())
         .unwrap_or_else(|_| format!("{LISTEN_HOST}:{listen_port}"));
     let log = new_connection_log(&rule_name, source_addr, listen_addr, &host, port);
+    // Winsock accept() inherits the nonblocking listener's mode. The relay uses
+    // blocking reads/writes; otherwise an idle client triggers WouldBlock and
+    // closes both directions before the target can send its response.
+    if let Err(error) = client.set_nonblocking(false) {
+        update_log_status(&log, "转发启动失败", Some(error.to_string()), true);
+        return;
+    }
     let target = match connect_target(&host, port) {
         Ok(stream) => stream,
         Err(error) => {
@@ -734,8 +741,14 @@ fn bind_listener(port: u16) -> io::Result<TcpListener> {
 fn start_rule(rule: &GwRule) -> Result<(), String> {
     stop_rule(&rule.id);
     wait_stopped(&rule.id);
-    let listener =
-        bind_listener(rule.listen_port).map_err(|error| format!("监听端口失败: {error}"))?;
+    let listener = bind_listener(rule.listen_port).map_err(|error| {
+        let hint = if error.kind() == io::ErrorKind::AddrInUse {
+            "；端口已被占用，请停止独立端口工具或其他规则对该端口的转发"
+        } else {
+            ""
+        };
+        format!("监听 {LISTEN_HOST}:{} 失败: {error}{hint}", rule.listen_port)
+    })?;
     listener
         .set_nonblocking(true)
         .map_err(|error| error.to_string())?;
@@ -780,6 +793,7 @@ fn stop_all() {
 
 pub struct PortForwardPlugin {
     manifest: PluginManifest,
+    start_errors: HashMap<String, String>,
 }
 
 impl Default for PortForwardPlugin {
@@ -791,6 +805,7 @@ impl Default for PortForwardPlugin {
 impl PortForwardPlugin {
     pub fn new() -> Self {
         Self {
+            start_errors: HashMap::new(),
             manifest: PluginManifest {
                 manifest_version: MANIFEST_VERSION,
                 api_version: API_VERSION,
@@ -823,10 +838,32 @@ impl PortForwardPlugin {
         }
     }
 
-    fn call(&self, request: &PluginRequest, context: &PluginContext) -> Result<Value, String> {
+    fn rule_value(&self, rule: &GwRule) -> Value {
+        let mut value = rule_value(rule);
+        value["last_error"] = json!(self.start_errors.get(&rule.id));
+        value
+    }
+
+    fn start_rule(&mut self, rule: &GwRule) -> Result<(), String> {
+        match start_rule(rule) {
+            Ok(()) => {
+                self.start_errors.remove(&rule.id);
+                Ok(())
+            }
+            Err(error) => {
+                self.start_errors.insert(rule.id.clone(), error.clone());
+                Err(error)
+            }
+        }
+    }
+
+    fn call(&mut self, request: &PluginRequest, context: &PluginContext) -> Result<Value, String> {
         match request.method.as_deref() {
             Some("list") => Ok(Value::Array(
-                load_rules(context).iter().map(rule_value).collect(),
+                load_rules(context)
+                    .iter()
+                    .map(|rule| self.rule_value(rule))
+                    .collect(),
             )),
             Some("connection_logs") => Ok(list_connection_logs()),
             Some("clear_connection_logs") => {
@@ -888,9 +925,11 @@ impl PortForwardPlugin {
                     .unwrap_or(false);
                 save_rules(context, &rules)?;
                 if running {
-                    start_rule(&rule)?;
+                    self.start_rule(&rule)?;
+                } else {
+                    self.start_errors.remove(&rule.id);
                 }
-                Ok(rule_value(&rule))
+                Ok(self.rule_value(&rule))
             }
             Some("delete") => {
                 let id = string_field(&request.payload, "id")?;
@@ -903,6 +942,7 @@ impl PortForwardPlugin {
                     return Err("规则不存在".into());
                 }
                 save_rules(context, &rules)?;
+                self.start_errors.remove(&id);
                 Ok(Value::Null)
             }
             Some("set_running") => {
@@ -917,12 +957,13 @@ impl PortForwardPlugin {
                     .find(|rule| rule.id == id)
                     .ok_or_else(|| "规则不存在".to_string())?;
                 if running {
-                    start_rule(&rule)?;
+                    self.start_rule(&rule)?;
                 } else {
                     stop_rule(&id);
                     wait_stopped(&id);
+                    self.start_errors.remove(&id);
                 }
-                Ok(rule_value(&rule))
+                Ok(self.rule_value(&rule))
             }
             Some(method) => Err(format!("不支持的端口转发方法: {method}")),
             None => Err("缺少插件方法".into()),
@@ -937,7 +978,8 @@ impl Plugin for PortForwardPlugin {
     fn handle(&mut self, request: PluginRequest, context: &PluginContext) -> PluginResponse {
         if matches!(request.kind, PluginRequestKind::Activate) {
             for rule in load_rules(context).into_iter().filter(|rule| rule.enabled) {
-                let _ = start_rule(&rule);
+                // Keep failures visible in ports.list, even when activation has no UI.
+                let _ = self.start_rule(&rule);
             }
             return success_response(&request, Value::Null);
         }
@@ -946,6 +988,7 @@ impl Plugin for PortForwardPlugin {
             PluginRequestKind::Deactivate | PluginRequestKind::Shutdown
         ) {
             stop_all();
+            self.start_errors.clear();
             stop_log_pruner_and_clear();
             return success_response(&request, Value::Null);
         }

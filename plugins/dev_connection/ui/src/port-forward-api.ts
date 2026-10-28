@@ -10,6 +10,7 @@ export interface GwRuleView {
   in_preview: boolean
   running: boolean
   conns: number
+  last_error: string | null
 }
 
 export interface GwRuleInput {
