@@ -1,6 +1,6 @@
 use super::{set_error, wide, UiState, DEFAULT_GUI_FONT};
 use crate::model::{ScreenPoint, ScreenRect};
-use crate::recorder::AnimationFormat;
+use crate::recorder::{AnimationFormat, GifExportQuality};
 use std::ffi::c_void;
 use std::mem::{size_of, zeroed};
 use std::path::PathBuf;
@@ -12,23 +12,27 @@ use windows_sys::Win32::Graphics::Gdi::{
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::SystemServices::MK_LBUTTON;
+use windows_sys::Win32::UI::Controls::{
+    TaskDialogIndirect, TASKDIALOG_BUTTON, TASKDIALOGCONFIG, TDCBF_CANCEL_BUTTON,
+    TDCBF_OK_BUTTON, TDF_ALLOW_DIALOG_CANCELLATION,
+};
 use windows_sys::Win32::UI::Controls::Dialogs::{
     GetSaveFileNameW, OFN_EXPLORER, OFN_OVERWRITEPROMPT, OFN_PATHMUSTEXIST, OPENFILENAMEW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DestroyWindow, GetCursorPos, GetWindowRect, KillTimer,
-    SetLayeredWindowAttributes, SetTimer, SetWindowPos, ShowWindow, LWA_ALPHA, LWA_COLORKEY,
-    SWP_NOACTIVATE, SWP_NOZORDER, SWP_NOSIZE, SW_SHOWNOACTIVATE, WM_CAPTURECHANGED, WM_CLOSE,
-    WM_DESTROY, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT,
-    WM_TIMER, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_POPUP,
+    MessageBoxW, SetLayeredWindowAttributes, SetTimer, SetWindowPos, ShowWindow, LWA_ALPHA,
+    LWA_COLORKEY, MB_ICONERROR, MB_OK, SWP_NOACTIVATE, SWP_NOZORDER, SWP_NOSIZE,
+    SW_SHOWNOACTIVATE, WM_CAPTURECHANGED, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_TIMER, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, IDOK, WS_POPUP,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 
 const CONTROL_TIMER: usize = 0x5243;
 const CONTROL_WIDTH: i32 = 448;
 const CONTROL_HEIGHT: i32 = 64;
-const TIMER_TEXT_RECT: RECT = RECT { left: 126, top: 10, right: 314, bottom: 54 };
+const TIMER_TEXT_RECT: RECT = RECT { left: 48, top: 2, right: 314, bottom: 62 };
 const PAUSE_BUTTON: (i32, i32, i32, i32) = (48, 10, 92, 54);
 const STOP_BUTTON: (i32, i32, i32, i32) = (326, 9, 436, 55);
 const CANCEL_BUTTON: (i32, i32, i32, i32) = (326, 9, 436, 55);
@@ -44,6 +48,7 @@ pub(super) fn create_control_toolbar(
     screen: ScreenRect,
 ) -> Result<(), String> {
     destroy_control_toolbar(state);
+    state.recording_error_dialog_message = None;
     let (x, y) = control_position(selection, screen);
     let class_name = wide("AgileTilesScreenshotCoreV2");
     let hwnd = unsafe {
@@ -107,8 +112,13 @@ pub(super) unsafe fn control_wnd_proc(
         }
         WM_TIMER => {
             let status = state.recording.snapshot();
-            if status.phase == "preview" && state.editor.is_none() {
-                super::open_recording_editor(state);
+            show_error_details_if_needed(state, hwnd, &status);
+            if status.phase == "preview"
+                && state.recording_auto_open_pending
+                && state.editor.is_none()
+                && !state.recording_export_dialog_open
+            {
+                super::queue_open_recording_editor(state);
             } else if state.recording_toolbar_static_signature.as_deref()
                 != Some(recording_toolbar_static_signature(&status).as_str()) {
                 InvalidateRect(hwnd, std::ptr::null(), 0);
@@ -246,8 +256,14 @@ unsafe fn paint_control_toolbar(hwnd: HWND, state: &mut UiState) {
             draw_control_text(dc, 126, 10, 314, 54, &recording_time_text(&status), 0x004a5666);
             draw_control_button(dc, STOP_BUTTON, "结束录制", 0x00454af5, true);
         }
-        "processing" | "exporting" | "cancelling" => {
-            draw_control_text(dc, 48, 10, 314, 54, &label, 0x004a5666);
+        "processing" => {
+            draw_control_text(dc, 48, 10, 436, 54, &label, 0x004a5666);
+        }
+        "exporting" | "cancelling" => {
+            draw_control_text(dc, 48, 3, 314, 40, &label, 0x004a5666);
+            if status.phase == "exporting" {
+                draw_control_progress_bar(dc, 48, 47, 314, 55, status.progress_percent);
+            }
             draw_control_button(dc, CANCEL_BUTTON, "取消", 0x00f3f5f8, false);
         }
         "preview" => {
@@ -352,13 +368,54 @@ unsafe fn draw_status_dot(dc: windows_sys::Win32::Graphics::Gdi::HDC, x: i32, y:
     DeleteObject(brush as _);
 }
 
+unsafe fn draw_control_progress_bar(
+    dc: windows_sys::Win32::Graphics::Gdi::HDC,
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+    percent: u8,
+) {
+    let track_brush = CreateSolidBrush(0x00dce2e9);
+    let track = RECT {
+        left,
+        top,
+        right,
+        bottom,
+    };
+    FillRect(dc, &track, track_brush);
+    DeleteObject(track_brush as _);
+
+    let filled_right = left + ((right - left) * i32::from(percent.min(100)) / 100);
+    if filled_right <= left {
+        return;
+    }
+    let progress_brush = CreateSolidBrush(0x00f76f16);
+    let progress = RECT {
+        left,
+        top,
+        right: filled_right,
+        bottom,
+    };
+    FillRect(dc, &progress, progress_brush);
+    DeleteObject(progress_brush as _);
+}
+
 fn control_status_text(status: &crate::recorder::RecordingStatus) -> String {
     match status.phase.as_str() {
         "recording" => "屏幕录制中".into(),
-        "processing" => "正在生成预览…".into(),
-        "exporting" => "正在导出…".into(),
+        "processing" => "正在结束录制，请稍候…".into(),
+        "exporting" => format!(
+            "{} {}%",
+            status.message.as_deref().unwrap_or("正在导出…"),
+            status.progress_percent
+        ),
         "cancelling" => "正在取消…".into(),
-        "preview" => format!("预览就绪 · {} 帧", status.frame_count),
+        "preview" => match status.message.as_deref() {
+            Some(message) if message.starts_with("导出失败：") => "导出失败，点编辑查看".into(),
+            Some(message) if message.starts_with("导出完成：") => "导出完成".into(),
+            _ => format!("预览就绪 · {} 帧", status.frame_count),
+        },
         "error" => status.message.clone().unwrap_or_else(|| "录制失败".into()),
         "cancelled" => "录制已取消".into(),
         _ => "录制工具".into(),
@@ -368,11 +425,16 @@ fn control_status_text(status: &crate::recorder::RecordingStatus) -> String {
 fn recording_toolbar_signature(status: &crate::recorder::RecordingStatus) -> String {
     let recording = status.phase == "recording";
     format!(
-        "{}|{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}|{}",
         status.phase,
         status.paused,
         if recording { status.elapsed_ms / 1000 } else { 0 },
         if recording { 0 } else { status.frame_count },
+        if status.phase == "exporting" {
+            status.progress_percent
+        } else {
+            0
+        },
         status.message.as_deref().unwrap_or_default()
     )
 }
@@ -418,13 +480,13 @@ fn handle_control_click(state: &mut UiState, point: (i32, i32)) {
             }
         }
         "recording" if inside(point, STOP_BUTTON) => super::stop_recording(state),
-        "processing" | "exporting" if inside(point, CANCEL_BUTTON) => {
+        "exporting" if inside(point, CANCEL_BUTTON) => {
             state.recording.cancel();
             destroy_control_toolbar(state);
             super::restore_recording_selection(state);
         }
         "preview" if inside(point, EDIT_BUTTON) => {
-            super::open_recording_editor(state);
+            super::queue_open_recording_editor(state);
         }
         "preview" if inside(point, MP4_BUTTON) => {
             export_recording(state, AnimationFormat::Mp4);
@@ -453,26 +515,133 @@ fn inside(point: (i32, i32), rect: (i32, i32, i32, i32)) -> bool {
 }
 
 pub(super) fn export_recording(state: &mut UiState, format: AnimationFormat) {
+    // Export completion returns to preview; it must not trigger the one-time
+    // editor transition intended for the end of a new recording.
+    state.recording_auto_open_pending = false;
+    state.recording_error_dialog_message = None;
     let initial_dir = state
         .settings
         .lock()
         .map(|settings| settings.save_directory.clone())
         .unwrap_or_default();
-    let owner = if state.recording_toolbar.is_null() {
-        state.hwnd
-    } else {
+    let owner = if state.editor.is_some() {
+        state.overlay
+    } else if !state.recording_toolbar.is_null() {
         state.recording_toolbar
+    } else {
+        state.hwnd
     };
-    let Some(path) = save_animation_with_dialog(owner, format, &initial_dir) else {
+    state.recording_export_dialog_open = true;
+    let path = match save_animation_with_dialog(owner, format, &initial_dir) {
+        Ok(path) => path,
+        Err(error) => {
+            set_error(state, error);
+            return;
+        }
+    };
+    state.recording_export_dialog_open = false;
+    if let Some(toolbar) = (!state.recording_toolbar.is_null()).then_some(state.recording_toolbar) {
+        unsafe { SetTimer(toolbar, CONTROL_TIMER, 250, None) };
+    }
+    let Some((path, gif_export_quality)) = path else {
         return;
     };
-    let output_fps = super::configured_recording_fps(&state.settings, format);
-    let (_, mp4_bitrate_mbps) = super::configured_mp4_recording_options(&state.settings);
+    let output_fps = state.recording.snapshot().fps.max(1);
+    let (_, recording_bitrate_mbps) =
+        super::configured_recording_options(&state.settings);
+    let (gif_colors, webp_quality) =
+        super::configured_animation_export_options(&state.settings);
     if let Err(error) = state
         .recording
-        .export(format, path, output_fps, mp4_bitrate_mbps)
+        .export(
+            format,
+            gif_export_quality,
+            path,
+            output_fps,
+            recording_bitrate_mbps,
+            gif_colors,
+            webp_quality,
+        )
     {
         set_error(state, error);
+    } else if state.editor.is_some() {
+        if let Some(editor) = state.editor.as_mut() {
+            editor.playing = false;
+        }
+        unsafe {
+            KillTimer(state.overlay, super::editor::TIMER_RECORDING_PREVIEW);
+            SetTimer(
+                state.overlay,
+                super::editor::TIMER_RECORDING_EXPORT_STATUS,
+                250,
+                None,
+            );
+            InvalidateRect(state.overlay, std::ptr::null(), 0);
+        }
+    }
+}
+
+pub(super) fn show_error_details_if_needed(
+    state: &mut UiState,
+    owner: HWND,
+    status: &crate::recorder::RecordingStatus,
+) {
+    let is_recording_error = status.phase == "error";
+    let is_export_error = status.phase == "preview"
+        && status
+            .message
+            .as_deref()
+            .is_some_and(|message| message.starts_with("导出失败："));
+    if !is_recording_error && !is_export_error {
+        return;
+    }
+    let Some(message) = status.message.as_deref() else {
+        return;
+    };
+    if state.recording_error_dialog_message.as_deref() == Some(message) {
+        return;
+    }
+    state.recording_error_dialog_message = Some(message.to_string());
+
+    let title = wide(if is_export_error {
+        "AgileTiles 导出失败"
+    } else {
+        "AgileTiles 录制失败"
+    });
+    let instruction = wide(if is_export_error {
+        "导出没有完成"
+    } else {
+        "录制没有完成"
+    });
+    let content = wide(message);
+    let mut config: TASKDIALOGCONFIG = unsafe { zeroed() };
+    config.cbSize = size_of::<TASKDIALOGCONFIG>() as u32;
+    config.hwndParent = owner;
+    config.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION;
+    config.dwCommonButtons = TDCBF_OK_BUTTON;
+    config.pszWindowTitle = title.as_ptr();
+    config.pszMainInstruction = instruction.as_ptr();
+    config.pszContent = content.as_ptr();
+    config.nDefaultButton = IDOK;
+
+    let mut clicked_button = 0;
+    let result = unsafe {
+        TaskDialogIndirect(
+            &config,
+            &mut clicked_button,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if result < 0 {
+        unsafe {
+            MessageBoxW(
+                owner,
+                content.as_ptr(),
+                title.as_ptr(),
+                MB_OK | MB_ICONERROR,
+            )
+        };
     }
 }
 
@@ -480,25 +649,24 @@ fn save_animation_with_dialog(
     owner: windows_sys::Win32::Foundation::HWND,
     format: AnimationFormat,
     initial_dir: &str,
-) -> Option<PathBuf> {
-    let (description, title, default_name) = match format {
+) -> Result<Option<(PathBuf, GifExportQuality)>, String> {
+    let (title, default_name, filter) = match format {
         AnimationFormat::Webp => (
-            "Animated WebP (*.webp)",
             "Export animated WebP",
             "AgileTiles_Recording.webp",
+            wide("Animated WebP (*.webp)\0*.webp\0"),
         ),
         AnimationFormat::Gif => (
-            "GIF animation (*.gif)",
             "Export GIF",
             "AgileTiles_Recording.gif",
+            wide("GIF 动图 (*.gif)\0*.gif\0"),
         ),
         AnimationFormat::Mp4 => (
-            "MP4 video (*.mp4)",
             "Export MP4",
             "AgileTiles_Recording.mp4",
+            wide("MP4 video (*.mp4)\0*.mp4\0"),
         ),
     };
-    let filter = wide(&format!("{description}\0*.{}\0\0", format.extension()));
     let title = wide(title);
     let extension = wide(format.extension());
     let initial_dir = (!initial_dir.trim().is_empty()).then(|| wide(initial_dir));
@@ -516,19 +684,97 @@ fn save_animation_with_dialog(
     dialog.lpstrInitialDir = initial_dir_ptr.unwrap_or(std::ptr::null());
     dialog.lpstrTitle = title.as_ptr();
     dialog.lpstrDefExt = extension.as_ptr();
+    dialog.nFilterIndex = 1;
     dialog.Flags = OFN_EXPLORER | OFN_PATHMUSTEXIST | OFN_OVERWRITEPROMPT;
     if unsafe { GetSaveFileNameW(&mut dialog) } == 0 {
-        return None;
+        return Ok(None);
     }
+    let gif_export_quality = if format == AnimationFormat::Gif {
+        let Some(quality) = choose_gif_export_quality(owner)? else {
+            return Ok(None);
+        };
+        quality
+    } else {
+        GifExportQuality::Recommended
+    };
     let end = file
         .iter()
         .position(|value| *value == 0)
         .unwrap_or(file.len());
-    let selected = String::from_utf16(&file[..end]).ok()?;
+    let selected = String::from_utf16(&file[..end])
+        .map_err(|_| "无法读取导出文件名".to_string())?;
     if selected.trim().is_empty() {
-        return None;
+        return Ok(None);
     }
     let mut path = PathBuf::from(selected);
     path.set_extension(format.extension());
-    Some(path)
+    Ok(Some((path, gif_export_quality)))
+}
+
+fn choose_gif_export_quality(
+    owner: windows_sys::Win32::Foundation::HWND,
+) -> Result<Option<GifExportQuality>, String> {
+    let title = wide("GIF 导出参数");
+    let instruction = wide("选择导出画面的清晰度");
+    let content = wide("选择 GIF 画面尺寸上限。智能推荐会根据录制尺寸和帧率自动选择；尺寸越大，导出文件通常也越大。");
+    let options = [
+        wide("智能推荐（默认）"),
+        wide("清晰（最高 1080p）"),
+        wide("均衡（最高 720p）"),
+        wide("小文件（最高 540p）"),
+    ];
+    let radio_buttons = [
+        TASKDIALOG_BUTTON {
+            nButtonID: 1,
+            pszButtonText: options[0].as_ptr(),
+        },
+        TASKDIALOG_BUTTON {
+            nButtonID: 2,
+            pszButtonText: options[1].as_ptr(),
+        },
+        TASKDIALOG_BUTTON {
+            nButtonID: 3,
+            pszButtonText: options[2].as_ptr(),
+        },
+        TASKDIALOG_BUTTON {
+            nButtonID: 4,
+            pszButtonText: options[3].as_ptr(),
+        },
+    ];
+    let mut config: TASKDIALOGCONFIG = unsafe { zeroed() };
+    config.cbSize = size_of::<TASKDIALOGCONFIG>() as u32;
+    config.hwndParent = owner;
+    config.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION;
+    config.dwCommonButtons = TDCBF_OK_BUTTON | TDCBF_CANCEL_BUTTON;
+    config.pszWindowTitle = title.as_ptr();
+    config.pszMainInstruction = instruction.as_ptr();
+    config.pszContent = content.as_ptr();
+    config.cRadioButtons = radio_buttons.len() as u32;
+    config.pRadioButtons = radio_buttons.as_ptr();
+    config.nDefaultRadioButton = 1;
+    config.nDefaultButton = IDOK;
+
+    let mut clicked_button = 0;
+    let mut selected_option = 0;
+    let result = unsafe {
+        TaskDialogIndirect(
+            &config,
+            &mut clicked_button,
+            &mut selected_option,
+            std::ptr::null_mut(),
+        )
+    };
+    if result < 0 {
+        return Err(format!("无法打开 GIF 导出参数窗口（错误码 {result:#x}）"));
+    }
+    if clicked_button != IDOK {
+        return Ok(None);
+    }
+    let quality = match selected_option {
+        2 => GifExportQuality::High,
+        3 => GifExportQuality::Balanced,
+        4 => GifExportQuality::Small,
+        _ => GifExportQuality::Recommended,
+    };
+    Ok(Some(quality))
 }

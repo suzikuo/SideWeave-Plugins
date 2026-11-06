@@ -1,5 +1,7 @@
 mod draw;
+mod capture_flow;
 mod editor;
+mod hotkeys;
 mod input;
 mod ocr_ui;
 mod output;
@@ -7,6 +9,16 @@ mod paint;
 mod recording_ui;
 mod scroll_ui;
 mod toolbar_paint;
+
+use hotkeys::{
+    install_double_tap_f1_hook, register_hotkey, register_scroll_escape_hotkey,
+    unregister_scroll_escape_hotkey, update_hotkey, HotkeySpec, SCROLL_ESCAPE_HOTKEY_ID,
+};
+use capture_flow::{
+    begin_capture, cancel, export_recording_from_editor, open_recording_editor, request_cancel,
+    restore_recording_selection, start_recording_from_toolbar, start_recording_selected_region,
+    start_recording_selection, stop_recording, trigger_capture_or_stop_recording,
+};
 
 use std::ffi::c_void;
 use std::mem::zeroed;
@@ -20,13 +32,14 @@ use windows_sys::Win32::Graphics::Gdi::{HFONT, InvalidateRect};
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
 use windows_sys::Win32::System::SystemServices::MK_LBUTTON;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetCapture, RegisterHotKey, ReleaseCapture, SetCapture, SetFocus, UnregisterHotKey,
+    GetCapture, ReleaseCapture, SetCapture, SetFocus,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos,
     GetForegroundWindow, GetMessageW, GetWindowLongPtrW, KillTimer, LoadCursorW, PostMessageW,
     PostQuitMessage, RegisterClassW, SetCursor, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos,
-    ShowWindow, TranslateMessage, CS_DBLCLKS, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, IDC_ARROW, MSG, SW_HIDE,
+    ShowWindow, TranslateMessage, CS_DBLCLKS, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, HHOOK,
+    IDC_ARROW, MSG, SW_HIDE,
     SetLayeredWindowAttributes, SW_SHOW, WM_APP, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND,
     WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
     WM_NCCREATE, WM_NCHITTEST, WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSW, WS_EX_LAYERED,
@@ -45,7 +58,7 @@ use crate::tencent_ocr::TencentCloudCredentials;
 use self::editor::EditorCanvas;
 use self::input::{
     char_input, key_down, mouse_down, mouse_move, mouse_up, screen_point_from_lparam,
-    update_session_cursor, VK_A, VK_ESCAPE_CODE,
+    update_session_cursor, VK_ESCAPE_CODE,
 };
 use self::output::{pin_last, pin_wnd_proc};
 use self::paint::{create_overlay_render, paint, paint_editor, OverlayRender};
@@ -58,15 +71,9 @@ use self::scroll_ui::{
 
 pub(crate) const DEFAULT_GUI_FONT: i32 = 17;
 pub(crate) const WAKE: u32 = WM_APP + 1;
-pub(crate) const HOTKEY_ID: i32 = 41;
-pub(crate) const SCROLL_ESCAPE_HOTKEY_ID: i32 = 43;
+const DOUBLE_TAP_F1: u32 = WM_APP + 2;
 pub(crate) const TIMER_SCROLL: usize = 42;
 pub(crate) const SCROLL_OBSERVE_INTERVAL: u32 = 33;
-pub(crate) const MOD_ALT: u32 = 0x0001;
-pub(crate) const MOD_CONTROL: u32 = 0x0002;
-pub(crate) const MOD_SHIFT: u32 = 0x0004;
-pub(crate) const MOD_WIN: u32 = 0x0008;
-const MOD_NOREPEAT: u32 = 0x4000;
 
 pub(crate) const MAX_SCROLL_EXTENT: usize = 60000;
 pub(crate) const SCROLL_PREVIEW_WIDTH: i32 = 360;
@@ -87,10 +94,18 @@ pub(crate) enum ScrollPreviewFeedback {
     Rejected,
 }
 
+pub(crate) struct PinnedImageWindow {
+    pub(crate) hwnd: HWND,
+    pub(crate) image: (usize, usize, Vec<u8>),
+    pub(crate) default_size: (i32, i32),
+    pub(crate) restore_size: Option<(i32, i32)>,
+    pub(crate) opacity: u8,
+}
+
 pub(crate) struct UiState {
     pub(crate) hwnd: HWND,
     pub(crate) overlay: HWND,
-    pub(crate) pin_window: HWND,
+    pub(crate) pinned_images: Vec<PinnedImageWindow>,
     pub(crate) scroll_control: HWND,
     pub(crate) scroll_tooltip: HWND,
     pub(crate) scroll_tooltip_text: Option<String>,
@@ -126,9 +141,9 @@ pub(crate) struct UiState {
     pub(crate) last_path: Option<String>,
     pub(crate) last_size: Option<(usize, usize)>,
     pub(crate) last_image: Option<(usize, usize, Vec<u8>)>,
-    pub(crate) pin_image: Option<(usize, usize, Vec<u8>)>,
-    pub(crate) hotkey: HotkeySpec,
-    pub(crate) hotkey_registered: bool,
+    hotkey: HotkeySpec,
+    hotkey_registered: bool,
+    pub(crate) double_tap_hook: HHOOK,
     pub(crate) scroll_escape_hotkey_registered: bool,
     pub(crate) paint_pending: bool,
     pub(crate) last_hover_query: Option<(ScreenPoint, Instant)>,
@@ -137,55 +152,43 @@ pub(crate) struct UiState {
     pub(crate) scroll_motion_model: ScrollMotionModel,
     pub(crate) recording: RecordingManager,
     pub(crate) recording_requested_fps: Option<u32>,
-    pub(crate) recording_setup_format: AnimationFormat,
     pub(crate) recording_show_cursor: bool,
     pub(crate) recording_toolbar: HWND,
     pub(crate) recording_toolbar_drag: Option<(ScreenPoint, ScreenPoint)>,
     pub(crate) recording_toolbar_signature: Option<String>,
     pub(crate) recording_toolbar_static_signature: Option<String>,
     pub(crate) recording_editor_pending: bool,
+    pub(crate) recording_auto_open_pending: bool,
     pub(crate) recording_overlay: bool,
+    pub(crate) recording_export_dialog_open: bool,
+    pub(crate) recording_error_dialog_message: Option<String>,
 }
 
 pub(crate) fn configured_recording_fps(
     settings: &Arc<Mutex<Settings>>,
-    format: AnimationFormat,
 ) -> u32 {
-    let Ok(settings) = settings.lock() else {
-        return 15;
-    };
-    match format {
-        AnimationFormat::Mp4 => settings.recording_mp4_fps,
-        AnimationFormat::Gif => settings.recording_gif_fps,
-        AnimationFormat::Webp => settings.recording_webp_fps,
-    }
+    settings.lock().map(|settings| settings.recording_fps).unwrap_or(15)
 }
 
-pub(crate) fn configured_mp4_recording_options(
+pub(crate) fn configured_recording_options(
     settings: &Arc<Mutex<Settings>>,
 ) -> (u32, u32) {
     let Ok(settings) = settings.lock() else {
         return (1080, 16);
     };
     (
-        settings.recording_mp4_max_height,
-        settings.recording_mp4_bitrate_mbps,
+        settings.recording_max_height,
+        settings.recording_bitrate_mbps,
     )
 }
 
-#[derive(Clone, Copy)]
-pub(crate) struct HotkeySpec {
-    pub(crate) modifiers: u32,
-    pub(crate) key: u32,
-}
-
-impl Default for HotkeySpec {
-    fn default() -> Self {
-        Self {
-            modifiers: MOD_CONTROL | MOD_SHIFT,
-            key: VK_A,
-        }
-    }
+pub(crate) fn configured_animation_export_options(
+    settings: &Arc<Mutex<Settings>>,
+) -> (u16, u8) {
+    let Ok(settings) = settings.lock() else {
+        return (128, 90);
+    };
+    (settings.recording_gif_colors, settings.recording_webp_quality)
 }
 
 enum Command {
@@ -194,6 +197,7 @@ enum Command {
     StopRecording,
     CancelRecording,
     ExportRecording(AnimationFormat),
+    OpenRecordingEditor,
     ClearRecording,
     Cancel,
     Shutdown,
@@ -276,6 +280,14 @@ impl UiBridge {
                 PostMessageW(hwnd, WAKE, 0, 0);
             }
         }
+    }
+}
+
+pub(super) fn queue_open_recording_editor(state: &mut UiState) {
+    state.recording_auto_open_pending = false;
+    let _ = state.command_tx.send(Command::OpenRecordingEditor);
+    if !state.hwnd.is_null() {
+        unsafe { PostMessageW(state.hwnd, WAKE, 0, 0) };
     }
 }
 
@@ -369,7 +381,7 @@ fn ui_thread(
         let state = Box::new(UiState {
             hwnd: null_mut(),
             overlay: null_mut(),
-            pin_window: null_mut(),
+            pinned_images: Vec::new(),
             scroll_control: null_mut(),
             scroll_tooltip: null_mut(),
             scroll_tooltip_text: None,
@@ -405,9 +417,9 @@ fn ui_thread(
             last_path: None,
             last_size: None,
             last_image: None,
-            pin_image: None,
             hotkey: HotkeySpec::default(),
             hotkey_registered: false,
+            double_tap_hook: null_mut(),
             scroll_escape_hotkey_registered: false,
             paint_pending: false,
             last_hover_query: None,
@@ -416,14 +428,16 @@ fn ui_thread(
             scroll_motion_model: ScrollMotionModel::default(),
             recording,
             recording_requested_fps: None,
-            recording_setup_format: AnimationFormat::Mp4,
             recording_show_cursor: true,
             recording_toolbar: null_mut(),
             recording_toolbar_drag: None,
             recording_toolbar_signature: None,
             recording_toolbar_static_signature: None,
             recording_editor_pending: false,
+            recording_auto_open_pending: false,
             recording_overlay: false,
+            recording_export_dialog_open: false,
+            recording_error_dialog_message: None,
         });
         let state_ptr = Box::into_raw(state);
         let hwnd = CreateWindowExW(
@@ -442,6 +456,9 @@ fn ui_thread(
         );
         let state = &mut *state_ptr;
         state.hwnd = hwnd;
+        if !hwnd.is_null() {
+            state.double_tap_hook = install_double_tap_f1_hook(hwnd);
+        }
         *shared_hwnd
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = hwnd as isize;
@@ -450,7 +467,7 @@ fn ui_thread(
             .settings
             .lock()
             .ok()
-            .and_then(|value| parse_hotkey(&value.hotkey).ok())
+            .and_then(|value| hotkeys::parse_hotkey(&value.hotkey).ok())
         {
             state.hotkey = spec;
         }
@@ -481,21 +498,26 @@ fn ui_thread(
             }
         }
 
+        hotkeys::shutdown(state);
+
         *shared_hwnd
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = 0;
 
         stop_scroll_input(state);
         state.recording.shutdown();
-        if state.hotkey_registered {
-            UnregisterHotKey(hwnd, HOTKEY_ID);
-        }
-        unregister_scroll_escape_hotkey(state);
         if !state.overlay.is_null() {
             DestroyWindow(state.overlay);
         }
-        if !state.pin_window.is_null() {
-            DestroyWindow(state.pin_window);
+        let pinned_windows = state
+            .pinned_images
+            .iter()
+            .map(|pin| pin.hwnd)
+            .collect::<Vec<_>>();
+        for window in pinned_windows {
+            if !window.is_null() {
+                DestroyWindow(window);
+            }
         }
         if !state.scroll_control.is_null() {
             DestroyWindow(state.scroll_control);
@@ -521,7 +543,7 @@ fn ui_thread(
 fn handle_command(state: &mut UiState, command: Command) {
     match command {
         Command::Start(scroll) => begin_capture(state, scroll),
-        Command::StartRecording(fps) => start_recording_selection(state, fps),
+        Command::StartRecording(_) => start_recording_selection(state),
         Command::StopRecording => stop_recording(state),
         Command::CancelRecording => {
             state.recording.cancel();
@@ -529,6 +551,7 @@ fn handle_command(state: &mut UiState, command: Command) {
             cancel(state);
         }
         Command::ExportRecording(format) => recording_ui::export_recording(state, format),
+        Command::OpenRecordingEditor => open_recording_editor(state),
         Command::ClearRecording => {
             state.recording.cancel();
             state.recording_requested_fps = None;
@@ -551,424 +574,6 @@ fn handle_command(state: &mut UiState, command: Command) {
         }
         Command::Hotkey(value) => update_hotkey(state, &value),
         Command::Pin => pin_last(state),
-    }
-}
-
-fn parse_hotkey(value: &str) -> Result<HotkeySpec, String> {
-    let mut modifiers = 0;
-    let mut key = None;
-    for token in value
-        .split('+')
-        .map(str::trim)
-        .filter(|token| !token.is_empty())
-    {
-        match token.to_ascii_lowercase().as_str() {
-            "alt" => modifiers |= MOD_ALT,
-            "ctrl" | "control" => modifiers |= MOD_CONTROL,
-            "shift" => modifiers |= MOD_SHIFT,
-            "win" | "meta" | "cmd" | "command" | "windows" => modifiers |= MOD_WIN,
-            token if key.is_none() => key = parse_key(token),
-            _ => return Err(format!("无法识别快捷键：{value}")),
-        }
-    }
-    key.map(|key| HotkeySpec { modifiers, key })
-        .ok_or_else(|| "快捷键必须包含按键".into())
-}
-
-fn parse_key(value: &str) -> Option<u32> {
-    if value.len() == 1 {
-        let byte = value.as_bytes()[0];
-        return byte
-            .is_ascii_alphanumeric()
-            .then_some(byte.to_ascii_uppercase() as u32);
-    }
-    value
-        .strip_prefix('f')
-        .and_then(|value| value.parse::<u32>().ok())
-        .filter(|value| (1..=12).contains(value))
-        .map(|value| 0x70 + value - 1)
-}
-
-fn update_hotkey(state: &mut UiState, value: &str) {
-    let next = match parse_hotkey(value) {
-        Ok(value) => value,
-        Err(error) => {
-            set_error(state, error);
-            return;
-        }
-    };
-    if state.hotkey_registered {
-        unsafe {
-            UnregisterHotKey(state.hwnd, HOTKEY_ID);
-        }
-    }
-    state.hotkey_registered = register_hotkey(state.hwnd, next);
-    if state.hotkey_registered {
-        state.hotkey = next;
-        clear_error(state);
-    } else {
-        state.hotkey_registered = register_hotkey(state.hwnd, state.hotkey);
-        set_error(state, "快捷键已被其他应用占用".into());
-    }
-}
-
-fn register_hotkey(hwnd: HWND, hotkey: HotkeySpec) -> bool {
-    unsafe {
-        RegisterHotKey(
-            hwnd,
-            HOTKEY_ID,
-            hotkey.modifiers | MOD_NOREPEAT,
-            hotkey.key,
-        ) != 0
-    }
-}
-
-pub(crate) fn register_scroll_escape_hotkey(state: &mut UiState) -> bool {
-    if state.scroll_escape_hotkey_registered {
-        return true;
-    }
-    state.scroll_escape_hotkey_registered = unsafe {
-        RegisterHotKey(
-            state.hwnd,
-            SCROLL_ESCAPE_HOTKEY_ID,
-            MOD_NOREPEAT,
-            VK_ESCAPE_CODE,
-        ) != 0
-    };
-    state.scroll_escape_hotkey_registered
-}
-
-pub(crate) fn unregister_scroll_escape_hotkey(state: &mut UiState) {
-    if state.scroll_escape_hotkey_registered {
-        unsafe {
-            UnregisterHotKey(state.hwnd, SCROLL_ESCAPE_HOTKEY_ID);
-        }
-        state.scroll_escape_hotkey_registered = false;
-    }
-}
-
-fn current_color(state: &UiState) -> [u8; 4] {
-    state
-        .settings
-        .lock()
-        .map(|settings| settings.annotation_rgba())
-        .unwrap_or([255, 58, 72, 255])
-}
-
-fn text_size(state: &UiState) -> u32 {
-    state
-        .settings
-        .lock()
-        .map(|settings| settings.text_size)
-        .unwrap_or(18)
-}
-
-fn begin_capture(state: &mut UiState, scrolling: bool) {
-    if state.capture.is_some() {
-        return;
-    }
-    let hdr_mode = state
-        .settings
-        .lock()
-        .map(|settings| settings.hdr_capture_mode)
-        .unwrap_or_default();
-    let Some(screen) = ScreenCapture::grab_virtual_desktop(hdr_mode) else {
-        if state.recording_requested_fps.is_some() {
-            state.recording.fail("\u{65e0}\u{6cd5}\u{8bfb}\u{53d6}\u{865a}\u{62df}\u{684c}\u{9762}\u{56fe}\u{50cf}".into());
-            state.recording_requested_fps = None;
-        }
-        set_error(state, "无法读取虚拟桌面图像".into());
-        return;
-    };
-    let target_window = unsafe { GetForegroundWindow() };
-    let screen_rect = ScreenRect {
-        left: screen.x,
-        top: screen.y,
-        right: screen.x + screen.width,
-        bottom: screen.y + screen.height,
-    };
-    let initial_color = current_color(state);
-    let initial_text_size = text_size(state);
-    let capture = CaptureSession::new(screen_rect, initial_color, initial_text_size, scrolling);
-    state.capture = Some(capture);
-    state.scroll_target = target_window;
-    state.last_hover_query = None;
-    state.screen = Some(screen);
-    unsafe {
-        let class_name = wide("AgileTilesScreenshotCoreV2");
-        let instance = GetModuleHandleW(null());
-        state.overlay = CreateWindowExW(
-            WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
-            class_name.as_ptr(),
-            class_name.as_ptr(),
-            WS_POPUP,
-            screen_rect.left,
-            screen_rect.top,
-            screen_rect.width() as i32,
-            screen_rect.height() as i32,
-            null_mut(),
-            null_mut(),
-            instance,
-            state as *mut UiState as *const c_void,
-        );
-        state.render = state
-            .screen
-            .as_ref()
-            .and_then(|screen| create_overlay_render(state.overlay, screen));
-        ShowWindow(state.overlay, SW_SHOW);
-        SetForegroundWindow(state.overlay);
-        SetFocus(state.overlay);
-    }
-    update_status(state, true);
-}
-
-fn set_recording_capture_style(hwnd: HWND, recording: bool) {
-    if hwnd.is_null() {
-        return;
-    }
-    unsafe {
-        let current = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
-        let updated = if recording {
-            current | WS_EX_LAYERED
-        } else {
-            current & !WS_EX_LAYERED
-        };
-        if current == updated {
-            return;
-        }
-        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, updated as isize);
-        if recording {
-            SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA);
-        }
-        SetWindowPos(
-            hwnd,
-            null_mut(),
-            0,
-            0,
-            0,
-            0,
-            SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER,
-        );
-    }
-}
-
-pub(crate) fn restore_recording_selection(state: &mut UiState) {
-    state.recording_overlay = false;
-    destroy_scroll_masks(state);
-    destroy_scroll_border(state);
-    set_recording_capture_style(state.overlay, false);
-    if !state.overlay.is_null() {
-        unsafe {
-            ShowWindow(state.overlay, SW_SHOW);
-            SetForegroundWindow(state.overlay);
-            SetFocus(state.overlay);
-        }
-    }
-    invalidate(state);
-}
-
-fn start_recording_selection(state: &mut UiState, fps: u32) {
-    if state.capture.is_some() {
-        set_error(state, "请先完成或取消当前截图".into());
-        return;
-    }
-    if let Err(error) = state.recording.request_selection(fps) {
-        set_error(state, error);
-        return;
-    }
-    state.recording_requested_fps = Some(fps);
-    begin_capture(state, false);
-}
-
-pub(crate) fn start_recording_selected_region(state: &mut UiState) {
-    let Some(fps) = state.recording_requested_fps.take() else {
-        return;
-    };
-    let Some(selection) = state
-        .capture
-        .as_ref()
-        .and_then(|capture| capture.selection)
-    else {
-        return;
-    };
-    let Some(screen_bounds) = state.screen.as_ref().map(ScreenCapture::bounds) else {
-        state.recording.fail("无法读取录制屏幕范围".into());
-        return;
-    };
-    let (mp4_max_height, mp4_bitrate_mbps) =
-        configured_mp4_recording_options(&state.settings);
-    set_recording_capture_style(state.overlay, true);
-    if let Err(error) = state
-        .recording
-        .start_capture(
-            selection,
-            fps,
-            state.recording_show_cursor,
-            state.recording_setup_format,
-            mp4_max_height,
-            mp4_bitrate_mbps,
-        )
-    {
-        state.recording.fail(error.clone());
-        set_error(state, error);
-        cancel(state);
-        return;
-    }
-    state.recording_overlay = true;
-    if let Some(capture) = state.capture.as_mut() {
-        capture.close_menu();
-        capture.toolbar_hover = None;
-        capture.secondary_hover = None;
-        capture.menu_hover = None;
-    }
-    create_scroll_masks(state, screen_bounds, selection);
-    create_scroll_border(state, selection);
-    invalidate(state);
-    if let Err(error) = recording_ui::create_control_toolbar(state, selection, screen_bounds) {
-        state.recording.cancel();
-        restore_recording_selection(state);
-        set_error(state, error);
-    } else {
-        // The selection overlay is a full-screen, opaque screenshot. Keep it
-        // out of the way during capture so the live desktop stays visible and
-        // receives mouse, wheel, and keyboard input.
-        unsafe { ShowWindow(state.overlay, SW_HIDE) };
-    }
-}
-
-pub(crate) fn start_recording_from_toolbar(state: &mut UiState, fps: u32) {
-    let Some(selection) = state
-        .capture
-        .as_ref()
-        .and_then(|capture| capture.selection)
-    else {
-        return;
-    };
-    let Some(screen_bounds) = state.screen.as_ref().map(ScreenCapture::bounds) else {
-        set_error(state, "无法读取录制屏幕范围".into());
-        return;
-    };
-    let (mp4_max_height, mp4_bitrate_mbps) =
-        configured_mp4_recording_options(&state.settings);
-    if let Err(error) = state.recording.request_selection(fps) {
-        set_error(state, error);
-        return;
-    }
-    set_recording_capture_style(state.overlay, true);
-    state.recording_overlay = true;
-    if let Some(capture) = state.capture.as_mut() {
-        capture.close_menu();
-        capture.toolbar_hover = None;
-        capture.secondary_hover = None;
-        capture.menu_hover = None;
-    }
-    create_scroll_masks(state, screen_bounds, selection);
-    create_scroll_border(state, selection);
-    invalidate(state);
-
-    if let Err(error) = state
-        .recording
-        .start_capture(
-            selection,
-            fps,
-            state.recording_show_cursor,
-            state.recording_setup_format,
-            mp4_max_height,
-            mp4_bitrate_mbps,
-        )
-    {
-        state.recording.fail(error.clone());
-        restore_recording_selection(state);
-        set_error(state, error);
-        return;
-    }
-    if let Err(error) = recording_ui::create_control_toolbar(state, selection, screen_bounds) {
-        state.recording.cancel();
-        restore_recording_selection(state);
-        set_error(state, error);
-    } else {
-        // Let the target application remain interactive while frames are
-        // captured from the selected screen region.
-        unsafe { ShowWindow(state.overlay, SW_HIDE) };
-    }
-}
-
-pub(crate) fn open_recording_editor(state: &mut UiState) {
-    state.recording_overlay = false;
-    recording_ui::destroy_control_toolbar(state);
-    editor::open_recording_editor(state);
-}
-
-pub(crate) fn export_recording_from_editor(
-    state: &mut UiState,
-    format: AnimationFormat,
-) {
-    recording_ui::export_recording(state, format);
-}
-
-fn stop_recording(state: &mut UiState) {
-    if let Err(error) = state.recording.request_stop() {
-        set_error(state, error);
-    }
-}
-
-pub(crate) fn cancel(state: &mut UiState) {
-    ocr_ui::close_session_transients(state);
-    state.recording_overlay = false;
-    recording_ui::destroy_control_toolbar(state);
-    if state.recording_requested_fps.take().is_some() {
-        state.recording.cancel();
-    }
-    if state.editor.take().is_some() {
-        stop_scroll_input(state);
-        if !state.overlay.is_null() {
-            unsafe {
-                KillTimer(state.overlay, TIMER_SCROLL);
-                KillTimer(state.overlay, editor::TIMER_RECORDING_PREVIEW);
-                ShowWindow(state.overlay, SW_HIDE);
-                DestroyWindow(state.overlay);
-            }
-            state.overlay = null_mut();
-        }
-        state.render = None;
-        state.last_hover_query = None;
-        state.capture = None;
-        state.screen = None;
-        update_status(state, false);
-        return;
-    }
-    stop_scroll_input(state);
-    if !state.overlay.is_null() {
-        unsafe {
-            KillTimer(state.overlay, TIMER_SCROLL);
-            KillTimer(state.overlay, editor::TIMER_RECORDING_PREVIEW);
-            ShowWindow(state.overlay, SW_HIDE);
-            DestroyWindow(state.overlay);
-        }
-        state.overlay = null_mut();
-    }
-    state.render = None;
-    state.last_hover_query = None;
-    if !state.scroll_control.is_null() {
-        unsafe {
-            DestroyWindow(state.scroll_control);
-        }
-        state.scroll_control = null_mut();
-    }
-    destroy_scroll_preview(state);
-    destroy_scroll_masks(state);
-    destroy_scroll_border(state);
-    state.capture = None;
-    state.screen = None;
-    update_status(state, false);
-}
-
-pub(super) fn request_cancel(state: &UiState) {
-    let _ = state.command_tx.send(Command::Cancel);
-    if !state.hwnd.is_null() {
-        unsafe {
-            PostMessageW(state.hwnd, WAKE, 0, 0);
-        }
     }
 }
 
@@ -1031,6 +636,10 @@ unsafe extern "system" fn wnd_proc(
     }
     let state = &mut *state;
 
+    if message == DOUBLE_TAP_F1 && hwnd == state.hwnd {
+        trigger_capture_or_stop_recording(state);
+        return 0;
+    }
     if message == WM_HOTKEY && hwnd == state.hwnd {
         if wparam == SCROLL_ESCAPE_HOTKEY_ID as usize {
             if state.scroll_escape_hotkey_registered {
@@ -1038,11 +647,7 @@ unsafe extern "system" fn wnd_proc(
             }
             return 0;
         }
-        match state.recording.snapshot().phase.as_str() {
-            "recording" => stop_recording(state),
-            "selecting" | "processing" | "exporting" | "cancelling" => {}
-            _ => begin_capture(state, false),
-        }
+        trigger_capture_or_stop_recording(state);
         return 0;
     }
     if hwnd == state.scroll_tooltip {
@@ -1066,7 +671,7 @@ unsafe extern "system" fn wnd_proc(
     if hwnd == state.ocr_result_window {
         return ocr_ui::result_window_wnd_proc(hwnd, message, wparam, lparam, state);
     }
-    if hwnd == state.pin_window {
+    if state.pinned_images.iter().any(|pin| pin.hwnd == hwnd) {
         return pin_wnd_proc(hwnd, message, wparam, lparam, state);
     }
     if hwnd == state.recording_toolbar {
@@ -1201,6 +806,13 @@ unsafe extern "system" fn wnd_proc(
                 scroll_tick(state);
             } else if wparam == editor::TIMER_RECORDING_PREVIEW {
                 editor::advance_recording_preview(state);
+            } else if wparam == editor::TIMER_RECORDING_EXPORT_STATUS {
+                let status = state.recording.snapshot();
+                if status.phase != "exporting" {
+                    KillTimer(hwnd, editor::TIMER_RECORDING_EXPORT_STATUS);
+                    recording_ui::show_error_details_if_needed(state, hwnd, &status);
+                }
+                InvalidateRect(hwnd, null(), 0);
             }
             0
         }
@@ -1243,7 +855,7 @@ mod layout_tests {
 
     #[test]
     fn hotkey_parse_error_is_readable() {
-        let error = match parse_hotkey("ctrl+a+bogus") {
+        let error = match hotkeys::parse_hotkey("ctrl+a+bogus") {
             Ok(_) => panic!("invalid hotkey unexpectedly parsed"),
             Err(error) => error,
         };

@@ -14,6 +14,7 @@ pub enum Tool {
     Line,
     Pen,
     Highlight,
+    Spotlight,
     Mosaic,
     Text,
     Number,
@@ -28,6 +29,7 @@ pub enum ToolbarAction {
     Pin,
     Scroll,
     Undo,
+    Redo,
     Color,
     Size,
     Style,
@@ -46,12 +48,12 @@ pub struct ToolbarItem {
     pub action: ToolbarAction,
 }
 
-/// Compact, touch-friendly icon buttons matching the floating reference toolbar.
+/// Original floating-toolbar button geometry.
 pub const TOOLBAR_BUTTON_WIDTH: i32 = 46;
 pub const TOOLBAR_BUTTON_HEIGHT: i32 = 46;
 pub const TOOLBAR_VERTICAL_PADDING: i32 = 5;
 
-pub const TOOL_PALETTE_ACTIONS: [ToolbarAction; 10] = [
+pub const TOOL_PALETTE_ACTIONS: [ToolbarAction; 11] = [
     ToolbarAction::Tool(Tool::Select),
     ToolbarAction::Tool(Tool::Rectangle),
     ToolbarAction::Tool(Tool::Ellipse),
@@ -60,12 +62,13 @@ pub const TOOL_PALETTE_ACTIONS: [ToolbarAction; 10] = [
     ToolbarAction::Tool(Tool::Pen),
     ToolbarAction::Tool(Tool::Highlight),
     ToolbarAction::Tool(Tool::Mosaic),
+    ToolbarAction::Tool(Tool::Spotlight),
     ToolbarAction::Tool(Tool::Text),
     ToolbarAction::Tool(Tool::Number),
 ];
 
-/// Keep the main bar focused on capture and output actions.
-pub const TOOLBAR_ITEMS: [ToolbarItem; 11] = [
+/// Original action order, with Redo beside Undo.
+pub const TOOLBAR_ITEMS: [ToolbarItem; 12] = [
     ToolbarItem {
         label: "移动工具栏",
         action: ToolbarAction::MoveToolbar,
@@ -87,6 +90,10 @@ pub const TOOLBAR_ITEMS: [ToolbarItem; 11] = [
         action: ToolbarAction::Undo,
     },
     ToolbarItem {
+        label: "重做",
+        action: ToolbarAction::Redo,
+    },
+    ToolbarItem {
         label: "保存",
         action: ToolbarAction::Save,
     },
@@ -95,7 +102,7 @@ pub const TOOLBAR_ITEMS: [ToolbarItem; 11] = [
         action: ToolbarAction::Edit,
     },
     ToolbarItem {
-        label: "\u{5f55}\u{5236}",
+        label: "录制",
         action: ToolbarAction::Record,
     },
     ToolbarItem {
@@ -131,14 +138,14 @@ pub fn tool_palette_layout_for_screen_width(screen_width: i32) -> ToolbarLayout 
     layout_for_item_count(TOOL_PALETTE_ACTIONS.len(), screen_width)
 }
 
-fn layout_for_item_count(item_count: usize, screen_width: i32) -> ToolbarLayout {
+pub fn layout_for_item_count(item_count: usize, screen_width: i32) -> ToolbarLayout {
     let single_row_width = item_count as i32 * TOOLBAR_BUTTON_WIDTH + 16;
     let columns = if screen_width < single_row_width {
         let available_columns = ((screen_width - 16) / TOOLBAR_BUTTON_WIDTH)
-            .clamp(1, item_count as i32) as usize;
-        item_count.div_ceil(2).min(available_columns)
+            .clamp(1, item_count.max(1) as i32) as usize;
+        item_count.div_ceil(2).min(available_columns).max(1)
     } else {
-        item_count
+        item_count.max(1)
     };
     let rows = item_count.div_ceil(columns);
     ToolbarLayout {
@@ -246,6 +253,7 @@ pub fn tool_palette_label(index: usize) -> Option<&'static str> {
         ToolbarAction::Tool(Tool::Pen) => Some("画笔"),
         ToolbarAction::Tool(Tool::Highlight) => Some("高亮"),
         ToolbarAction::Tool(Tool::Mosaic) => Some("马赛克"),
+        ToolbarAction::Tool(Tool::Spotlight) => Some("聚光灯"),
         ToolbarAction::Tool(Tool::Text) => Some("文字"),
         ToolbarAction::Tool(Tool::Number) => Some("序号"),
         _ => None,
@@ -267,9 +275,12 @@ pub fn toolbar_icon_index(action: ToolbarAction) -> Option<usize> {
         ToolbarAction::Tool(Tool::Number) => Some(7),
         ToolbarAction::Tool(Tool::Line) => Some(17),
         ToolbarAction::Tool(Tool::Highlight) => Some(18),
+        ToolbarAction::Tool(Tool::Spotlight) => Some(21),
         ToolbarAction::Pin => Some(8),
         ToolbarAction::Scroll => Some(9),
         ToolbarAction::Undo => Some(10),
+        ToolbarAction::Redo => Some(24),
+        ToolbarAction::Color => Some(23),
         ToolbarAction::Save => Some(11),
         ToolbarAction::Cancel => Some(12),
         ToolbarAction::Finish => Some(13),
@@ -277,8 +288,7 @@ pub fn toolbar_icon_index(action: ToolbarAction) -> Option<usize> {
         ToolbarAction::Record => Some(15),
         ToolbarAction::Ocr => Some(16),
         ToolbarAction::Copy => Some(100),
-        ToolbarAction::PlaceNumber | ToolbarAction::Color
-        | ToolbarAction::Size
+        ToolbarAction::PlaceNumber | ToolbarAction::Size
         | ToolbarAction::Style => None,
     }
 }
@@ -303,9 +313,8 @@ pub fn hit_test(origin: (i32, i32), point: (i32, i32), layout: ToolbarLayout) ->
     }
     let column = ((point_x - x) / TOOLBAR_BUTTON_WIDTH) as usize;
     let row_start = row * layout.columns;
-    let item_count = layout.item_count;
     let row_item_count = if row + 1 == layout.rows {
-        item_count - row_start
+        layout.item_count - row_start
     } else {
         layout.columns
     };
@@ -314,7 +323,7 @@ pub fn hit_test(origin: (i32, i32), point: (i32, i32), layout: ToolbarLayout) ->
         return None;
     }
     let index = row_start + column - right_alignment;
-    (index < item_count).then_some(index)
+    (index < layout.item_count).then_some(index)
 }
 
 // -------------------------------------------------------------------------
@@ -353,7 +362,7 @@ pub fn tool_has_secondary_bar(tool: Tool) -> bool {
 }
 
 pub fn tool_has_color_picker(tool: Tool) -> bool {
-    tool != Tool::Mosaic
+    !matches!(tool, Tool::Mosaic | Tool::Spotlight)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -543,16 +552,8 @@ pub struct RecordingSetupLayout {
 pub enum RecordingSetupAction {
     Close,
     Start,
-    Format(AnimationFormatKey),
     ToggleCursor,
     Ignore,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum AnimationFormatKey {
-    Mp4,
-    Gif,
-    Webp,
 }
 
 impl RecordingSetupLayout {
@@ -564,23 +565,13 @@ impl RecordingSetupLayout {
         (self.left + 24, self.top + 20, self.left + self.width - 24, self.top + 68)
     }
 
-    pub fn format_rect(self, index: usize) -> Option<(i32, i32, i32, i32)> {
-        let (left, right) = match index {
-            0 => (self.left + 138, self.left + 224),
-            1 => (self.left + 252, self.left + 326),
-            2 => (self.left + 336, self.left + 426),
-            _ => return None,
-        };
-        Some((left, self.top + 88, right, self.top + 126))
-    }
-
-    pub fn fps_rect(self, index: usize) -> Option<(i32, i32, i32, i32)> {
-        (index < 2).then_some((
-            self.left + 20 + index as i32 * 200,
-            self.top + 160,
-            self.left + 210 + index as i32 * 200,
-            self.top + 198,
-        ))
+    pub fn output_note_rect(self) -> (i32, i32, i32, i32) {
+        (
+            self.left + 138,
+            self.top + 88,
+            self.left + self.width - 16,
+            self.top + 126,
+        )
     }
 
     pub fn control_rect(self, index: usize) -> Option<(i32, i32, i32, i32)> {
@@ -625,15 +616,6 @@ pub fn recording_setup_hit_test(
     }
     if inside(layout.start_rect()) {
         return Some(RecordingSetupAction::Start);
-    }
-    for index in 0..3 {
-        if layout.format_rect(index).is_some_and(inside) {
-            return Some(RecordingSetupAction::Format(match index {
-                0 => AnimationFormatKey::Mp4,
-                1 => AnimationFormatKey::Gif,
-                _ => AnimationFormatKey::Webp,
-            }));
-        }
     }
     if layout.control_rect(3).is_some_and(inside) {
         return Some(RecordingSetupAction::ToggleCursor);
@@ -743,33 +725,36 @@ mod tests {
 
     #[test]
     fn toolbar_order_has_explicit_capture_actions() {
-        assert_eq!(TOOLBAR_ITEMS.len(), 11);
+        assert_eq!(TOOLBAR_ITEMS.len(), 12);
         assert_eq!(toolbar_action(0), Some(ToolbarAction::MoveToolbar));
         assert_eq!(toolbar_action(1), Some(ToolbarAction::Tools));
         assert_eq!(toolbar_action(2), Some(ToolbarAction::Pin));
         assert_eq!(toolbar_action(3), Some(ToolbarAction::Scroll));
         assert_eq!(toolbar_action(4), Some(ToolbarAction::Undo));
-        assert_eq!(toolbar_action(5), Some(ToolbarAction::Save));
-        assert_eq!(toolbar_action(6), Some(ToolbarAction::Edit));
-        assert_eq!(toolbar_action(7), Some(ToolbarAction::Record));
-        assert_eq!(toolbar_action(8), Some(ToolbarAction::Ocr));
-        assert_eq!(toolbar_action(9), Some(ToolbarAction::Cancel));
-        assert_eq!(toolbar_action(10), Some(ToolbarAction::Finish));
+        assert_eq!(toolbar_action(5), Some(ToolbarAction::Redo));
+        assert_eq!(toolbar_action(6), Some(ToolbarAction::Save));
+        assert_eq!(toolbar_action(7), Some(ToolbarAction::Edit));
+        assert_eq!(toolbar_action(8), Some(ToolbarAction::Record));
+        assert_eq!(toolbar_action(9), Some(ToolbarAction::Ocr));
+        assert_eq!(toolbar_action(10), Some(ToolbarAction::Cancel));
+        assert_eq!(toolbar_action(11), Some(ToolbarAction::Finish));
     }
 
     #[test]
     fn hit_test_rejects_edges_outside_toolbar() {
         let wide = layout_for_screen_width(1920);
-        assert_eq!(hit_test((100, 200), (100, 208), wide), Some(0));
+        let first = button_origin((100, 200), 0, wide).unwrap();
+        let last = button_origin((100, 200), TOOLBAR_BUTTON_COUNT - 1, wide).unwrap();
+        assert_eq!(hit_test((100, 200), (first.0 + 13, first.1 + 13), wide), Some(0));
         assert_eq!(
-            hit_test((100, 200), (100 + TOOLBAR_BUTTON_WIDTH * 10, 208), wide),
-            Some(10)
-        );
-        assert_eq!(
-            hit_test((100, 200), (100 + TOOLBAR_BUTTON_WIDTH * 11, 208), wide),
-            None
+            hit_test((100, 200), (last.0 + 13, last.1 + 13), wide),
+            Some(TOOLBAR_BUTTON_COUNT - 1)
         );
         assert_eq!(hit_test((100, 200), (100, 200 + wide.height), wide), None);
+        assert_eq!(
+            hit_test((100, 200), (first.0 + TOOLBAR_BUTTON_WIDTH, first.1 + 13), wide),
+            None
+        );
     }
 
     #[test]

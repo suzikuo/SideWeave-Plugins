@@ -6,8 +6,10 @@ use crate::toolbar::Tool;
 
 use std::ptr::null_mut;
 use windows_sys::Win32::Graphics::Gdi::{
-    CreatePen, CreateSolidBrush, DeleteObject, DrawTextW, Ellipse, FillRect, GetStockObject,
-    LineTo, MoveToEx, RoundRect, SelectObject, SetBkMode, SetTextColor, HDC, HGDIOBJ,
+    AlphaBlend, CombineRgn, CreateCompatibleBitmap, CreateCompatibleDC, CreateEllipticRgn,
+    CreatePen, CreateRectRgn, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, Ellipse,
+    FillRect, GetStockObject, LineTo, MoveToEx, RestoreDC, RoundRect, SaveDC, SelectClipRgn,
+    SelectObject, SetBkMode, SetTextColor, BLENDFUNCTION, HDC, HGDIOBJ, RGN_DIFF, RGN_OR,
 };
 use windows_sys::Win32::Foundation::RECT;
 
@@ -31,6 +33,7 @@ pub(super) fn draw_annotations_gdi(
     oy: i32,
 ) {
     unsafe {
+        draw_spotlight_mask(dc, capture, ox, oy);
         for annotation in &capture.annotations {
             match annotation {
                 Annotation::Rect(rect, color, width, style) => {
@@ -108,6 +111,24 @@ pub(super) fn draw_annotations_gdi(
                         StrokeStyle::Solid,
                     );
                 }
+                Annotation::Spotlight(rect) => {
+                    let pen = CreatePen(0, 1, 0x00ffffff);
+                    let old_pen = SelectObject(dc, pen as HGDIOBJ);
+                    let old_brush = SelectObject(
+                        dc,
+                        GetStockObject(windows_sys::Win32::Graphics::Gdi::NULL_BRUSH as i32),
+                    );
+                    Ellipse(
+                        dc,
+                        rect.left - ox,
+                        rect.top - oy,
+                        rect.right - ox,
+                        rect.bottom - oy,
+                    );
+                    SelectObject(dc, old_brush);
+                    SelectObject(dc, old_pen);
+                    DeleteObject(pen as HGDIOBJ);
+                }
                 Annotation::Number(point, number, color) => {
                     draw_number_gdi(
                         dc,
@@ -164,6 +185,129 @@ pub(super) fn draw_annotations_gdi(
             }
         }
     }
+}
+
+/// Darken the selected crop outside the union of spotlight ellipses. The active
+/// drag is included so the user sees the final lighting effect while drawing.
+unsafe fn draw_spotlight_mask(dc: HDC, capture: &CaptureSession, ox: i32, oy: i32) {
+    let Some(selection) = capture.selection else {
+        return;
+    };
+    let mut focus_regions = capture
+        .annotations
+        .iter()
+        .filter_map(|annotation| match annotation {
+            Annotation::Spotlight(rect) => rect.clipped_to(selection),
+            _ => None,
+        })
+        .filter(|rect| rect.width() > 2 && rect.height() > 2)
+        .collect::<Vec<_>>();
+    if capture.tool == Tool::Spotlight {
+        if let (Some(start), Some(current)) = (capture.drag, capture.current_pos) {
+            let rect = ScreenRect::normalized(start, current);
+            if rect.width() > 2 && rect.height() > 2 {
+                if let Some(rect) = rect.clipped_to(selection) {
+                    focus_regions.push(rect);
+                }
+            }
+        }
+    }
+    if focus_regions.is_empty() {
+        return;
+    }
+
+    let selection_region = CreateRectRgn(
+        selection.left - ox,
+        selection.top - oy,
+        selection.right - ox,
+        selection.bottom - oy,
+    );
+    let focus_union = CreateRectRgn(0, 0, 0, 0);
+    if selection_region.is_null() || focus_union.is_null() {
+        if !selection_region.is_null() {
+            DeleteObject(selection_region as HGDIOBJ);
+        }
+        if !focus_union.is_null() {
+            DeleteObject(focus_union as HGDIOBJ);
+        }
+        return;
+    }
+    for rect in focus_regions {
+        let focus = CreateEllipticRgn(
+            rect.left - ox,
+            rect.top - oy,
+            rect.right - ox,
+            rect.bottom - oy,
+        );
+        if !focus.is_null() {
+            CombineRgn(focus_union, focus_union, focus, RGN_OR);
+            DeleteObject(focus as HGDIOBJ);
+        }
+    }
+    let dim_region = CreateRectRgn(0, 0, 0, 0);
+    if dim_region.is_null() {
+        DeleteObject(selection_region as HGDIOBJ);
+        DeleteObject(focus_union as HGDIOBJ);
+        return;
+    }
+    let region_kind = CombineRgn(dim_region, selection_region, focus_union, RGN_DIFF);
+    DeleteObject(selection_region as HGDIOBJ);
+    DeleteObject(focus_union as HGDIOBJ);
+    if region_kind == 0 {
+        DeleteObject(dim_region as HGDIOBJ);
+        return;
+    }
+
+    let source_dc = CreateCompatibleDC(dc);
+    let source_bitmap = CreateCompatibleBitmap(dc, 1, 1);
+    if source_dc.is_null() || source_bitmap.is_null() {
+        if !source_dc.is_null() {
+            DeleteDC(source_dc);
+        }
+        if !source_bitmap.is_null() {
+            DeleteObject(source_bitmap as HGDIOBJ);
+        }
+        DeleteObject(dim_region as HGDIOBJ);
+        return;
+    }
+    let old_bitmap = SelectObject(source_dc, source_bitmap as HGDIOBJ);
+    let black = CreateSolidBrush(0);
+    let pixel = RECT {
+        left: 0,
+        top: 0,
+        right: 1,
+        bottom: 1,
+    };
+    FillRect(source_dc, &pixel, black);
+    DeleteObject(black as HGDIOBJ);
+
+    let saved_dc = SaveDC(dc);
+    if saved_dc != 0 {
+        SelectClipRgn(dc, dim_region);
+        AlphaBlend(
+            dc,
+            selection.left - ox,
+            selection.top - oy,
+            selection.width() as i32,
+            selection.height() as i32,
+            source_dc,
+            0,
+            0,
+            1,
+            1,
+            BLENDFUNCTION {
+                BlendOp: 0,
+                BlendFlags: 0,
+                SourceConstantAlpha: 112,
+                AlphaFormat: 0,
+            },
+        );
+        RestoreDC(dc, saved_dc);
+    }
+    SelectObject(source_dc, old_bitmap);
+    DeleteObject(source_bitmap as HGDIOBJ);
+    DeleteDC(source_dc);
+    DeleteObject(dim_region as HGDIOBJ);
 }
 
 pub(super) unsafe fn draw_line_gdi_style(
@@ -360,6 +504,19 @@ pub(super) fn draw_preview(
                 thickness.saturating_mul(6).max(10),
                 StrokeStyle::Solid,
             ),
+            Tool::Spotlight => {
+                let rect = ScreenRect::normalized(a, b);
+                let pen = CreatePen(0, 1, 0x00ffffff);
+                let old_pen = SelectObject(dc, pen as HGDIOBJ);
+                let old_brush = SelectObject(
+                    dc,
+                    GetStockObject(windows_sys::Win32::Graphics::Gdi::NULL_BRUSH as i32),
+                );
+                Ellipse(dc, rect.left, rect.top, rect.right, rect.bottom);
+                SelectObject(dc, old_brush);
+                SelectObject(dc, old_pen);
+                DeleteObject(pen as HGDIOBJ);
+            }
             Tool::Mosaic => draw_mosaic_brush_preview(dc, screen, &[current], brush_size, ox, oy),
             _ => {}
         }

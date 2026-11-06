@@ -2,7 +2,7 @@ use super::editor::open_editor;
 use super::output::{copy_capture, finish, finish_with_dialog, pin_last};
 use super::scroll_ui::{open_scroll_mode_menu, start_scroll};
 use super::toolbar_paint::{toolbar_layout, toolbar_position};
-use super::{cancel, invalidate, UiState};
+use super::{cancel, invalidate, PinnedImageWindow, UiState};
 use crate::model::{Annotation, ScreenPoint, ScreenRect, StrokeStyle};
 use crate::recorder::AnimationFormat;
 use crate::scroll::MatchAxis;
@@ -11,7 +11,7 @@ use crate::toolbar::{
     hit_test as toolbar_hit_test, menu_for_action, menu_hit_test, menu_layout,
     recording_setup_hit_test, recording_setup_layout, secondary_bar_hit_test,
     secondary_bar_layout, toolbar_action, tool_palette_action,
-    tool_palette_layout_for_screen_width, tool_palette_position, AnimationFormatKey,
+    tool_palette_layout_for_screen_width, tool_palette_position,
     RecordingSetupAction, SecondaryBarItem,
     SecondaryBarLayout, Tool, ToolbarAction, ToolbarLayout, ToolbarMenu, COLOR_SWATCHES,
     MOSAIC_SIZES, STROKE_SIZES, TEXT_SIZES,
@@ -34,10 +34,13 @@ pub(super) const VK_E: u32 = 0x45;
 pub(super) const VK_H: u32 = 0x48;
 pub(super) const VK_I: u32 = 0x49;
 pub(super) const VK_L: u32 = 0x4c;
+pub(super) const VK_M: u32 = 0x4d;
 pub(super) const VK_N: u32 = 0x4e;
+pub(super) const VK_O: u32 = 0x4f;
 pub(super) const VK_R: u32 = 0x52;
 pub(super) const VK_P: u32 = 0x50;
 pub(super) const VK_T: u32 = 0x54;
+pub(super) const VK_V: u32 = 0x56;
 pub(super) const VK_Z: u32 = 0x5a;
 pub(super) const VK_ESCAPE_CODE: u32 = 0x1b;
 pub(super) const VK_RETURN_CODE: u32 = 0x0d;
@@ -435,22 +438,11 @@ pub(super) fn mouse_down(state: &mut UiState, point: ScreenPoint) {
                 invalidate(state);
             }
             Some(RecordingSetupAction::Start) => {
-                let fps = super::configured_recording_fps(
-                    &state.settings,
-                    state.recording_setup_format,
-                );
+                let fps = super::configured_recording_fps(&state.settings);
                 if let Some(capture) = state.capture.as_mut() {
                     capture.close_menu();
                 }
                 super::start_recording_from_toolbar(state, fps);
-            }
-            Some(RecordingSetupAction::Format(format)) => {
-                state.recording_setup_format = match format {
-                    AnimationFormatKey::Mp4 => AnimationFormat::Mp4,
-                    AnimationFormatKey::Gif => AnimationFormat::Gif,
-                    AnimationFormatKey::Webp => AnimationFormat::Webp,
-                };
-                invalidate(state);
             }
             Some(RecordingSetupAction::ToggleCursor) => {
                 state.recording_show_cursor = !state.recording_show_cursor;
@@ -604,7 +596,7 @@ pub(super) fn mouse_down(state: &mut UiState, point: ScreenPoint) {
                 }
             } else if capture.tool == Tool::Number && selection.contains(point) {
                 let number = capture.number_next;
-                capture.annotations.push(Annotation::Number(
+                capture.push_annotation(Annotation::Number(
                     point,
                     number,
                     capture.annotation_color,
@@ -616,15 +608,16 @@ pub(super) fn mouse_down(state: &mut UiState, point: ScreenPoint) {
                 capture.drag = Some(point);
                 capture.current_pos = Some(point);
                 match capture.tool {
-                    Tool::Pen => capture.annotations.push(Annotation::Pen(
+                    Tool::Pen => capture.push_annotation(Annotation::Pen(
                         vec![point],
                         capture.annotation_color,
                         capture.stroke_width,
                         capture.stroke_style,
                     )),
-                    Tool::Mosaic => capture
-                        .annotations
-                        .push(Annotation::Mosaic(vec![point], capture.brush_size)),
+                    Tool::Mosaic => capture.push_annotation(Annotation::Mosaic(
+                        vec![point],
+                        capture.brush_size,
+                    )),
                     _ => {}
                 }
                 None
@@ -657,6 +650,7 @@ pub(super) fn mouse_down(state: &mut UiState, point: ScreenPoint) {
         Some(ToolbarAction::PlaceNumber) if recording_preview => {}
         Some(ToolbarAction::Pin) if recording_preview => {}
         Some(ToolbarAction::Undo) if recording_preview => {}
+        Some(ToolbarAction::Redo) if recording_preview => {}
         Some(ToolbarAction::Record) if recording_preview => {}
         Some(ToolbarAction::Tool(tool)) => set_tool(state, tool),
         Some(ToolbarAction::Tools) => {
@@ -679,6 +673,7 @@ pub(super) fn mouse_down(state: &mut UiState, point: ScreenPoint) {
         Some(ToolbarAction::Edit) if state.editor.is_none() => open_editor(state),
         Some(ToolbarAction::Edit) => {}
         Some(ToolbarAction::Undo) => undo(state),
+        Some(ToolbarAction::Redo) => redo(state),
         Some(ToolbarAction::Record) => {
             if let Some(menu) = menu_for_action(ToolbarAction::Record) {
                 open_toolbar_menu(state, menu);
@@ -727,7 +722,7 @@ pub(super) fn mouse_move(state: &mut UiState, mut point: ScreenPoint, held: bool
             .is_none_or(|(last, at)| last != point && at.elapsed() >= Duration::from_millis(30));
     let hover = should_query_hover.then(|| {
         state.last_hover_query = Some((point, Instant::now()));
-        find_hover_window(point, state.overlay, state.pin_window)
+        find_hover_window(point, state.overlay, &state.pinned_images)
     });
     let Some(capture) = state.capture.as_mut() else {
         return;
@@ -946,36 +941,28 @@ pub(super) fn mouse_up(state: &mut UiState, mut point: ScreenPoint) {
             Tool::Rectangle => {
                 let rect = ScreenRect::normalized(start, point);
                 if rect.width() > 2 && rect.height() > 2 {
-                    capture
-                        .annotations
-                        .push(Annotation::Rect(rect, color, width, style));
+                    capture.push_annotation(Annotation::Rect(rect, color, width, style));
                 }
             }
             Tool::Ellipse => {
                 let rect = ScreenRect::normalized(start, point);
                 if rect.width() > 2 && rect.height() > 2 {
-                    capture
-                        .annotations
-                        .push(Annotation::Ellipse(rect, color, width, style));
+                    capture.push_annotation(Annotation::Ellipse(rect, color, width, style));
                 }
             }
             Tool::Arrow => {
                 if (start.x - point.x).abs() > 3 || (start.y - point.y).abs() > 3 {
-                    capture
-                        .annotations
-                        .push(Annotation::Arrow(start, point, color, width, style));
+                    capture.push_annotation(Annotation::Arrow(start, point, color, width, style));
                 }
             }
             Tool::Line => {
                 if (start.x - point.x).abs() > 3 || (start.y - point.y).abs() > 3 {
-                    capture
-                        .annotations
-                        .push(Annotation::Line(start, point, color, width, style));
+                    capture.push_annotation(Annotation::Line(start, point, color, width, style));
                 }
             }
             Tool::Highlight => {
                 if (start.x - point.x).abs() > 3 || (start.y - point.y).abs() > 3 {
-                    capture.annotations.push(Annotation::Highlight(
+                    capture.push_annotation(Annotation::Highlight(
                         start,
                         point,
                         [color[0], color[1], color[2], 105],
@@ -983,9 +970,15 @@ pub(super) fn mouse_up(state: &mut UiState, mut point: ScreenPoint) {
                     ));
                 }
             }
+            Tool::Spotlight => {
+                let rect = ScreenRect::normalized(start, point);
+                if rect.width() > 5 && rect.height() > 5 {
+                    capture.push_annotation(Annotation::Spotlight(rect));
+                }
+            }
             Tool::Mosaic => {}
             Tool::Text => {
-                capture.annotations.push(Annotation::Text(
+                capture.push_annotation(Annotation::Text(
                     start,
                     String::new(),
                     capture.text_size,
@@ -1032,12 +1025,13 @@ pub(super) fn key_down(state: &mut UiState, key: u32) {
         .capture
         .as_ref()
         .is_some_and(|capture| capture.editing_text.is_some())
-        && key == VK_RETURN_CODE
     {
-        if let Some(capture) = state.capture.as_mut() {
-            capture.finish_text_editing();
+        if key == VK_RETURN_CODE {
+            if let Some(capture) = state.capture.as_mut() {
+                capture.finish_text_editing();
+            }
+            invalidate(state);
         }
-        invalidate(state);
         return;
     }
     if key == VK_Z && unsafe { GetKeyState(VK_CONTROL_CODE) } < 0 {
@@ -1062,14 +1056,18 @@ pub(super) fn key_down(state: &mut UiState, key: u32) {
         return;
     }
     match key {
+        VK_A => set_tool(state, Tool::Arrow),
         VK_R => set_tool(state, Tool::Rectangle),
         VK_E => set_tool(state, Tool::Ellipse),
         VK_H => set_tool(state, Tool::Highlight),
         VK_I => set_tool(state, Tool::Line),
         VK_L => open_scroll_mode_menu(state),
+        VK_M => set_tool(state, Tool::Mosaic),
         VK_N => set_tool(state, Tool::Number),
+        VK_O => set_tool(state, Tool::Spotlight),
         VK_P => set_tool(state, Tool::Pen),
         VK_T => set_tool(state, Tool::Text),
+        VK_V => set_tool(state, Tool::Select),
         _ => {}
     }
 }
@@ -1089,15 +1087,27 @@ pub(super) fn undo(state: &mut UiState) {
     }
 }
 
-struct HoverQuery {
+pub(super) fn redo(state: &mut UiState) {
+    if let Some(capture) = state.capture.as_mut() {
+        capture.redo();
+        invalidate(state);
+    }
+}
+
+struct HoverQuery<'a> {
     point: ScreenPoint,
-    exclude: [HWND; 3],
+    overlay: HWND,
+    pinned_images: &'a [PinnedImageWindow],
     best: Option<ScreenRect>,
 }
 
 unsafe extern "system" fn hover_window_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
-    let query = &mut *(lparam as *mut HoverQuery);
-    if query.exclude.contains(&hwnd) || IsWindowVisible(hwnd) == 0 || IsIconic(hwnd) != 0 {
+    let query = &mut *(lparam as *mut HoverQuery<'_>);
+    if hwnd == query.overlay
+        || query.pinned_images.iter().any(|pin| pin.hwnd == hwnd)
+        || IsWindowVisible(hwnd) == 0
+        || IsIconic(hwnd) != 0
+    {
         return 1;
     }
     let mut rect: RECT = zeroed();
@@ -1125,11 +1135,12 @@ unsafe extern "system" fn hover_window_proc(hwnd: HWND, lparam: LPARAM) -> BOOL 
 pub(super) fn find_hover_window(
     point: ScreenPoint,
     overlay: HWND,
-    pin_window: HWND,
+    pinned_images: &[PinnedImageWindow],
 ) -> Option<ScreenRect> {
     let mut query = HoverQuery {
         point,
-        exclude: [overlay, pin_window, null_mut()],
+        overlay,
+        pinned_images,
         best: None,
     };
     unsafe {

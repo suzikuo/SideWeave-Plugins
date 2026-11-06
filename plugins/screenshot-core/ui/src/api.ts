@@ -12,11 +12,11 @@ export interface ScreenshotSettings {
   ocrRegion: string
   ocrSelectModel: number
   tencentOcrConfigured: boolean
-  recordingMp4Fps: number
-  recordingMp4MaxHeight: number
-  recordingMp4BitrateMbps: number
-  recordingGifFps: number
-  recordingWebpFps: number
+  recordingFps: number
+  recordingMaxHeight: number
+  recordingBitrateMbps: number
+  recordingGifColors: number
+  recordingWebpQuality: number
 }
 
 export interface ScreenshotStatus {
@@ -35,6 +35,7 @@ export interface RecordingStatus {
   fps: number
   frameCount: number
   elapsedMs: number
+  progressPercent: number
   maxDurationMs: number
   message: string | null
   previewPath: string | null

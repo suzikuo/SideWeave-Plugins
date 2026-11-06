@@ -1,12 +1,15 @@
 use super::RecordedFrame;
 use std::os::windows::ffi::OsStrExt;
-use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
-use windows::core::PCWSTR;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, SyncSender, TrySendError};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
+use windows::core::{Interface, PCWSTR};
 use windows::Win32::Media::MediaFoundation::{
     MFCreateAttributes, MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample,
     MFCreateSinkWriterFromURL, MFCreateSourceReaderFromURL, MFShutdown, MFStartup,
-    IMFAttributes, IMFByteStream, IMFSourceReader, IMFSinkWriter, MF_MT_AVG_BITRATE,
+    IMF2DBuffer, IMFAttributes, IMFByteStream, IMFSourceReader, MF_MT_AVG_BITRATE,
     MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE,
     MF_MT_MAJOR_TYPE, MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SUBTYPE, MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING,
     MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_SOURCE_READERF_ENDOFSTREAM, MFSTARTUP_FULL,
@@ -23,6 +26,7 @@ pub(super) fn encode_mp4(
     source_fps: u32,
     output_fps: u32,
     bitrate_mbps: u32,
+    progress: &AtomicU32,
     cancel: &AtomicBool,
 ) -> Result<(), String> {
     if frames.is_empty() || width == 0 || height == 0 || source_fps == 0 || output_fps == 0 {
@@ -109,8 +113,11 @@ pub(super) fn encode_mp4(
         .map_err(|error| format!("初始化 MP4 视频流失败：{error}"))?;
     unsafe { writer.BeginWriting() }.map_err(|error| format!("启动 MP4 编码失败：{error}"))?;
 
-    for (frame_index, timestamp_ms, duration_ms) in
-        super::frame_schedule(frames, source_fps, output_fps)
+    let schedule = super::frame_schedule(frames, source_fps, output_fps);
+    let total_frames = schedule.len();
+    super::update_export_progress(progress, 0, total_frames);
+    for (written_frames, (frame_index, timestamp_ms, duration_ms)) in
+        schedule.into_iter().enumerate()
     {
         if cancel.load(Ordering::Acquire) {
             let _ = unsafe { writer.Finalize() };
@@ -161,6 +168,7 @@ pub(super) fn encode_mp4(
             .map_err(|error| format!("设置 MP4 帧时长失败：{error}"))?;
         unsafe { writer.WriteSample(stream, &sample) }
             .map_err(|error| format!("编码 MP4 视频帧失败：{error}"))?;
+        super::update_export_progress(progress, written_frames + 1, total_frames);
     }
 
     unsafe { writer.Finalize() }.map_err(|error| format!("完成 MP4 文件失败：{error}"))?;
@@ -192,6 +200,154 @@ struct MediaFoundation;
 impl Drop for MediaFoundation {
     fn drop(&mut self) {
         let _ = unsafe { MFShutdown() };
+    }
+}
+
+pub(super) struct PreviewDecoder {
+    requests: Option<SyncSender<usize>>,
+    latest: Arc<Mutex<Option<(usize, Vec<u8>)>>>,
+    stop: Arc<AtomicBool>,
+    failed: Arc<AtomicBool>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl PreviewDecoder {
+    pub(super) fn spawn(
+        path: PathBuf,
+        width: u32,
+        height: u32,
+        preview_width: u32,
+        preview_height: u32,
+        fps: u32,
+    ) -> Option<Self> {
+        let (requests, receiver) = mpsc::sync_channel(1);
+        let latest = Arc::new(Mutex::new(None));
+        let worker_latest = Arc::clone(&latest);
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        let failed = Arc::new(AtomicBool::new(false));
+        let worker_failed = Arc::clone(&failed);
+        let worker = thread::Builder::new()
+            .name("screenshot-preview-decoder".into())
+            .spawn(move || {
+                let mut reader = match Mp4FrameReader::open(&path, width, height) {
+                    Ok(reader) => reader,
+                    Err(_) => {
+                        worker_failed.store(true, Ordering::Release);
+                        return;
+                    }
+                };
+                let fps = u64::from(fps.max(1));
+                let mut previous: Option<(u64, Vec<u8>)> = None;
+                let mut next = match reader.read_frame() {
+                    Ok(frame) => frame,
+                    Err(_) => {
+                        worker_failed.store(true, Ordering::Release);
+                        return;
+                    }
+                };
+
+                while let Ok(target_frame) = receiver.recv() {
+                    if worker_stop.load(Ordering::Acquire) {
+                        return;
+                    }
+                    let target_ms = (target_frame as u64).saturating_mul(1000) / fps;
+                    if previous
+                        .as_ref()
+                        .is_some_and(|(timestamp, _)| target_ms < *timestamp)
+                    {
+                        drop(reader);
+                        reader = match Mp4FrameReader::open(&path, width, height) {
+                            Ok(reader) => reader,
+                            Err(_) => {
+                                worker_failed.store(true, Ordering::Release);
+                                return;
+                            }
+                        };
+                        previous = None;
+                        next = match reader.read_frame() {
+                            Ok(frame) => frame,
+                            Err(_) => {
+                                worker_failed.store(true, Ordering::Release);
+                                return;
+                            }
+                        };
+                    }
+
+                    while next
+                        .as_ref()
+                        .is_some_and(|(timestamp, _)| *timestamp <= target_ms)
+                    {
+                        if worker_stop.load(Ordering::Acquire) {
+                            return;
+                        }
+                        previous = next.take();
+                        next = match reader.read_frame() {
+                            Ok(frame) => frame,
+                            Err(_) => {
+                                worker_failed.store(true, Ordering::Release);
+                                return;
+                            }
+                        };
+                    }
+
+                    let candidate = previous.as_ref().or(next.as_ref());
+                    let Some((timestamp, pixels)) = candidate else {
+                        worker_failed.store(true, Ordering::Release);
+                        return;
+                    };
+                    let Some(pixels) = super::make_preview_sample(
+                        width,
+                        height,
+                        pixels.clone(),
+                        preview_width,
+                        preview_height,
+                    ) else {
+                        worker_failed.store(true, Ordering::Release);
+                        return;
+                    };
+                    let decoded_index = ((*timestamp).saturating_mul(fps) + 500) / 1000;
+                    if let Ok(mut latest) = worker_latest.lock() {
+                        *latest = Some((decoded_index as usize, pixels));
+                    }
+                }
+            })
+            .ok()?;
+        Some(Self {
+            requests: Some(requests),
+            latest,
+            stop,
+            failed,
+            worker: Some(worker),
+        })
+    }
+
+    pub(super) fn request_frame(&self, target_frame: usize) -> Option<(usize, Vec<u8>)> {
+        if let Some(requests) = self.requests.as_ref() {
+            match requests.try_send(target_frame) {
+                Ok(()) | Err(TrySendError::Full(_)) => {}
+                Err(TrySendError::Disconnected(_)) => return None,
+            }
+        }
+        let latest = self.latest.lock().ok()?;
+        latest
+            .as_ref()
+            .filter(|(frame_index, _)| *frame_index <= target_frame)
+            .map(|(frame_index, pixels)| (*frame_index, pixels.clone()))
+    }
+
+    pub(super) fn failed(&self) -> bool {
+        self.failed.load(Ordering::Acquire)
+    }
+}
+
+impl Drop for PreviewDecoder {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        self.requests.take();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
     }
 }
 
@@ -251,8 +407,6 @@ impl Mp4FrameReader {
         if width == 0 || height == 0 {
             return Err("MP4 视频尺寸无效".into());
         }
-        let encoded_width = width.checked_add(width % 2).ok_or_else(|| "MP4 尺寸过大".to_string())?;
-        let encoded_height = height.checked_add(height % 2).ok_or_else(|| "MP4 尺寸过大".to_string())?;
         let com_result = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
         com_result
             .ok()
@@ -277,14 +431,19 @@ impl Mp4FrameReader {
             .map_err(|error| format!("设置 MP4 视频类型失败：{error}"))?;
         unsafe { media_type.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_RGB32) }
             .map_err(|error| format!("设置 MP4 解码像素格式失败：{error}"))?;
-        unsafe { media_type.SetUINT32(&MF_MT_DEFAULT_STRIDE, encoded_width * 4) }
-            .map_err(|error| format!("设置 MP4 解码行距失败：{error}"))?;
-        unsafe { media_type.SetUINT64(&MF_MT_FRAME_SIZE, pack_ratio(encoded_width, encoded_height)) }
-            .map_err(|error| format!("设置 MP4 解码尺寸失败：{error}"))?;
-        unsafe { media_type.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32) }
-            .map_err(|error| format!("设置 MP4 解码帧模式失败：{error}"))?;
         unsafe { reader.SetCurrentMediaType(stream, None, &media_type) }
             .map_err(|error| format!("初始化 MP4 视频解码失败：{error}"))?;
+        let current_type = unsafe { reader.GetCurrentMediaType(stream) }
+            .map_err(|error| format!("读取 MP4 实际解码格式失败：{error}"))?;
+        let frame_size = unsafe { current_type.GetUINT64(&MF_MT_FRAME_SIZE) }
+            .map_err(|error| format!("读取 MP4 解码尺寸失败：{error}"))?;
+        let encoded_width = (frame_size >> 32) as u32;
+        let encoded_height = frame_size as u32;
+        if encoded_width < width || encoded_height < height {
+            return Err(format!(
+                "MP4 解码尺寸不足：实际 {encoded_width}×{encoded_height}，需要至少 {width}×{height}"
+            ));
+        }
 
         Ok(Self {
             reader: Some(reader),
@@ -323,34 +482,148 @@ impl Mp4FrameReader {
             };
             let buffer = unsafe { sample.ConvertToContiguousBuffer() }
                 .map_err(|error| format!("读取 MP4 帧缓冲区失败：{error}"))?;
-            let mut source = std::ptr::null_mut();
-            let mut current_length = 0u32;
-            unsafe { buffer.Lock(&mut source, None, Some(&mut current_length)) }
-                .map_err(|error| format!("锁定 MP4 解码帧失败：{error}"))?;
-            let required_length = self.encoded_width as usize * self.encoded_height as usize * 4;
-            if source.is_null() || (current_length as usize) < required_length {
-                let _ = unsafe { buffer.Unlock() };
-                return Err("MP4 解码帧尺寸无效".into());
-            }
-            let bgra = unsafe {
-                std::slice::from_raw_parts(source, current_length as usize)
+            let rgba = if let Ok(buffer_2d) = buffer.cast::<IMF2DBuffer>() {
+                let mut scanline0 = std::ptr::null_mut();
+                let mut pitch = 0i32;
+                unsafe { buffer_2d.Lock2D(&mut scanline0, &mut pitch) }
+                    .map_err(|error| format!("锁定 MP4 解码帧失败：{error}"))?;
+                let copied = copy_bgra_scanlines_to_rgba(
+                    scanline0,
+                    pitch,
+                    self.width,
+                    self.height,
+                    self.encoded_width,
+                );
+                let unlocked = unsafe { buffer_2d.Unlock2D() }
+                    .map_err(|error| format!("释放 MP4 解码帧失败：{error}"));
+                let rgba = copied?;
+                unlocked?;
+                rgba
+            } else {
+                let mut source = std::ptr::null_mut();
+                let mut current_length = 0u32;
+                unsafe { buffer.Lock(&mut source, None, Some(&mut current_length)) }
+                    .map_err(|error| format!("锁定 MP4 解码帧失败：{error}"))?;
+                let stride = unsafe { reader.GetCurrentMediaType(stream) }
+                    .ok()
+                    .and_then(|media_type| unsafe {
+                        media_type.GetUINT32(&MF_MT_DEFAULT_STRIDE).ok()
+                    })
+                    .map(|stride| stride as i32)
+                    .unwrap_or((self.encoded_width * 4) as i32);
+                let copied = copy_bgra_contiguous_to_rgba(
+                    source,
+                    current_length,
+                    stride,
+                    self.width,
+                    self.height,
+                    self.encoded_width,
+                    self.encoded_height,
+                );
+                let unlocked = unsafe { buffer.Unlock() }
+                    .map_err(|error| format!("释放 MP4 解码帧失败：{error}"));
+                let rgba = copied?;
+                unlocked?;
+                rgba
             };
-            let mut rgba = vec![0u8; self.width as usize * self.height as usize * 4];
-            for y in 0..self.height {
-                for x in 0..self.width {
-                    let source_offset = ((y * self.encoded_width + x) * 4) as usize;
-                    let target_offset = ((y * self.width + x) * 4) as usize;
-                    rgba[target_offset] = bgra[source_offset + 2];
-                    rgba[target_offset + 1] = bgra[source_offset + 1];
-                    rgba[target_offset + 2] = bgra[source_offset];
-                    rgba[target_offset + 3] = 255;
-                }
-            }
-            unsafe { buffer.Unlock() }
-                .map_err(|error| format!("释放 MP4 解码帧失败：{error}"))?;
             return Ok(Some(((timestamp.max(0) / 10_000) as u64, rgba)));
         }
     }
+}
+
+fn copy_bgra_scanlines_to_rgba(
+    scanline0: *const u8,
+    pitch: i32,
+    width: u32,
+    height: u32,
+    encoded_width: u32,
+) -> Result<Vec<u8>, String> {
+    if scanline0.is_null() || pitch == 0 {
+        return Err("MP4 解码帧行距无效".into());
+    }
+    let row_bytes = usize::try_from(encoded_width)
+        .ok()
+        .and_then(|width| width.checked_mul(4))
+        .ok_or_else(|| "MP4 解码帧尺寸过大".to_string())?;
+    if (pitch.unsigned_abs() as usize) < row_bytes {
+        return Err("MP4 解码帧行距不足".into());
+    }
+    let output_len = usize::try_from(width)
+        .ok()
+        .and_then(|width| width.checked_mul(height as usize))
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| "MP4 解码帧尺寸过大".to_string())?;
+    let mut rgba = vec![0u8; output_len];
+    for y in 0..height {
+        let row = unsafe { scanline0.offset(pitch as isize * y as isize) };
+        let bgra = unsafe { std::slice::from_raw_parts(row, row_bytes) };
+        for x in 0..width {
+            let source_offset = x as usize * 4;
+            let target_offset = (y as usize * width as usize + x as usize) * 4;
+            rgba[target_offset] = bgra[source_offset + 2];
+            rgba[target_offset + 1] = bgra[source_offset + 1];
+            rgba[target_offset + 2] = bgra[source_offset];
+            rgba[target_offset + 3] = 255;
+        }
+    }
+    Ok(rgba)
+}
+
+fn copy_bgra_contiguous_to_rgba(
+    source: *const u8,
+    current_length: u32,
+    stride: i32,
+    width: u32,
+    height: u32,
+    encoded_width: u32,
+    encoded_height: u32,
+) -> Result<Vec<u8>, String> {
+    if source.is_null() || stride == 0 {
+        return Err("MP4 解码帧尺寸无效".into());
+    }
+    let row_bytes = usize::try_from(encoded_width)
+        .ok()
+        .and_then(|width| width.checked_mul(4))
+        .ok_or_else(|| "MP4 解码帧尺寸过大".to_string())?;
+    let stride_bytes = stride.unsigned_abs() as usize;
+    if stride_bytes < row_bytes {
+        return Err("MP4 解码帧行距不足".into());
+    }
+    let row_count = usize::try_from(encoded_height.saturating_sub(1))
+        .map_err(|_| "MP4 解码帧尺寸过大")?;
+    let required_length = row_count
+        .checked_mul(stride_bytes)
+        .and_then(|offset| offset.checked_add(row_bytes))
+        .ok_or_else(|| "MP4 解码帧尺寸过大".to_string())?;
+    if (current_length as usize) < required_length {
+        return Err("MP4 解码帧尺寸无效".into());
+    }
+    let output_len = usize::try_from(width)
+        .ok()
+        .and_then(|width| width.checked_mul(height as usize))
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| "MP4 解码帧尺寸过大".to_string())?;
+    let mut rgba = vec![0u8; output_len];
+    // Match MicrosoftDocs/win32's CBufferLock::LockBuffer behavior:
+    // for a negative stride, scanline 0 is the last row in memory.
+    let scanline0 = if stride < 0 {
+        unsafe { source.add(row_count * stride_bytes) }
+    } else {
+        source
+    };
+    for y in 0..height {
+        let row = unsafe { scanline0.offset(stride as isize * y as isize) };
+        let bgra = unsafe { std::slice::from_raw_parts(row, row_bytes) };
+        for x in 0..width {
+            let source_offset = x as usize * 4;
+            let target_offset = (y as usize * width as usize + x as usize) * 4;
+            rgba[target_offset] = bgra[source_offset + 2];
+            rgba[target_offset + 1] = bgra[source_offset + 1];
+            rgba[target_offset + 2] = bgra[source_offset];
+            rgba[target_offset + 3] = 255;
+        }
+    }
+    Ok(rgba)
 }
 
 impl Drop for Mp4FrameReader {
@@ -359,191 +632,3 @@ impl Drop for Mp4FrameReader {
     }
 }
 
-/// A live MP4 sink used during capture. Frames are encoded and written as they
-/// arrive, so recording duration does not grow the raw-frame memory buffer.
-pub(super) struct StreamingMp4Encoder {
-    writer: Option<IMFSinkWriter>,
-    stream: u32,
-    source_width: u32,
-    source_height: u32,
-    encoded_width: u32,
-    encoded_height: u32,
-    fps: u32,
-    buffer_length: u32,
-    finalized: bool,
-    _media_foundation: MediaFoundation,
-    _com_apartment: ComApartment,
-}
-
-impl StreamingMp4Encoder {
-    pub(super) fn create(
-        path: &Path,
-        width: u32,
-        height: u32,
-        fps: u32,
-        bitrate_mbps: u32,
-    ) -> Result<Self, String> {
-        if width == 0 || height == 0 || fps == 0 {
-            return Err("MP4 录制参数无效".into());
-        }
-        let encoded_width = width.checked_add(width % 2).ok_or_else(|| "MP4 帧尺寸过大".to_string())?;
-        let encoded_height = height.checked_add(height % 2).ok_or_else(|| "MP4 帧尺寸过大".to_string())?;
-        let buffer_length = encoded_width
-            .checked_mul(encoded_height)
-            .and_then(|pixels| pixels.checked_mul(4))
-            .ok_or_else(|| "MP4 帧尺寸过大".to_string())?;
-
-        let com_result = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
-        com_result
-            .ok()
-            .map_err(|error| format!("初始化媒体线程失败：{error}"))?;
-        let com_apartment = ComApartment;
-        unsafe { MFStartup(MF_VERSION, MFSTARTUP_FULL) }
-            .map_err(|error| format!("初始化 Windows 视频编码器失败：{error}"))?;
-        let media_foundation = MediaFoundation;
-
-        let output_url: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-        let writer = unsafe {
-            MFCreateSinkWriterFromURL(
-                PCWSTR(output_url.as_ptr()),
-                None::<&IMFByteStream>,
-                None::<&IMFAttributes>,
-            )
-        }
-        .map_err(|error| format!("创建 MP4 临时文件失败：{error}"))?;
-
-        let output_type = unsafe { MFCreateMediaType() }
-            .map_err(|error| format!("创建 H.264 媒体类型失败：{error}"))?;
-        unsafe { output_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video) }
-            .map_err(|error| format!("设置 MP4 视频类型失败：{error}"))?;
-        unsafe { output_type.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_H264) }
-            .map_err(|error| format!("设置 H.264 编码失败：{error}"))?;
-        unsafe {
-            output_type.SetUINT32(
-                &MF_MT_AVG_BITRATE,
-                bitrate_to_bps(bitrate_mbps),
-            )
-        }
-            .map_err(|error| format!("设置 MP4 码率失败：{error}"))?;
-        unsafe {
-            output_type.SetUINT32(
-                &MF_MT_INTERLACE_MODE,
-                MFVideoInterlace_Progressive.0 as u32,
-            )
-        }
-        .map_err(|error| format!("设置 MP4 帧模式失败：{error}"))?;
-        unsafe { output_type.SetUINT64(&MF_MT_FRAME_SIZE, pack_ratio(encoded_width, encoded_height)) }
-            .map_err(|error| format!("设置 MP4 画面尺寸失败：{error}"))?;
-        unsafe { output_type.SetUINT64(&MF_MT_FRAME_RATE, pack_ratio(fps, 1)) }
-            .map_err(|error| format!("设置 MP4 帧率失败：{error}"))?;
-        unsafe { output_type.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, pack_ratio(1, 1)) }
-            .map_err(|error| format!("设置 MP4 像素比例失败：{error}"))?;
-
-        let stream = unsafe { writer.AddStream(&output_type) }
-            .map_err(|error| format!("创建 MP4 视频流失败：{error}"))?;
-        let input_type = unsafe { MFCreateMediaType() }
-            .map_err(|error| format!("创建屏幕帧输入格式失败：{error}"))?;
-        unsafe { input_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video) }
-            .map_err(|error| format!("设置屏幕帧类型失败：{error}"))?;
-        unsafe { input_type.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_RGB32) }
-            .map_err(|error| format!("设置屏幕帧像素格式失败：{error}"))?;
-        unsafe { input_type.SetUINT32(&MF_MT_DEFAULT_STRIDE, encoded_width * 4) }
-            .map_err(|error| format!("设置屏幕帧行距失败：{error}"))?;
-        unsafe {
-            input_type.SetUINT32(
-                &MF_MT_INTERLACE_MODE,
-                MFVideoInterlace_Progressive.0 as u32,
-            )
-        }
-        .map_err(|error| format!("设置屏幕帧模式失败：{error}"))?;
-        unsafe { input_type.SetUINT64(&MF_MT_FRAME_SIZE, pack_ratio(encoded_width, encoded_height)) }
-            .map_err(|error| format!("设置屏幕帧尺寸失败：{error}"))?;
-        unsafe { input_type.SetUINT64(&MF_MT_FRAME_RATE, pack_ratio(fps, 1)) }
-            .map_err(|error| format!("设置屏幕帧率失败：{error}"))?;
-        unsafe { input_type.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, pack_ratio(1, 1)) }
-            .map_err(|error| format!("设置屏幕像素比例失败：{error}"))?;
-        unsafe { writer.SetInputMediaType(stream, &input_type, None::<&IMFAttributes>) }
-            .map_err(|error| format!("初始化 MP4 视频流失败：{error}"))?;
-        unsafe { writer.BeginWriting() }.map_err(|error| format!("启动 MP4 编码失败：{error}"))?;
-
-        Ok(Self {
-            writer: Some(writer),
-            stream,
-            source_width: width,
-            source_height: height,
-            encoded_width,
-            encoded_height,
-            fps,
-            buffer_length,
-            finalized: false,
-            _media_foundation: media_foundation,
-            _com_apartment: com_apartment,
-        })
-    }
-
-    pub(super) fn write_frame(&mut self, timestamp_ms: u64, pixels: &[u8]) -> Result<(), String> {
-        let expected_length = self.source_width as usize * self.source_height as usize * 4;
-        if pixels.len() != expected_length {
-            return Err("MP4 帧数据长度无效".into());
-        }
-        let buffer = unsafe { MFCreateMemoryBuffer(self.buffer_length) }
-            .map_err(|error| format!("分配 MP4 帧缓冲区失败：{error}"))?;
-        let mut destination = std::ptr::null_mut();
-        unsafe { buffer.Lock(&mut destination, None, None) }
-            .map_err(|error| format!("锁定 MP4 帧缓冲区失败：{error}"))?;
-        if destination.is_null() {
-            let _ = unsafe { buffer.Unlock() };
-            return Err("MP4 帧缓冲区为空".into());
-        }
-        let target = unsafe {
-            std::slice::from_raw_parts_mut(destination, self.buffer_length as usize)
-        };
-        for y in 0..self.encoded_height {
-            let source_y = y.min(self.source_height - 1);
-            for x in 0..self.encoded_width {
-                let source_x = x.min(self.source_width - 1);
-                let source_offset = ((source_y * self.source_width + source_x) * 4) as usize;
-                let target_offset = ((y * self.encoded_width + x) * 4) as usize;
-                target[target_offset] = pixels[source_offset + 2];
-                target[target_offset + 1] = pixels[source_offset + 1];
-                target[target_offset + 2] = pixels[source_offset];
-                target[target_offset + 3] = 0;
-            }
-        }
-        unsafe { buffer.Unlock() }
-            .map_err(|error| format!("释放 MP4 帧缓冲区失败：{error}"))?;
-        unsafe { buffer.SetCurrentLength(self.buffer_length) }
-            .map_err(|error| format!("设置 MP4 帧长度失败：{error}"))?;
-
-        let sample = unsafe { MFCreateSample() }
-            .map_err(|error| format!("创建 MP4 视频样本失败：{error}"))?;
-        unsafe { sample.AddBuffer(&buffer) }
-            .map_err(|error| format!("写入 MP4 帧缓冲区失败：{error}"))?;
-        let timestamp = milliseconds_to_hns(timestamp_ms);
-        let duration = i64::from((1000 / self.fps).max(1)) * 10_000;
-        unsafe { sample.SetSampleTime(timestamp) }
-            .map_err(|error| format!("设置 MP4 帧时间失败：{error}"))?;
-        unsafe { sample.SetSampleDuration(duration) }
-            .map_err(|error| format!("设置 MP4 帧时长失败：{error}"))?;
-        let writer = self.writer.as_ref().ok_or("MP4 编码器已关闭")?;
-        unsafe { writer.WriteSample(self.stream, &sample) }
-            .map_err(|error| format!("编码 MP4 视频帧失败：{error}"))
-    }
-
-    pub(super) fn finish(&mut self) -> Result<(), String> {
-        if self.finalized {
-            return Ok(());
-        }
-        self.finalized = true;
-        let Some(writer) = self.writer.take() else {
-            return Ok(());
-        };
-        unsafe { writer.Finalize() }.map_err(|error| format!("完成 MP4 文件失败：{error}"))
-    }
-}
-
-impl Drop for StreamingMp4Encoder {
-    fn drop(&mut self) {
-        let _ = self.finish();
-    }
-}

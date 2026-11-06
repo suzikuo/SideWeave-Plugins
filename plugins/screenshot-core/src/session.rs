@@ -33,6 +33,7 @@ pub(super) struct CaptureSession {
     pub(super) text_size: u32,
     pub(super) stroke_style: StrokeStyle,
     pub(super) annotations: Vec<Annotation>,
+    pub(super) redo_annotations: Vec<Annotation>,
     pub(super) editing_text: Option<usize>,
     pub(super) number_next: u32,
     pub(super) scroll: Option<ScrollingCapture>,
@@ -69,6 +70,7 @@ impl CaptureSession {
             text_size,
             stroke_style: StrokeStyle::Solid,
             annotations: Vec::new(),
+            redo_annotations: Vec::new(),
             editing_text: None,
             number_next: 1,
             scroll: scrolling.then(ScrollingCapture::pending),
@@ -91,6 +93,7 @@ impl CaptureSession {
         self.secondary_hover = None;
         self.current_pos = None;
         self.annotations.clear();
+        self.redo_annotations.clear();
         self.editing_text = None;
         self.number_next = 1;
         self.tool = Tool::Select;
@@ -123,13 +126,31 @@ impl CaptureSession {
         let Some(annotation) = self.annotations.pop() else {
             return false;
         };
-        if let Annotation::Number(_, number, _) = annotation {
+        if let Annotation::Number(_, number, _) = &annotation {
             if number.saturating_add(1) == self.number_next {
-                self.number_next = number;
+                self.number_next = *number;
             }
         }
+        self.redo_annotations.push(annotation);
         self.editing_text = None;
         true
+    }
+
+    pub(super) fn redo(&mut self) -> bool {
+        let Some(annotation) = self.redo_annotations.pop() else {
+            return false;
+        };
+        if let Annotation::Number(_, number, _) = &annotation {
+            self.number_next = self.number_next.max(number.saturating_add(1));
+        }
+        self.annotations.push(annotation);
+        self.editing_text = None;
+        true
+    }
+
+    pub(super) fn push_annotation(&mut self, annotation: Annotation) {
+        self.redo_annotations.clear();
+        self.annotations.push(annotation);
     }
 
     pub(super) fn finish_text_editing(&mut self) -> bool {
@@ -142,6 +163,7 @@ impl CaptureSession {
         let Some(index) = self.editing_text else {
             return false;
         };
+        self.redo_annotations.clear();
         if value == 8 {
             if let Some(Annotation::Text(_, text, _, _)) = self.annotations.get_mut(index) {
                 text.pop();

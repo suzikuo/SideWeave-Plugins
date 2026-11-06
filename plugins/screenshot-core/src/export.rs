@@ -12,8 +12,12 @@ pub(super) fn compose(
     annotations: impl IntoIterator<Item = Annotation>,
     selection: ScreenRect,
 ) -> Vec<u8> {
+    let annotations = annotations.into_iter().collect::<Vec<_>>();
+    apply_spotlight_masks(&mut pixels, width, height, &annotations, selection);
     for annotation in annotations {
-        draw_annotation(&mut pixels, width, height, annotation, selection);
+        if !matches!(&annotation, Annotation::Spotlight(_)) {
+            draw_annotation(&mut pixels, width, height, annotation, selection);
+        }
     }
     if !settings.watermark_text.trim().is_empty() {
         draw_watermark(
@@ -153,6 +157,7 @@ pub(super) fn draw_annotation(
                 thickness,
             );
         }
+        Annotation::Spotlight(_) => {}
         Annotation::Pen(points, color, thickness, style) => {
             draw_path(
                 pixels, width, height, &points, selection, color, thickness, style,
@@ -195,6 +200,47 @@ pub(super) fn draw_annotation(
                 16,
                 [255, 255, 255, 255],
             );
+        }
+    }
+}
+
+fn apply_spotlight_masks(
+    pixels: &mut [u8],
+    width: usize,
+    height: usize,
+    annotations: &[Annotation],
+    selection: ScreenRect,
+) {
+    let spots = annotations
+        .iter()
+        .filter_map(|annotation| match annotation {
+            Annotation::Spotlight(rect) => rect.clipped_to(selection),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let expected_len = width.checked_mul(height).and_then(|len| len.checked_mul(4));
+    if spots.is_empty() || expected_len.map_or(true, |len| pixels.len() < len) {
+        return;
+    }
+
+    for y in 0..height {
+        for x in 0..width {
+            let screen_x = selection.left as f64 + x as f64 + 0.5;
+            let screen_y = selection.top as f64 + y as f64 + 0.5;
+            let inside_focus = spots.iter().any(|rect| {
+                let radius_x = ((rect.right - rect.left) as f64 / 2.0).max(1.0);
+                let radius_y = ((rect.bottom - rect.top) as f64 / 2.0).max(1.0);
+                let dx = (screen_x - (rect.left as f64 + rect.right as f64) / 2.0) / radius_x;
+                let dy = (screen_y - (rect.top as f64 + rect.bottom as f64) / 2.0) / radius_y;
+                dx * dx + dy * dy <= 1.0
+            });
+            if inside_focus {
+                continue;
+            }
+            let offset = (y * width + x) * 4;
+            for channel in &mut pixels[offset..offset + 3] {
+                *channel = (*channel as u16 * 143 / 255) as u8;
+            }
         }
     }
 }

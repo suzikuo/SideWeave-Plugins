@@ -3,10 +3,10 @@ use super::{wide, DEFAULT_GUI_FONT};
 use crate::model::{ScreenPoint, ScreenRect, StrokeStyle};
 use crate::scroll::MatchAxis;
 use crate::toolbar::{
-    button_origin as toolbar_button_origin, layout_for_screen_width, toolbar_icon_index,
-    SecondaryBarItem, SecondaryBarLayout, Tool, ToolbarAction, ToolbarLayout, ToolbarMenu,
-    AnimationFormatKey, RecordingSetupLayout, COLOR_SWATCHES, MOSAIC_SIZES, STROKE_SIZES, TEXT_SIZES,
-    TOOLBAR_BUTTON_HEIGHT, TOOLBAR_BUTTON_WIDTH, TOOLBAR_VERTICAL_PADDING,
+    button_origin as toolbar_button_origin, layout_for_item_count, layout_for_screen_width,
+    toolbar_icon_index, SecondaryBarItem, SecondaryBarLayout, Tool, ToolbarAction, ToolbarLayout,
+    ToolbarMenu, RecordingSetupLayout, COLOR_SWATCHES, MOSAIC_SIZES,
+    STROKE_SIZES, TEXT_SIZES, TOOLBAR_BUTTON_HEIGHT, TOOLBAR_BUTTON_WIDTH,
 };
 
 pub(super) const SCROLL_TOOLBAR_ACTIONS: [ToolbarAction; 7] = [
@@ -39,98 +39,9 @@ pub(crate) fn toolbar_layout(screen: ScreenRect) -> ToolbarLayout {
     layout_for_screen_width(screen.width() as i32)
 }
 
-#[allow(dead_code)]
-unsafe fn draw_recording_setup_legacy_gdi(
-    dc: HDC,
-    layout: RecordingSetupLayout,
-    format: AnimationFormatKey,
-    fps: u32,
-) {
-    let shadow = CreateSolidBrush(0x00303030);
-    let old_shadow = SelectObject(dc, shadow as HGDIOBJ);
-    RoundRect(
-        dc,
-        layout.left + 2,
-        layout.top + 4,
-        layout.left + layout.width + 2,
-        layout.top + layout.height + 4,
-        16,
-        16,
-    );
-    SelectObject(dc, old_shadow);
-    DeleteObject(shadow as HGDIOBJ);
-
-    let panel = CreateSolidBrush(0x00ffffff);
-    let outline = CreatePen(0, 1, 0x00d9dee7);
-    let old_panel = SelectObject(dc, panel as HGDIOBJ);
-    let old_outline = SelectObject(dc, outline as HGDIOBJ);
-    RoundRect(
-        dc,
-        layout.left,
-        layout.top,
-        layout.left + layout.width,
-        layout.top + layout.height,
-        16,
-        16,
-    );
-    SelectObject(dc, old_panel);
-    SelectObject(dc, old_outline);
-    DeleteObject(panel as HGDIOBJ);
-    DeleteObject(outline as HGDIOBJ);
-
-    draw_menu_text(
-        dc,
-        layout.left + 20,
-        layout.top + 1,
-        layout.left + layout.width - 52,
-        layout.top + 25,
-        "录制设置",
-    );
-    draw_menu_muted_text(
-        dc,
-        layout.left + 20,
-        layout.top + 20,
-        layout.left + layout.width - 52,
-        layout.top + 42,
-        "选择格式和帧率后开始录制",
-    );
-    draw_menu_text(
-        dc,
-        layout.left + layout.width - 40,
-        layout.top + 1,
-        layout.left + layout.width - 12,
-        layout.top + 33,
-        "×",
-    );
-
-    let start = layout.start_rect();
-    let primary = CreateSolidBrush(0x00f76f16);
-    let no_outline = CreatePen(0, 1, 0x00f76f16);
-    let old_primary = SelectObject(dc, primary as HGDIOBJ);
-    let old_pen = SelectObject(dc, no_outline as HGDIOBJ);
-    RoundRect(dc, start.0, start.1, start.2, start.3, 10, 10);
-    SelectObject(dc, old_primary);
-    SelectObject(dc, old_pen);
-    DeleteObject(primary as HGDIOBJ);
-    DeleteObject(no_outline as HGDIOBJ);
-    draw_setup_label(dc, start, "开始录制", true, true);
-
-    for index in 0..2 {
-        let is_selected = (index == 0 && format == AnimationFormatKey::Mp4)
-            || (index == 1 && format == AnimationFormatKey::Gif)
-            || (index == 2 && format == AnimationFormatKey::Webp);
-        let rect = layout.format_rect(index).unwrap();
-        draw_setup_label(dc, rect, match index { 0 => "MP4", 1 => "GIF 动图", _ => "WebP" }, is_selected, false);
-        let fps_rect = layout.fps_rect(index).unwrap();
-        let selected = (index == 0 && fps == 15) || (index == 1 && fps == 30);
-        draw_setup_label(dc, fps_rect, if index == 0 { "标准帧率  ·  15 FPS" } else { "流畅帧率  ·  30 FPS" }, selected, false);
-    }
-}
-
 pub(super) unsafe fn draw_recording_setup_gdi(
     dc: HDC,
     layout: RecordingSetupLayout,
-    format: AnimationFormatKey,
     show_cursor: bool,
 ) {
     let shadow = CreateSolidBrush(0x00303030);
@@ -192,27 +103,16 @@ pub(super) unsafe fn draw_recording_setup_gdi(
             layout.left + 132,
             layout.top + 126,
         ),
-        "选择格式",
+        "导出格式",
         0x00505b68,
         false,
     );
-    draw_setup_radio(
+    draw_setup_text(
         dc,
-        layout.format_rect(0).unwrap(),
-        "MP4",
-        format == AnimationFormatKey::Mp4,
-    );
-    draw_setup_radio(
-        dc,
-        layout.format_rect(1).unwrap(),
-        "GIF",
-        format == AnimationFormatKey::Gif,
-    );
-    draw_setup_radio(
-        dc,
-        layout.format_rect(2).unwrap(),
-        "WebP",
-        format == AnimationFormatKey::Webp,
+        layout.output_note_rect(),
+        "结束后在预览页选择 MP4 / GIF / WebP",
+        0x00505b68,
+        false,
     );
 
     let controls = ["扬声器", "麦克风", "摄像头", "鼠标设置"];
@@ -287,39 +187,6 @@ unsafe fn draw_setup_text(
         if centered { 1 | 4 | 0x20 } else { 1 | 4 },
     );
     SelectObject(dc, old_font);
-}
-
-unsafe fn draw_setup_radio(
-    dc: HDC,
-    rect: (i32, i32, i32, i32),
-    label: &str,
-    selected: bool,
-) {
-    let center_x = rect.0 + 14;
-    let center_y = (rect.1 + rect.3) / 2;
-    let border = CreatePen(0, 1, if selected { 0x00f76f16 } else { 0x009ba5b1 });
-    let white = CreateSolidBrush(0x00ffffff);
-    let old_border = SelectObject(dc, border as HGDIOBJ);
-    let old_white = SelectObject(dc, white as HGDIOBJ);
-    Ellipse(dc, center_x - 11, center_y - 11, center_x + 11, center_y + 11);
-    SelectObject(dc, old_border);
-    SelectObject(dc, old_white);
-    DeleteObject(border as HGDIOBJ);
-    DeleteObject(white as HGDIOBJ);
-    if selected {
-        let dot = CreateSolidBrush(0x00f76f16);
-        let old_dot = SelectObject(dc, dot as HGDIOBJ);
-        Ellipse(dc, center_x - 5, center_y - 5, center_x + 5, center_y + 5);
-        SelectObject(dc, old_dot);
-        DeleteObject(dot as HGDIOBJ);
-    }
-    draw_setup_text(
-        dc,
-        (rect.0 + 30, rect.1, rect.2, rect.3),
-        label,
-        0x002d3742,
-        false,
-    );
 }
 
 unsafe fn draw_setup_speaker_icon(dc: HDC, center_x: i32, top: i32, color: u32) {
@@ -423,61 +290,8 @@ unsafe fn draw_setup_dropdown(dc: HDC, x: i32, y: i32, color: u32) {
     DeleteObject(brush as HGDIOBJ);
 }
 
-unsafe fn draw_setup_label(
-    dc: HDC,
-    rect: (i32, i32, i32, i32),
-    label: &str,
-    selected: bool,
-    primary: bool,
-) {
-    let fill_color = if primary {
-        0x00f76f16
-    } else if selected {
-        0x00eff6ff
-    } else {
-        0x00f6f7f9
-    };
-    let border_color = if primary {
-        0x00f76f16
-    } else if selected {
-        0x00f76f16
-    } else {
-        0x00e3e7ed
-    };
-    let brush = CreateSolidBrush(fill_color);
-    let pen = CreatePen(0, 1, border_color);
-    let old_brush = SelectObject(dc, brush as HGDIOBJ);
-    let old_pen = SelectObject(dc, pen as HGDIOBJ);
-    RoundRect(dc, rect.0, rect.1, rect.2, rect.3, 8, 8);
-    SelectObject(dc, old_brush);
-    SelectObject(dc, old_pen);
-    DeleteObject(brush as HGDIOBJ);
-    DeleteObject(pen as HGDIOBJ);
-
-    let font = GetStockObject(DEFAULT_GUI_FONT);
-    let old_font = SelectObject(dc, font);
-    SetBkMode(dc, 1);
-    SetTextColor(dc, if primary { 0x00ffffff } else { 0x002c3440 });
-    let text = super::wide(label);
-    let mut text_rect = RECT {
-        left: rect.0 + 6,
-        top: rect.1 + 2,
-        right: rect.2 - 6,
-        bottom: rect.3 - 2,
-    };
-    DrawTextW(dc, text.as_ptr(), -1, &mut text_rect, 1 | 4 | 0x20);
-    SelectObject(dc, old_font);
-}
-
 pub(super) fn scroll_toolbar_layout() -> ToolbarLayout {
-    let columns = SCROLL_TOOLBAR_ACTIONS.len();
-    ToolbarLayout {
-        item_count: columns,
-        columns,
-        rows: 1,
-        width: columns as i32 * TOOLBAR_BUTTON_WIDTH,
-        height: TOOLBAR_BUTTON_HEIGHT + TOOLBAR_VERTICAL_PADDING * 2,
-    }
+    layout_for_item_count(SCROLL_TOOLBAR_ACTIONS.len(), i32::MAX)
 }
 
 pub(super) fn scroll_toolbar_action(index: usize) -> Option<ToolbarAction> {
@@ -526,6 +340,7 @@ pub(super) unsafe fn draw_toolbar_gdi(
     text_size: u32,
     stroke_style: StrokeStyle,
     can_undo: bool,
+    can_redo: bool,
 ) {
     // One soft shadow and a light outline keep attention on the selected area.
     let shadow = CreateSolidBrush(0x00e9e9e9);
@@ -567,7 +382,6 @@ pub(super) unsafe fn draw_toolbar_gdi(
         let center_x = bx + TOOLBAR_BUTTON_WIDTH / 2;
         let center_y = by + TOOLBAR_BUTTON_HEIGHT / 2;
 
-        // Split tools from the output actions with one quiet divider.
         if action == ToolbarAction::Undo {
             let separator = CreatePen(0, 1, 0x00ebe6e5);
             let old = SelectObject(dc, separator as HGDIOBJ);
@@ -586,9 +400,9 @@ pub(super) unsafe fn draw_toolbar_gdi(
             || (action == ToolbarAction::Tools && (tool_palette_open || active_tool != Tool::Select));
         let is_hovered = hovered == Some(item_position);
         let is_undo = action == ToolbarAction::Undo;
-        // COLORREF values use BGR order. Keep the completion and close fills light,
-        // with a slightly stronger tint on hover.
-        let (fill_color, border_color, icon_color) = if is_undo && !can_undo {
+        let is_redo = action == ToolbarAction::Redo;
+        let disabled = (is_undo && !can_undo) || (is_redo && !can_redo);
+        let (fill_color, border_color, icon_color) = if disabled {
             (None, None, 0x00c2bbb6)
         } else {
             match action {
@@ -979,8 +793,8 @@ pub(super) unsafe fn draw_toolbar_menu_gdi(
         };
         let subtitle = match menu {
             ToolbarMenu::Recognition => "",
-            ToolbarMenu::RecordingFps => "MP4 手动停止 · GIF/WebP 最长 10 秒 · 选择录制帧率",
-            ToolbarMenu::RecordingExport => "保存录屏文件",
+            ToolbarMenu::RecordingFps => "使用详情设置页中的统一录制帧率",
+            ToolbarMenu::RecordingExport => "预览后选择 MP4、GIF 或 WebP",
             _ => "",
         };
         draw_menu_text(
@@ -1818,6 +1632,33 @@ unsafe fn draw_toolbar_icon_shape(
         // Selection cursor.
         20 => {
             icon_polyline(graphics, pen, left, top, &[(5.0, 3.5), (5.0, 19.5), (9.5, 15.0), (12.5, 21.0), (15.0, 19.5), (12.0, 13.5), (19.0, 13.5), (5.0, 3.5)]);
+        }
+        // Spotlight lens with four short focus rays.
+        21 => {
+            icon_ellipse(graphics, pen, left, top, 6.0, 6.0, 12.0, 12.0);
+            icon_line(graphics, pen, left, top, 12.0, 2.5, 12.0, 4.5);
+            icon_line(graphics, pen, left, top, 12.0, 19.5, 12.0, 21.5);
+            icon_line(graphics, pen, left, top, 2.5, 12.0, 4.5, 12.0);
+            icon_line(graphics, pen, left, top, 19.5, 12.0, 21.5, 12.0);
+        }
+        // Color controls.
+        23 => {
+            icon_ellipse(graphics, pen, left, top, 4.0, 4.0, 16.0, 16.0);
+            icon_filled_dot(graphics, color, left, top, 8.0, 6.0, 3.0);
+            icon_filled_dot(graphics, color, left, top, 14.0, 7.0, 3.0);
+            icon_filled_dot(graphics, color, left, top, 6.0, 13.0, 3.0);
+            icon_filled_dot(graphics, color, left, top, 14.0, 15.0, 3.0);
+        }
+        // Redo: a clockwise return arrow.
+        24 => {
+            icon_bezier(graphics, pen, left, top, [(7.0, 8.0), (11.0, 3.0), (19.0, 6.0), (18.0, 12.0)]);
+            icon_polyline(graphics, pen, left, top, &[(14.0, 10.0), (18.5, 13.0), (21.0, 8.0)]);
+        }
+        // Additional annotation tools: a shape, an ellipse, and a stroke.
+        25 => {
+            icon_round_rectangle(graphics, pen, left, top, 3.5, 4.0, 9.0, 8.0, 1.5);
+            icon_ellipse(graphics, pen, left, top, 14.5, 4.0, 7.0, 8.0);
+            icon_line(graphics, pen, left, top, 4.0, 17.5, 20.0, 17.5);
         }
         // Two overlapping frames for copy.
         100 => {

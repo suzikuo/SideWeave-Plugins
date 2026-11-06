@@ -1,0 +1,8 @@
+This plugin includes portions of the Windows Graphics Capture and Media Foundation
+implementation from wcap-rust:
+
+  https://github.com/ghostneverdies/wcap-rust
+
+wcap-rust is a Rust port of wcap by mmozeiko. The upstream Unlicense is included
+as UNLICENSE-wcap-rust.txt. The copied Rust modules have been adapted to this
+plugin's module layout and recording workflow.

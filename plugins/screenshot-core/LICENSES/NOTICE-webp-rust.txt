@@ -1,0 +1,6 @@
+The screenshot plugin uses webp-rust for lossy WebP frame encoding:
+
+  https://github.com/mith-mmk/webp-rust
+
+Its MIT license is included as MIT-webp-rust.txt. The existing Rust animation
+container code assembles the encoded still frames into animated WebP.

@@ -5,8 +5,9 @@ use std::ptr::{null, null_mut};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreatePen, CreateSolidBrush,
-    DeleteDC, DeleteObject, DrawTextW, EndPaint, FillRect, InvalidateRect, RoundRect, SelectObject,
-    SetBkMode, SetTextColor, HGDIOBJ, PAINTSTRUCT, SRCCOPY,
+    DeleteDC, DeleteObject, DrawTextW, Ellipse, EndPaint, FillRect, GetStockObject, InvalidateRect,
+    LineTo, MoveToEx, RoundRect, SelectObject, SetBkMode, SetTextColor, HGDIOBJ, PAINTSTRUCT,
+    SRCCOPY,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::WM_MOUSELEAVE;
@@ -906,6 +907,7 @@ unsafe fn paint_scroll_toolbar_to_dc(
             capture.text_size,
             capture.stroke_style,
             false,
+            false,
         );
     }
 }
@@ -1026,9 +1028,19 @@ pub(super) unsafe fn paint_scroll_preview(hwnd: HWND, state: &UiState) {
     let width = (client.right - client.left).max(1);
     let height = (client.bottom - client.top).max(1);
 
-    let background = CreateSolidBrush(0x001d2633);
+    let background = CreateSolidBrush(0x0018202b);
     FillRect(dc, &client, background);
     DeleteObject(background as HGDIOBJ);
+
+    let accent = CreateSolidBrush(0x00f76f16);
+    let accent_rect = RECT {
+        left: 0,
+        top: 0,
+        right: width,
+        bottom: 3,
+    };
+    FillRect(dc, &accent_rect, accent);
+    DeleteObject(accent as HGDIOBJ);
 
     SetBkMode(dc, 1);
     let mode_title = match state
@@ -1036,95 +1048,166 @@ pub(super) unsafe fn paint_scroll_preview(hwnd: HWND, state: &UiState) {
         .as_ref()
         .and_then(|capture| capture.scroll_axis)
     {
-        Some(MatchAxis::Horizontal) => "横向滚动预览",
-        Some(MatchAxis::Vertical) => "纵向滚动预览",
-        None => "滚动预览",
+        Some(MatchAxis::Horizontal) => "横向长截图",
+        Some(MatchAxis::Vertical) => "纵向长截图",
+        None => "滚动长截图",
     };
     let title = wide(mode_title);
     SetTextColor(dc, 0x00f4f7fb);
     let mut title_rect = RECT {
-        left: 10,
-        top: 7,
-        right: width - 10,
-        bottom: 24,
+        left: 16,
+        top: 12,
+        right: width - 16,
+        bottom: 34,
     };
-    DrawTextW(dc, title.as_ptr(), -1, &mut title_rect, 0x20 | 0x8000);
+    DrawTextW(dc, title.as_ptr(), -1, &mut title_rect, 0x20 | 0x4 | 0x8000);
 
-    let feedback = match state.scroll_preview_feedback {
+    let (feedback, feedback_color) = match state.scroll_preview_feedback {
         ScrollPreviewFeedback::Waiting => ("等待页面滚动", 0x00b7c4d4),
-        ScrollPreviewFeedback::Matching => ("检测到滚动，正在匹配…", 0x00e5c27b),
-        ScrollPreviewFeedback::Matched => ("拼接成功，可以继续滚动", 0x0086d69a),
-        ScrollPreviewFeedback::Rejected => ("未可靠匹配，长图未修改", 0x008b9df0),
+        ScrollPreviewFeedback::Matching => ("正在识别页面变化…", 0x00e5c27b),
+        ScrollPreviewFeedback::Matched => ("已拼接，可继续滚动", 0x0086d69a),
+        ScrollPreviewFeedback::Rejected => ("未可靠匹配，结果未改变", 0x008b9df0),
     };
-    let feedback_text = wide(feedback.0);
+    let status_brush = CreateSolidBrush(feedback_color);
+    let null_pen = GetStockObject(windows_sys::Win32::Graphics::Gdi::NULL_PEN as i32);
+    let old_pen = SelectObject(dc, null_pen);
+    let old_brush = SelectObject(dc, status_brush as HGDIOBJ);
+    Ellipse(dc, 17, 48, 25, 56);
+    SelectObject(dc, old_brush);
+    SelectObject(dc, old_pen);
+    DeleteObject(status_brush as HGDIOBJ);
+    let feedback_text = wide(feedback);
     let mut feedback_rect = RECT {
-        left: 10,
-        top: 26,
-        right: width - 10,
-        bottom: 48,
+        left: 32,
+        top: 43,
+        right: width - 14,
+        bottom: 62,
     };
-    SetTextColor(dc, feedback.1);
-    DrawTextW(dc, feedback_text.as_ptr(), -1, &mut feedback_rect, 0x20 | 0x8000);
+    SetTextColor(dc, feedback_color);
+    DrawTextW(dc, feedback_text.as_ptr(), -1, &mut feedback_rect, 0x20 | 0x4 | 0x8000);
 
-    let preview_left = 10;
-    let preview_top = 54;
-    let preview_width = (width - 20).max(1);
-    let preview_height = (height - 66).max(1);
-    let preview_background = CreateSolidBrush(0x000b1017);
-    let preview_rect = RECT {
-        left: preview_left,
-        top: preview_top,
-        right: preview_left + preview_width,
-        bottom: preview_top + preview_height,
-    };
-    FillRect(dc, &preview_rect, preview_background);
+    let preview_left = 12;
+    let preview_top = 72;
+    let preview_right = width - 12;
+    let preview_bottom = height - 66;
+    let preview_content_width = (preview_right - preview_left - 12).max(1);
+    let preview_content_height = (preview_bottom - preview_top - 12).max(1);
+    let preview_background = CreateSolidBrush(0x000a0f16);
+    let preview_border = CreatePen(0, 1, 0x00354558);
+    let old_preview_brush = SelectObject(dc, preview_background as HGDIOBJ);
+    let old_preview_pen = SelectObject(dc, preview_border as HGDIOBJ);
+    RoundRect(
+        dc,
+        preview_left,
+        preview_top,
+        preview_right,
+        preview_bottom,
+        14,
+        14,
+    );
+    SelectObject(dc, old_preview_pen);
+    SelectObject(dc, old_preview_brush);
+    DeleteObject(preview_border as HGDIOBJ);
     DeleteObject(preview_background as HGDIOBJ);
-
-    if let Some((image_width, image_height, pixels)) = state
+    let preview_rect = RECT {
+        left: preview_left + 6,
+        top: preview_top + 6,
+        right: preview_right - 6,
+        bottom: preview_bottom - 6,
+    };
+    let image_left = preview_rect.left + 2;
+    let image_top = preview_rect.top + 2;
+    let image_width = preview_content_width;
+    let image_height = preview_content_height;
+    let assembled = state
         .capture
         .as_ref()
         .and_then(|capture| capture.scroll.as_ref())
-        .and_then(|scroll| scroll.assembled.as_ref())
-    {
-        if *image_width > 0 && *image_height > 0 && !pixels.is_empty() {
-            let scale = (preview_width as f64 / *image_width as f64)
-                .min(preview_height as f64 / *image_height as f64);
-            let target_width = ((*image_width as f64 * scale).round() as i32)
-                .max(1)
-                .min(preview_width);
-            let target_height = ((*image_height as f64 * scale).round() as i32)
-                .max(1)
-                .min(preview_height);
-            let target_x = preview_left + (preview_width - target_width) / 2;
-            let target_y = preview_top + (preview_height - target_height) / 2;
-            draw_rgba_preview(
-                dc,
-                pixels,
-                *image_width as i32,
-                *image_height as i32,
-                target_x,
-                target_y,
-                target_width,
-                target_height,
-            );
-            let size_text = wide(&format!("{} × {}", image_width, image_height));
-            let mut size_rect = RECT {
-                left: 14,
-                top: height - 30,
-                right: width - 14,
-                bottom: height - 10,
-            };
-            SetTextColor(dc, 0x00b7c4d4);
-            DrawTextW(dc, size_text.as_ptr(), -1, &mut size_rect, 1 | 4);
-        }
+        .and_then(|scroll| scroll.assembled.as_ref());
+    let assembled_preview =
+        assembled.filter(|preview| preview.0 > 0 && preview.1 > 0 && !preview.2.is_empty());
+
+    if let Some((assembled_width, assembled_height, pixels)) = assembled_preview {
+        let scale = (image_width as f64 / *assembled_width as f64)
+            .min(image_height as f64 / *assembled_height as f64);
+        let target_width = ((*assembled_width as f64 * scale).round() as i32)
+            .max(1)
+            .min(image_width);
+        let target_height = ((*assembled_height as f64 * scale).round() as i32)
+            .max(1)
+            .min(image_height);
+        let target_x = image_left + (image_width - target_width) / 2;
+        let target_y = image_top + (image_height - target_height) / 2;
+        draw_rgba_preview(
+            dc,
+            pixels,
+            *assembled_width as i32,
+            *assembled_height as i32,
+            target_x,
+            target_y,
+            target_width,
+            target_height,
+        );
     } else {
-        let waiting = wide("等待首次滚动…");
-        let mut waiting_rect = preview_rect;
-        SetTextColor(dc, 0x00b7c4d4);
-        DrawTextW(dc, waiting.as_ptr(), -1, &mut waiting_rect, 1 | 4);
+        let waiting = wide("滚动页面开始拼接");
+        let mut waiting_rect = RECT {
+            left: image_left,
+            top: image_top + image_height / 2 - 18,
+            right: image_left + image_width,
+            bottom: image_top + image_height / 2 + 2,
+        };
+        SetTextColor(dc, 0x00d7e2ef);
+        DrawTextW(dc, waiting.as_ptr(), -1, &mut waiting_rect, 1 | 4 | 0x8000);
+        let hint = wide("预览会随滚动实时更新");
+        let mut hint_rect = RECT {
+            left: image_left,
+            top: image_top + image_height / 2 + 7,
+            right: image_left + image_width,
+            bottom: image_top + image_height / 2 + 26,
+        };
+        SetTextColor(dc, 0x008b9aaf);
+        DrawTextW(dc, hint.as_ptr(), -1, &mut hint_rect, 1 | 4 | 0x8000);
     }
 
-    draw_rect_border(dc, 0, 0, width, height, 0x005a6c82, 1);
+    let separator = CreatePen(0, 1, 0x00303d4e);
+    let old_separator = SelectObject(dc, separator as HGDIOBJ);
+    MoveToEx(dc, 14, height - 53, null_mut());
+    LineTo(dc, width - 14, height - 53);
+    SelectObject(dc, old_separator);
+    DeleteObject(separator as HGDIOBJ);
+
+    if let Some((image_width, image_height, _)) = assembled_preview {
+        let size_text = wide(&format!("{} × {} px", image_width, image_height));
+        let mut size_rect = RECT {
+            left: 16,
+            top: height - 45,
+            right: width - 16,
+            bottom: height - 26,
+        };
+        SetTextColor(dc, 0x00d7e2ef);
+        DrawTextW(dc, size_text.as_ptr(), -1, &mut size_rect, 0x20 | 0x4 | 0x8000);
+    } else {
+        let size_text = wide("等待第一段内容");
+        let mut size_rect = RECT {
+            left: 16,
+            top: height - 45,
+            right: width - 16,
+            bottom: height - 26,
+        };
+        SetTextColor(dc, 0x008b9aaf);
+        DrawTextW(dc, size_text.as_ptr(), -1, &mut size_rect, 0x20 | 0x4 | 0x8000);
+    }
+    let controls = wide("Enter 完成    ·    Esc 取消");
+    let mut controls_rect = RECT {
+        left: 16,
+        top: height - 23,
+        right: width - 16,
+        bottom: height - 6,
+    };
+    SetTextColor(dc, 0x008b9aaf);
+    DrawTextW(dc, controls.as_ptr(), -1, &mut controls_rect, 0x20 | 0x4 | 0x8000);
+
+    draw_rect_border(dc, 0, 0, width, height, 0x00303d4e, 1);
     EndPaint(hwnd, &paint_struct);
 }
 

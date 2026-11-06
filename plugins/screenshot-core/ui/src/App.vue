@@ -20,11 +20,11 @@ const settings = ref<ScreenshotSettings>({
   ocrRegion: '',
   ocrSelectModel: 0,
   tencentOcrConfigured: false,
-  recordingMp4Fps: 15,
-  recordingMp4MaxHeight: 1080,
-  recordingMp4BitrateMbps: 16,
-  recordingGifFps: 15,
-  recordingWebpFps: 15,
+  recordingFps: 15,
+  recordingMaxHeight: 1080,
+  recordingBitrateMbps: 16,
+  recordingGifColors: 128,
+  recordingWebpQuality: 90,
 })
 const recordingFpsOptions = [5, 8, 10, 12, 15, 20, 24, 30]
 const message = ref('')
@@ -124,6 +124,7 @@ onMounted(() => {
         <label>全局快捷键<input v-model="settings.hotkey" spellcheck="false" /></label>
         <label>滚动步长<input v-model.number="settings.scrollStep" type="number" min="120" max="1600" step="40" /></label>
       </div>
+      <p class="hint hotkey-hint">也可以快速连按两次 F1 开始截图；单按 F1 仍会传给当前应用。</p>
       <label>
         HDR 采集模式
         <select v-model="settings.hdrCaptureMode">
@@ -208,44 +209,52 @@ onMounted(() => {
     </section>
 
     <section class="card">
-      <h2>录制与动图</h2>
-      <p class="hint">分别设置录制为 MP4、GIF 或 WebP 时的帧率。预览导出为对应格式时也会使用该格式的帧率。</p>
+      <h2>录制与导出</h2>
+      <p class="hint">MP4、GIF 和 WebP 共用录制参数。结束后在预览页选择导出格式；所有格式最长录制 10 分钟。</p>
       <div class="grid">
         <label>
-          MP4 视频帧率
-          <select v-model.number="settings.recordingMp4Fps">
+          录制帧率
+          <select v-model.number="settings.recordingFps">
             <option v-for="fps in recordingFpsOptions" :key="fps" :value="fps">{{ fps }} FPS</option>
           </select>
         </label>
         <label>
-          MP4 分辨率上限
-          <select v-model.number="settings.recordingMp4MaxHeight">
+          分辨率上限
+          <select v-model.number="settings.recordingMaxHeight">
             <option :value="720">最高 720p</option>
             <option :value="1080">最高 1080p</option>
           </select>
         </label>
         <label>
-          MP4 目标码率
-          <select v-model.number="settings.recordingMp4BitrateMbps">
+          录制码率
+          <select v-model.number="settings.recordingBitrateMbps">
             <option v-for="mbps in [4, 6, 8, 10, 12, 16, 20, 24]" :key="mbps" :value="mbps">
               {{ mbps }} Mbps
             </option>
           </select>
         </label>
+      </div>
+      <div class="grid">
         <label>
-          GIF 动图帧率
-          <select v-model.number="settings.recordingGifFps">
-            <option v-for="fps in recordingFpsOptions" :key="fps" :value="fps">{{ fps }} FPS</option>
+          GIF 色彩数
+          <select v-model.number="settings.recordingGifColors">
+            <option :value="64">64 色 · 小文件</option>
+            <option :value="128">128 色 · 平衡</option>
+            <option :value="256">256 色 · 更清晰</option>
           </select>
         </label>
         <label>
-          WebP 动图帧率
-          <select v-model.number="settings.recordingWebpFps">
-            <option v-for="fps in recordingFpsOptions" :key="fps" :value="fps">{{ fps }} FPS</option>
+          WebP 画质
+          <select v-model.number="settings.recordingWebpQuality">
+            <option :value="50">50 · 小文件</option>
+            <option :value="65">65</option>
+            <option :value="80">80 · 平衡</option>
+            <option :value="90">90 · 清晰</option>
+            <option :value="95">95 · 高画质</option>
           </select>
         </label>
       </div>
-      <p class="hint">MP4 分辨率上限和目标码率越高，画面越清晰、文件也越大；帧率越高，动作越连贯。MP4 支持手动停止，GIF/WebP 直接录制最长 10 秒。</p>
+      <p class="hint">前三项控制录制源视频；GIF 色彩数和 WebP 画质只影响对应格式的导出结果。提高帧率、尺寸或码率会增加录制负载。</p>
     </section>
 
     <div class="footer">
@@ -264,6 +273,7 @@ onMounted(() => {
 .eyebrow { color: var(--accent, #77a9ff); font-size: 10px; letter-spacing: .14em; font-weight: 700 }
 h1 { margin: 6px 0; font-size: 28px; letter-spacing: -.03em }
 .hero p, .hint { margin: 0; color: var(--text-muted, #8d98ad); font-size: 13px; line-height: 1.55 }
+.hotkey-hint { margin: -4px 0 12px 108px }
 .card { margin-top: 16px; padding: 18px; border: 1px solid var(--border, #30394b); border-radius: 14px; background: color-mix(in srgb, var(--surface-subtle, #1d2533) calc(var(--component-opacity, 1) * 66%), transparent) }
 h2 { margin: 0 0 14px; font-size: 13px }
 .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px }

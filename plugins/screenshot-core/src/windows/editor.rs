@@ -15,14 +15,15 @@ use crate::toolbar::Tool;
 use std::ffi::c_void;
 use std::mem::zeroed;
 use std::ptr::{null, null_mut};
+use std::time::Instant;
 use windows_sys::Win32::Foundation::RECT;
 use windows_sys::Win32::Graphics::Gdi::{GetDC, ReleaseDC};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DestroyWindow, GetClientRect, GetSystemMetrics, KillTimer, SetTimer,
-    SetForegroundWindow, ShowWindow, SW_HIDE, SW_SHOW, WS_CAPTION, WS_EX_TOOLWINDOW,
-    WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU,
+    SetForegroundWindow, ShowWindow, SW_HIDE, SW_SHOW, WS_CAPTION, WS_EX_APPWINDOW,
+    WS_EX_TOOLWINDOW, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU,
 };
 
 pub(crate) struct EditorCanvas {
@@ -34,11 +35,16 @@ pub(crate) struct EditorCanvas {
     pub(super) playing: bool,
     pub(super) seeking: bool,
     pub(super) frame_index: usize,
+    pub(super) playback_started_at: Option<Instant>,
+    pub(super) playback_start_frame: usize,
     pub(super) canvas_surface: Option<GdiSurface>,
     pub(super) back_buffer: Option<GdiSurface>,
 }
 
 pub(super) const TIMER_RECORDING_PREVIEW: usize = 43;
+pub(super) const TIMER_RECORDING_EXPORT_STATUS: usize = 44;
+const RECORDING_PREVIEW_FPS: u32 = 15;
+pub(super) const RECORDING_PREVIEW_HEADER_HEIGHT: i32 = 64;
 
 pub(super) fn open_recording_editor(state: &mut UiState) {
     if state.editor.is_some() {
@@ -143,8 +149,13 @@ pub(super) fn open_editor(state: &mut UiState) {
     let (window_width, window_height, window_x, window_y) = unsafe {
         let screen_width = GetSystemMetrics(0).max(800);
         let screen_height = GetSystemMetrics(1).max(600);
-        let width = (screen_width - 64).clamp(720, 1480);
-        let height = (screen_height - 80).clamp(560, 1000);
+        let (min_width, max_width, min_height, max_height) = if recording_preview {
+            (760, 1000, 600, 800)
+        } else {
+            (720, 1480, 560, 1000)
+        };
+        let width = (screen_width - 64).clamp(min_width, max_width);
+        let height = (screen_height - 80).clamp(min_height, max_height);
         (
             width,
             height,
@@ -154,10 +165,15 @@ pub(super) fn open_editor(state: &mut UiState) {
     };
     unsafe {
         let class_name = wide("AgileTilesScreenshotCoreV2");
-        let title = wide(if recording_preview { "编辑录屏" } else { "图片编辑" });
+        let title = wide(if recording_preview { "录制预览" } else { "图片编辑" });
         let instance = GetModuleHandleW(null());
+        let extended_style = if recording_preview {
+            WS_EX_APPWINDOW
+        } else {
+            WS_EX_TOOLWINDOW
+        };
         let editor_hwnd = CreateWindowExW(
-            WS_EX_TOOLWINDOW,
+            extended_style,
             class_name.as_ptr(),
             title.as_ptr(),
             WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
@@ -205,7 +221,7 @@ pub(super) fn open_editor(state: &mut UiState) {
             }
         };
         let image_area_top = if recording_preview {
-            20
+            RECORDING_PREVIEW_HEADER_HEIGHT + 12
         } else {
             toolbar_origin.y + layout.height + 22
         };
@@ -324,9 +340,11 @@ pub(super) fn open_editor(state: &mut UiState) {
             source_pixels: source_pixels.clone(),
             display_rect,
             recording_preview,
-            playing: recording_preview,
+            playing: false,
             seeking: false,
             frame_index: 0,
+            playback_started_at: None,
+            playback_start_frame: 0,
             canvas_surface,
             back_buffer,
         });
@@ -336,15 +354,6 @@ pub(super) fn open_editor(state: &mut UiState) {
             *image = Some((source_width, source_height, source_pixels));
         }
         state.paint_pending = false;
-        if recording_preview {
-            let fps = state.recording.snapshot().fps.max(1);
-            windows_sys::Win32::UI::WindowsAndMessaging::SetTimer(
-                editor_hwnd,
-                TIMER_RECORDING_PREVIEW,
-                (1000 / fps).max(1),
-                None,
-            );
-        }
         ShowWindow(editor_hwnd, SW_SHOW);
         SetForegroundWindow(editor_hwnd);
         SetFocus(editor_hwnd);
@@ -354,32 +363,69 @@ pub(super) fn open_editor(state: &mut UiState) {
 }
 
 pub(super) fn advance_recording_preview(state: &mut UiState) {
-    let Some((frame_index, display_rect, playing)) = state
+    let Some((
+        frame_index,
+        display_rect,
+        playing,
+        seeking,
+        playback_started_at,
+        playback_start_frame,
+        fps,
+    )) = state
         .editor
         .as_ref()
         .filter(|editor| editor.recording_preview)
         .and_then(|editor| {
             state.screen.as_ref()?;
-            Some((editor.frame_index + 1, editor.display_rect, editor.playing))
+            Some((
+                editor.frame_index,
+                editor.display_rect,
+                editor.playing,
+                editor.seeking,
+                editor.playback_started_at,
+                editor.playback_start_frame,
+                state.recording.snapshot().fps.max(1),
+            ))
         })
     else {
         return;
     };
-    if !playing {
+    if !playing || seeking {
         return;
     }
     let frame_count = state.recording.snapshot().timeline_frame_count();
-    if frame_index >= frame_count {
-        if let Some(editor) = state.editor.as_mut() {
-            editor.playing = false;
-        }
-        unsafe { KillTimer(state.overlay, TIMER_RECORDING_PREVIEW) };
-        super::invalidate(state);
+    if frame_count == 0 {
         return;
     }
-    let Some((width, height, pixels)) = state.recording.preview_frame(frame_index) else {
+    let elapsed_ms = playback_started_at
+        .map(|started| started.elapsed().as_millis().min(u64::MAX as u128) as u64)
+        .unwrap_or(0);
+    let elapsed_frames = (u128::from(elapsed_ms) * u128::from(fps) / 1000)
+        .min(usize::MAX as u128) as usize;
+    let target_frame = playback_start_frame.saturating_add(elapsed_frames);
+    let reached_end = target_frame >= frame_count.saturating_sub(1);
+    let target_frame = target_frame.min(frame_count.saturating_sub(1));
+    if target_frame == frame_index && !reached_end {
+        return;
+    }
+    let Some((decoded_frame, width, height, pixels)) =
+        state.recording.request_preview_frame(target_frame)
+    else {
         return;
     };
+    let playback_finished =
+        reached_end && decoded_frame.saturating_add(1) >= frame_count.saturating_sub(1);
+    if decoded_frame == frame_index {
+        if playback_finished {
+            if let Some(editor) = state.editor.as_mut() {
+                editor.playing = false;
+                editor.playback_started_at = None;
+            }
+            unsafe { KillTimer(state.overlay, TIMER_RECORDING_PREVIEW) };
+            super::invalidate(state);
+        }
+        return;
+    }
     let Some(screen) = state.screen.as_mut() else {
         return;
     };
@@ -398,7 +444,14 @@ pub(super) fn advance_recording_preview(state: &mut UiState) {
         editor.source_width = width as usize;
         editor.source_height = height as usize;
         editor.source_pixels = pixels;
-        editor.frame_index = frame_index;
+        editor.frame_index = decoded_frame;
+        if playback_finished {
+            editor.playing = false;
+            editor.playback_started_at = None;
+        }
+    }
+    if playback_finished {
+        unsafe { KillTimer(state.overlay, TIMER_RECORDING_PREVIEW) };
     }
     super::invalidate(state);
 }
@@ -416,7 +469,10 @@ pub(super) fn begin_recording_preview_seek(state: &mut UiState, point: ScreenPoi
     }
     if let Some(editor) = state.editor.as_mut() {
         editor.seeking = true;
+        editor.playing = false;
+        editor.playback_started_at = None;
     }
+    unsafe { KillTimer(state.overlay, TIMER_RECORDING_PREVIEW) };
     seek_timeline_to_x(state, point.x);
     true
 }
@@ -477,6 +533,9 @@ pub(super) fn handle_recording_preview_click(state: &mut UiState, point: ScreenP
     if !is_recording_preview(state) {
         return false;
     }
+    if state.recording.snapshot().phase == "exporting" {
+        return true;
+    }
     let mut client: RECT = unsafe { zeroed() };
     unsafe { GetClientRect(state.overlay, &mut client) };
     let width = client.right - client.left;
@@ -532,7 +591,10 @@ pub(super) fn handle_recording_preview_click(state: &mut UiState, point: ScreenP
     if inside(point, play_rect) {
         toggle_recording_preview(state);
     } else if inside(point, export_rect) {
-        super::export_recording_from_editor(state, state.recording_setup_format);
+        if let Some(capture) = state.capture.as_mut() {
+            capture.open_menu(crate::toolbar::ToolbarMenu::RecordingExport);
+        }
+        super::invalidate(state);
     } else if inside(point, copy_rect) {
         copy_recording_preview_frame(state);
     }
@@ -559,6 +621,7 @@ fn toggle_recording_preview(state: &mut UiState) {
     if playing {
         if let Some(editor) = state.editor.as_mut() {
             editor.playing = false;
+            editor.playback_started_at = None;
         }
         unsafe { KillTimer(state.overlay, TIMER_RECORDING_PREVIEW) };
     } else {
@@ -573,8 +636,15 @@ fn toggle_recording_preview(state: &mut UiState) {
         }
         if let Some(editor) = state.editor.as_mut() {
             editor.playing = true;
+            editor.playback_started_at = Some(Instant::now());
+            editor.playback_start_frame = editor.frame_index;
         }
-        let fps = state.recording.snapshot().fps.max(1);
+        let fps = state
+            .recording
+            .snapshot()
+            .fps
+            .max(1)
+            .min(RECORDING_PREVIEW_FPS);
         unsafe {
             SetTimer(
                 state.overlay,
@@ -721,10 +791,6 @@ fn recording_canvas(
     {
         return false;
     }
-    canvas.fill(0x1d);
-    for alpha in canvas[3..].iter_mut().step_by(4) {
-        *alpha = 255;
-    }
     for y in 0..target_height {
         let source_y = y * source_height / target_height;
         for x in 0..target_width {
@@ -793,6 +859,7 @@ pub(super) fn map_annotation(
         Annotation::Highlight(start, end, color, size) => {
             Annotation::Highlight(map_point(*start), map_point(*end), *color, map_size(*size))
         }
+        Annotation::Spotlight(rect) => Annotation::Spotlight(map_rect(*rect)),
         Annotation::Pen(points, color, size, style) => Annotation::Pen(
             points.iter().copied().map(map_point).collect(),
             *color,

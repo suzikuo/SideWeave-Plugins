@@ -27,6 +27,8 @@ use windows_sys::Win32::Graphics::Gdi::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect;
 
+const PLAYER_ACCENT_COLOR: u32 = 0x0016_6f_f7;
+
 pub(super) struct GdiSurface {
     pub(super) dc: HDC,
     pub(super) bitmap: HGDIOBJ,
@@ -270,6 +272,7 @@ pub(super) fn paint(hwnd: HWND, state: &mut UiState) {
                     let (toolbar_x, toolbar_y) = toolbar_origin(capture);
                     let toolbar_layout = toolbar_layout(capture.screen_rect);
                     let can_undo = !capture.annotations.is_empty();
+                    let can_redo = !capture.redo_annotations.is_empty();
                     let recording_setup_open =
                         capture.menu == Some(crate::toolbar::ToolbarMenu::RecordingFps);
                     if !recording_setup_open {
@@ -289,6 +292,7 @@ pub(super) fn paint(hwnd: HWND, state: &mut UiState) {
                             capture.text_size,
                             capture.stroke_style,
                             can_undo,
+                            can_redo,
                         );
                     }
                     if !recording_setup_open && capture.tool_palette_open {
@@ -310,6 +314,7 @@ pub(super) fn paint(hwnd: HWND, state: &mut UiState) {
                                 capture.text_size,
                                 capture.stroke_style,
                                 can_undo,
+                                can_redo,
                             );
                             if let Some(index) = capture.tool_palette_hover {
                                 draw_tool_palette_tooltip(
@@ -381,17 +386,6 @@ pub(super) fn paint(hwnd: HWND, state: &mut UiState) {
                                 left: setup_layout.left - screen.x,
                                 top: setup_layout.top - screen.y,
                                 ..setup_layout
-                            },
-                            match state.recording_setup_format {
-                                crate::recorder::AnimationFormat::Mp4 => {
-                                    crate::toolbar::AnimationFormatKey::Mp4
-                                }
-                                crate::recorder::AnimationFormat::Webp => {
-                                    crate::toolbar::AnimationFormatKey::Webp
-                                }
-                                crate::recorder::AnimationFormat::Gif => {
-                                    crate::toolbar::AnimationFormatKey::Gif
-                                }
                             },
                             state.recording_show_cursor,
                         );
@@ -492,7 +486,23 @@ pub(super) fn paint_editor(hwnd: HWND, state: &mut UiState) {
             state.capture.as_ref(),
             state.editor.as_ref(),
         ) {
-            if let Some(canvas_dc) = canvas_dc {
+            if editor.recording_preview {
+                let video = editor.display_rect;
+                draw_pixels(
+                    paint_dc,
+                    &screen.pixels,
+                    screen.width,
+                    screen.height,
+                    video.left,
+                    video.top,
+                    video.width() as i32,
+                    video.height() as i32,
+                    video.left,
+                    video.top,
+                    video.width() as i32,
+                    video.height() as i32,
+                );
+            } else if let Some(canvas_dc) = canvas_dc {
                 BitBlt(
                     paint_dc,
                     0,
@@ -533,20 +543,22 @@ pub(super) fn paint_editor(hwnd: HWND, state: &mut UiState) {
                 },
                 1,
             );
-            draw_annotations_gdi(paint_dc, capture, screen, screen.x, screen.y);
-            if let (Some(start), Some(current)) = (capture.drag, capture.current_pos) {
-                draw_preview(
-                    paint_dc,
-                    screen,
-                    capture.tool,
-                    start,
-                    current,
-                    screen.x,
-                    screen.y,
-                    capture.stroke_width,
-                    capture.stroke_style,
-                    capture.brush_size,
-                );
+            if !editor.recording_preview {
+                draw_annotations_gdi(paint_dc, capture, screen, screen.x, screen.y);
+                if let (Some(start), Some(current)) = (capture.drag, capture.current_pos) {
+                    draw_preview(
+                        paint_dc,
+                        screen,
+                        capture.tool,
+                        start,
+                        current,
+                        screen.x,
+                        screen.y,
+                        capture.stroke_width,
+                        capture.stroke_style,
+                        capture.brush_size,
+                    );
+                }
             }
 
             let (toolbar_x, toolbar_y) = toolbar_origin(capture);
@@ -555,6 +567,7 @@ pub(super) fn paint_editor(hwnd: HWND, state: &mut UiState) {
                 draw_recording_player(paint_dc, screen.width, screen.height, editor, state);
             } else {
                 let can_undo = !capture.annotations.is_empty();
+                let can_redo = !capture.redo_annotations.is_empty();
                 draw_toolbar_gdi(
                     paint_dc,
                     toolbar_x,
@@ -571,6 +584,7 @@ pub(super) fn paint_editor(hwnd: HWND, state: &mut UiState) {
                     capture.text_size,
                     capture.stroke_style,
                     can_undo,
+                    can_redo,
                 );
                 if capture.tool_palette_open {
                     if let Some((palette_x, palette_y)) = tool_palette_origin(capture) {
@@ -591,6 +605,7 @@ pub(super) fn paint_editor(hwnd: HWND, state: &mut UiState) {
                             capture.text_size,
                             capture.stroke_style,
                             can_undo,
+                            can_redo,
                         );
                         if let Some(index) = capture.tool_palette_hover {
                             draw_tool_palette_tooltip(
@@ -691,12 +706,14 @@ unsafe fn draw_recording_player(
     editor: &super::editor::EditorCanvas,
     state: &UiState,
 ) {
+    let status = state.recording.snapshot();
+    draw_recording_player_header(dc, width, editor, state, &status);
+
     let footer_height = super::editor::PLAYER_FOOTER_HEIGHT;
     let footer_top = height - footer_height;
     let timeline_y = footer_top - super::editor::PLAYER_TIMELINE_GAP;
     let left = super::editor::PLAYER_SIDE_PADDING;
     let right = (width - super::editor::PLAYER_SIDE_PADDING).max(left + 1);
-    let status = state.recording.snapshot();
     let timeline_frame_count = status.timeline_frame_count();
     let progress = if timeline_frame_count <= 1 {
         0.0
@@ -708,7 +725,7 @@ unsafe fn draw_recording_player(
     let knob_x = left + ((right - left) as f64 * progress).round() as i32;
 
     let track = CreateSolidBrush(0x00545a63);
-    let played = CreateSolidBrush(0x00f76f16);
+    let played = CreateSolidBrush(PLAYER_ACCENT_COLOR);
     let track_rect = RECT {
         left,
         top: timeline_y - 2,
@@ -726,7 +743,7 @@ unsafe fn draw_recording_player(
     DeleteObject(track as HGDIOBJ);
     DeleteObject(played as HGDIOBJ);
 
-    let knob_brush = CreateSolidBrush(0x00f76f16);
+    let knob_brush = CreateSolidBrush(PLAYER_ACCENT_COLOR);
     let knob_pen = CreatePen(0, 1, 0x00ffffff);
     let old_brush = SelectObject(dc, knob_brush as HGDIOBJ);
     let old_pen = SelectObject(dc, knob_pen as HGDIOBJ);
@@ -794,28 +811,186 @@ unsafe fn draw_recording_player(
         DeleteObject(play as HGDIOBJ);
     }
 
-    let fps = status.fps.max(1) as u64;
-    let current_ms = editor.frame_index as u64 * 1000 / fps;
-    let duration_ms = status
-        .elapsed_ms
-        .max(timeline_frame_count.saturating_sub(1) as u64 * 1000 / fps);
-    let timestamp = format!(
-        "{} / {}",
-        format_player_time(current_ms),
-        format_player_time(duration_ms)
-    );
-    draw_player_text(dc, 76, footer_top + 12, 270, height - 8, &timestamp, 0x00635b50, 0);
+    if status.phase != "exporting" {
+        let fps = status.fps.max(1) as u64;
+        let current_ms = editor.frame_index as u64 * 1000 / fps;
+        let duration_ms = status
+            .elapsed_ms
+            .max(timeline_frame_count.saturating_sub(1) as u64 * 1000 / fps);
+        let timestamp = format!(
+            "{} / {}",
+            format_player_time(current_ms),
+            format_player_time(duration_ms)
+        );
+        let export_notice = status.message.as_deref().filter(|message| {
+            message.starts_with("导出失败：") || message.starts_with("导出完成：")
+        });
+        draw_player_text(
+            dc,
+            76,
+            footer_top + 12,
+            270,
+            height - 8,
+            export_notice.unwrap_or(&timestamp),
+            if export_notice.is_some() { 0x00b34326 } else { 0x00635b50 },
+            0,
+        );
+    }
 
     let export_rect = (width - 286, footer_top + 10, width - 176, height - 10);
     let copy_rect = (width - 166, footer_top + 10, width - 16, height - 10);
-    draw_player_button(dc, export_rect, "导出", true);
+    if status.phase == "exporting" {
+        let progress_label = format!(
+            "{} {}%",
+            status.message.as_deref().unwrap_or("正在导出…"),
+            status.progress_percent
+        );
+        draw_player_text(
+            dc,
+            76,
+            footer_top + 6,
+            width - 300,
+            footer_top + 31,
+            &progress_label,
+            0x00635b50,
+            0,
+        );
+        draw_player_progress_bar(
+            dc,
+            76,
+            footer_top + 39,
+            width - 300,
+            footer_top + 47,
+            status.progress_percent,
+        );
+        draw_player_button(dc, export_rect, "正在导出", false);
+    } else {
+        draw_player_button(dc, export_rect, "选择格式导出", true);
+    }
     draw_player_button(dc, copy_rect, "复制当前帧", false);
 }
 
+unsafe fn draw_recording_player_header(
+    dc: HDC,
+    width: i32,
+    editor: &super::editor::EditorCanvas,
+    state: &UiState,
+    status: &crate::recorder::RecordingStatus,
+) {
+    let header_height = super::editor::RECORDING_PREVIEW_HEADER_HEIGHT;
+    let header = CreateSolidBrush(0x00272b31);
+    let header_rect = RECT {
+        left: 0,
+        top: 0,
+        right: width,
+        bottom: header_height,
+    };
+    FillRect(dc, &header_rect, header);
+    DeleteObject(header as HGDIOBJ);
+
+    let accent = CreateSolidBrush(PLAYER_ACCENT_COLOR);
+    let old_accent = SelectObject(dc, accent as HGDIOBJ);
+    Ellipse(dc, 24, 22, 36, 34);
+    SelectObject(dc, old_accent);
+    DeleteObject(accent as HGDIOBJ);
+
+    let metadata = format!(
+        "{}  ·  {} FPS  ·  {} 帧",
+        format_player_time(status.elapsed_ms),
+        status.fps.max(1),
+        status.frame_count
+    );
+    draw_player_text(dc, 48, 8, width - 160, 34, "录制预览", 0x00f5f7fa, 0);
+    draw_player_text(
+        dc,
+        48,
+        34,
+        width - 160,
+        56,
+        &format!("录制源视频  ·  {metadata}"),
+        0x00b8c0ca,
+        0,
+    );
+
+    let badge = RECT {
+        left: width - 132,
+        top: 17,
+        right: width - 24,
+        bottom: 47,
+    };
+    let badge_brush = CreateSolidBrush(0x00343a42);
+    let badge_pen = CreatePen(0, 1, 0x00464e58);
+    let old_brush = SelectObject(dc, badge_brush as HGDIOBJ);
+    let old_pen = SelectObject(dc, badge_pen as HGDIOBJ);
+    RoundRect(
+        dc,
+        badge.left,
+        badge.top,
+        badge.right,
+        badge.bottom,
+        12,
+        12,
+    );
+    SelectObject(dc, old_brush);
+    SelectObject(dc, old_pen);
+    DeleteObject(badge_brush as HGDIOBJ);
+    DeleteObject(badge_pen as HGDIOBJ);
+    draw_player_text(
+        dc,
+        badge.left + 6,
+        badge.top,
+        badge.right - 6,
+        badge.bottom,
+        if editor.playing { "正在播放" } else { "预览就绪" },
+        0x00e2e7ed,
+        1,
+    );
+}
+
+unsafe fn draw_player_progress_bar(
+    dc: HDC,
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+    percent: u8,
+) {
+    if right <= left || bottom <= top {
+        return;
+    }
+    let track_brush = CreateSolidBrush(0x00e4e7ec);
+    let track = RECT {
+        left,
+        top,
+        right,
+        bottom,
+    };
+    FillRect(dc, &track, track_brush);
+    DeleteObject(track_brush as HGDIOBJ);
+
+    let filled_right = left + ((right - left) * i32::from(percent.min(100)) / 100);
+    if filled_right <= left {
+        return;
+    }
+    let progress_brush = CreateSolidBrush(PLAYER_ACCENT_COLOR);
+    let progress = RECT {
+        left,
+        top,
+        right: filled_right,
+        bottom,
+    };
+    FillRect(dc, &progress, progress_brush);
+    DeleteObject(progress_brush as HGDIOBJ);
+}
+
 unsafe fn draw_player_button(dc: HDC, rect: (i32, i32, i32, i32), label: &str, primary: bool) {
-    let fill_color = if primary { 0x00f76f16 } else { 0x00ffffff };
-    let border_color = 0x00f76f16;
-    let text_color = if primary { 0x00ffffff } else { 0x00f76f16 };
+    let fill_color = if primary { PLAYER_ACCENT_COLOR } else { 0x00ffffff };
+    let border_color = if primary {
+        PLAYER_ACCENT_COLOR
+    } else {
+        0x00dfe4ea
+    };
+    let text_color = if primary { 0x00ffffff } else { 0x00343a45 };
     let brush = CreateSolidBrush(fill_color);
     let pen = CreatePen(0, 1, border_color);
     let old_brush = SelectObject(dc, brush as HGDIOBJ);

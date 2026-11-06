@@ -4,23 +4,30 @@ use super::paint::draw_rgba_preview;
 use super::scroll_ui::{
     destroy_scroll_border, destroy_scroll_masks, destroy_scroll_preview, stop_scroll_input,
 };
-use super::{clear_error, set_error, update_status, wide, UiState, TIMER_SCROLL};
+use super::{
+    clear_error, set_error, update_status, wide, PinnedImageWindow, UiState, TIMER_SCROLL,
+};
 use crate::export::{compose as compose_export, copy_to_clipboard, save_png, save_png_to_path};
 use crate::model::Settings;
 
 use std::ffi::c_void;
 use std::mem::{size_of, zeroed};
 use std::ptr::{null, null_mut};
-use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
-use windows_sys::Win32::Graphics::Gdi::{BeginPaint, EndPaint, PAINTSTRUCT};
+use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows_sys::Win32::Graphics::Gdi::{
+    BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, FrameRect, PAINTSTRUCT,
+};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::System::SystemServices::MK_CONTROL;
 use windows_sys::Win32::UI::Controls::Dialogs::{
     GetSaveFileNameW, OFN_EXPLORER, OFN_OVERWRITEPROMPT, OFN_PATHMUSTEXIST, OPENFILENAMEW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetSystemMetrics, KillTimer,
-    IsWindowVisible, ShowWindow, SW_HIDE, SW_SHOW, WM_DESTROY, WM_KEYDOWN, WM_PAINT,
-    WM_RBUTTONUP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetCursorPos, GetSystemMetrics,
+    GetWindowRect, IsWindowVisible, KillTimer, SetLayeredWindowAttributes, SetWindowPos,
+    ShowWindow, HTCAPTION, LWA_ALPHA, SWP_NOACTIVATE, SW_HIDE, SW_SHOW, WM_DESTROY, WM_KEYDOWN,
+    WM_MBUTTONUP, WM_MOUSEWHEEL, WM_NCHITTEST, WM_NCMBUTTONUP, WM_NCRBUTTONUP, WM_PAINT,
+    WM_RBUTTONUP, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 pub(super) fn hide_capture_windows(state: &UiState) {
@@ -269,12 +276,16 @@ pub(super) fn pin_wnd_proc(
     _lparam: LPARAM,
     state: &mut UiState,
 ) -> LRESULT {
+    let Some(pin_index) = state.pinned_images.iter().position(|pin| pin.hwnd == hwnd) else {
+        return unsafe { DefWindowProcW(hwnd, message, wparam, _lparam) };
+    };
     unsafe {
         match message {
             WM_PAINT => {
                 let mut paint_struct: PAINTSTRUCT = zeroed();
                 let dc = BeginPaint(hwnd, &mut paint_struct);
-                if let Some((width, height, pixels)) = state.pin_image.as_ref() {
+                if let Some(pin) = state.pinned_images.get(pin_index) {
+                    let (width, height, pixels) = &pin.image;
                     let mut rect: RECT = zeroed();
                     GetClientRect(hwnd, &mut rect);
                     draw_rgba_preview(
@@ -287,33 +298,114 @@ pub(super) fn pin_wnd_proc(
                         (rect.right - rect.left).max(1),
                         (rect.bottom - rect.top).max(1),
                     );
+                    let black = CreateSolidBrush(0x0000_0000);
+                    if !black.is_null() {
+                        FrameRect(dc, &rect, black);
+                        DeleteObject(black);
+                    }
+                    rect.left += 1;
+                    rect.top += 1;
+                    rect.right -= 1;
+                    rect.bottom -= 1;
+                    if rect.right > rect.left && rect.bottom > rect.top {
+                        let white = CreateSolidBrush(0x00ff_ffff);
+                        if !white.is_null() {
+                            FrameRect(dc, &rect, white);
+                            DeleteObject(white);
+                        }
+                    }
                 }
                 EndPaint(hwnd, &paint_struct);
                 0
             }
-            WM_RBUTTONUP => {
-                DestroyWindow(hwnd);
-                state.pin_window = null_mut();
-                state.pin_image = None;
-                if let Ok(mut status) = state.status.lock() {
-                    status.pinned = false;
+            WM_NCHITTEST => HTCAPTION as LRESULT,
+            WM_MOUSEWHEEL => {
+                let delta = ((wparam >> 16) as i16) as f32 / 120.0;
+                if delta == 0.0 {
+                    return 0;
                 }
+                if (wparam as u32 & 0xffff) & MK_CONTROL != 0 {
+                    let pin = &mut state.pinned_images[pin_index];
+                    let opacity =
+                        (pin.opacity as i32 + (delta * 20.0) as i32).clamp(32, 255) as u8;
+                    pin.opacity = opacity;
+                    SetLayeredWindowAttributes(hwnd, 0, opacity, LWA_ALPHA);
+                    return 0;
+                }
+                let mut rect: RECT = zeroed();
+                if GetWindowRect(hwnd, &mut rect) == 0 {
+                    return 0;
+                }
+                let old_width = (rect.right - rect.left).max(1);
+                let old_height = (rect.bottom - rect.top).max(1);
+                let (image_width, image_height) = {
+                    let image = &state.pinned_images[pin_index].image;
+                    (image.0, image.1)
+                };
+                let max_width = GetSystemMetrics(0).max(640) * 2;
+                let max_height = GetSystemMetrics(1).max(480) * 2;
+                let min_scale = 80.0 / image_width.max(image_height).max(1) as f64;
+                let max_scale = (max_width as f64 / image_width as f64)
+                    .min(max_height as f64 / image_height as f64);
+                let current_scale = old_width as f64 / image_width as f64;
+                let scale = (current_scale * 1.1_f64.powf(delta as f64))
+                    .clamp(min_scale, max_scale.max(min_scale));
+                let new_width = (image_width as f64 * scale).round() as i32;
+                let new_height = (image_height as f64 * scale).round() as i32;
+                let mut cursor: POINT = zeroed();
+                GetCursorPos(&mut cursor);
+                let x = cursor.x
+                    - (((cursor.x - rect.left) as f64 * new_width as f64 / old_width as f64).round()
+                        as i32);
+                let y = cursor.y
+                    - (((cursor.y - rect.top) as f64 * new_height as f64 / old_height as f64).round()
+                        as i32);
+                SetWindowPos(
+                    hwnd,
+                    std::ptr::null_mut(),
+                    x,
+                    y,
+                    new_width,
+                    new_height,
+                    SWP_NOACTIVATE,
+                );
+                0
+            }
+            WM_MBUTTONUP | WM_NCMBUTTONUP => {
+                let mut rect: RECT = zeroed();
+                if GetWindowRect(hwnd, &mut rect) == 0 {
+                    return 0;
+                }
+                let current = (
+                    (rect.right - rect.left).max(1),
+                    (rect.bottom - rect.top).max(1),
+                );
+                let pin = &mut state.pinned_images[pin_index];
+                if current == pin.default_size && pin.opacity == 255 {
+                    if let Some(restore_size) = pin.restore_size.take() {
+                        pin.restore_size = Some(pin.default_size);
+                        resize_pin_around_center(hwnd, rect, restore_size);
+                    }
+                } else {
+                    pin.restore_size = Some(current);
+                    resize_pin_around_center(hwnd, rect, pin.default_size);
+                }
+                pin.opacity = 255;
+                SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA);
+                0
+            }
+            WM_RBUTTONUP | WM_NCRBUTTONUP => {
+                DestroyWindow(hwnd);
                 0
             }
             WM_KEYDOWN if wparam as u32 == VK_ESCAPE_CODE => {
                 DestroyWindow(hwnd);
-                state.pin_window = null_mut();
-                state.pin_image = None;
-                if let Ok(mut status) = state.status.lock() {
-                    status.pinned = false;
-                }
                 0
             }
             WM_DESTROY => {
-                state.pin_window = null_mut();
-                state.pin_image = None;
+                state.pinned_images.retain(|pin| pin.hwnd != hwnd);
                 if let Ok(mut status) = state.status.lock() {
-                    status.pinned = false;
+                    status.pinned = !state.pinned_images.is_empty();
                 }
                 0
             }
@@ -322,27 +414,56 @@ pub(super) fn pin_wnd_proc(
     }
 }
 
+unsafe fn resize_pin_around_center(hwnd: HWND, rect: RECT, size: (i32, i32)) {
+    let old_width = (rect.right - rect.left).max(1);
+    let old_height = (rect.bottom - rect.top).max(1);
+    let center_x = rect.left + old_width / 2;
+    let center_y = rect.top + old_height / 2;
+    SetWindowPos(
+        hwnd,
+        std::ptr::null_mut(),
+        center_x - size.0 / 2,
+        center_y - size.1 / 2,
+        size.0,
+        size.1,
+        SWP_NOACTIVATE,
+    );
+}
+
 pub(super) fn pin_last(state: &mut UiState) {
     let Some((width, height, pixels)) = state.last_image.clone() else {
         set_error(state, "没有可贴图的截图".into());
         return;
     };
     unsafe {
-        if !state.pin_window.is_null() {
-            DestroyWindow(state.pin_window);
-        }
+        let screen_left = GetSystemMetrics(76);
+        let screen_top = GetSystemMetrics(77);
         let screen_width = GetSystemMetrics(78).max(640);
-        let target_width = (width as i32).clamp(160, 720);
-        let target_height = ((height as f32 * target_width as f32 / width as f32) as i32)
-            .min(GetSystemMetrics(79).max(480) - 80)
-            .max(80);
-        let x = GetSystemMetrics(76) + screen_width - target_width - 30;
-        let y = GetSystemMetrics(77) + 30;
+        let screen_height = GetSystemMetrics(79).max(480);
+        let available_width = (screen_width - 60).max(160) as f64;
+        let available_height = (screen_height - 80).max(120) as f64;
+        let image_width = width.max(1) as f64;
+        let image_height = height.max(1) as f64;
+        let mut scale = (720.0 / image_width)
+            .min(available_width / image_width)
+            .min(available_height / image_height)
+            .min(1.0);
+        if image_width * scale < 160.0
+            && available_width >= 160.0
+            && available_height / image_height >= 160.0 / image_width
+        {
+            scale = 160.0 / image_width;
+        }
+        let target_width = (image_width * scale).round().max(1.0) as i32;
+        let target_height = (image_height * scale).round().max(1.0) as i32;
+        let cascade = (state.pinned_images.len() as i32 % 6) * 28;
+        let x = (screen_left + screen_width - target_width - 30 - cascade).max(screen_left + 10);
+        let max_y = screen_top + screen_height - target_height - 10;
+        let y = (screen_top + 30 + cascade).min(max_y.max(screen_top + 10));
         let class_name = wide("AgileTilesScreenshotCoreV2");
         let instance = GetModuleHandleW(null());
-        state.pin_image = Some((width, height, pixels));
-        state.pin_window = CreateWindowExW(
-            WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+        let window = CreateWindowExW(
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED,
             class_name.as_ptr(),
             class_name.as_ptr(),
             WS_POPUP,
@@ -355,7 +476,19 @@ pub(super) fn pin_last(state: &mut UiState) {
             instance,
             state as *mut UiState as *const c_void,
         );
-        ShowWindow(state.pin_window, SW_SHOW);
+        if window.is_null() {
+            set_error(state, "无法创建贴图窗口".into());
+            return;
+        }
+        state.pinned_images.push(PinnedImageWindow {
+            hwnd: window,
+            image: (width, height, pixels),
+            default_size: (target_width, target_height),
+            restore_size: None,
+            opacity: 255,
+        });
+        SetLayeredWindowAttributes(window, 0, 255, LWA_ALPHA);
+        ShowWindow(window, SW_SHOW);
         if let Ok(mut status) = state.status.lock() {
             status.pinned = true;
             status.error = None;

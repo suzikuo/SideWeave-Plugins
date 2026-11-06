@@ -31,6 +31,9 @@ pub mod tencent_ocr;
 mod toolbar;
 mod translation;
 #[cfg(windows)]
+#[allow(dead_code)]
+mod wgc;
+#[cfg(windows)]
 mod windows;
 
 const PLUGIN_ID: &str = "screenshot";

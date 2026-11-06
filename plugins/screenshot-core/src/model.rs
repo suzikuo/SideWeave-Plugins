@@ -29,11 +29,11 @@ pub struct Settings {
     pub text_size: u32,
     pub ocr_region: String,
     pub ocr_select_model: u8,
-    pub recording_mp4_fps: u32,
-    pub recording_mp4_max_height: u32,
-    pub recording_mp4_bitrate_mbps: u32,
-    pub recording_gif_fps: u32,
-    pub recording_webp_fps: u32,
+    pub recording_fps: u32,
+    pub recording_max_height: u32,
+    pub recording_bitrate_mbps: u32,
+    pub recording_gif_colors: u16,
+    pub recording_webp_quality: u8,
 }
 
 impl Default for Settings {
@@ -49,11 +49,11 @@ impl Default for Settings {
             text_size: 18,
             ocr_region: String::new(),
             ocr_select_model: 0,
-            recording_mp4_fps: 15,
-            recording_mp4_max_height: 1080,
-            recording_mp4_bitrate_mbps: 16,
-            recording_gif_fps: 15,
-            recording_webp_fps: 15,
+            recording_fps: 15,
+            recording_max_height: 1080,
+            recording_bitrate_mbps: 16,
+            recording_gif_colors: 128,
+            recording_webp_quality: 90,
         }
     }
 }
@@ -68,14 +68,63 @@ impl Settings {
     }
 
     pub fn load() -> Self {
-        std::fs::read_to_string(Self::path())
-            .ok()
-            .and_then(|value| serde_json::from_str(&value).ok())
-            .map(|mut value: Self| {
-                value.normalize();
-                value
-            })
-            .unwrap_or_default()
+        let Ok(contents) = std::fs::read_to_string(Self::path()) else {
+            return Self::default();
+        };
+        let Ok(raw_settings) = serde_json::from_str::<Value>(&contents) else {
+            return Self::default();
+        };
+        let has_unified_recording_settings = raw_settings.get("recordingFps").is_some()
+            || raw_settings.get("recordingMaxHeight").is_some()
+            || raw_settings.get("recordingBitrateMbps").is_some();
+        let previous_gif_profile_version = raw_settings
+            .get("recordingGifProfileVersion")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let previous_stock_gif_profile = previous_gif_profile_version < 1
+            && raw_settings
+                .get("recordingGifFps")
+                .and_then(Value::as_u64)
+                == Some(15)
+            && raw_settings
+                .get("recordingGifBitrateMbps")
+                .and_then(Value::as_u64)
+                == Some(24)
+            && raw_settings
+                .get("recordingGifColors")
+                .and_then(Value::as_u64)
+                == Some(256);
+        let mut value: Self = serde_json::from_value(raw_settings.clone()).unwrap_or_default();
+        // Existing settings had separate profiles. Use the MP4 capture profile
+        // as the shared source profile, while retaining GIF/WebP export quality.
+        if !has_unified_recording_settings {
+            if let Some(fps) = raw_settings
+                .get("recordingMp4Fps")
+                .and_then(Value::as_u64)
+                .and_then(|fps| u32::try_from(fps).ok())
+            {
+                value.recording_fps = fps;
+            }
+            if let Some(max_height) = raw_settings
+                .get("recordingMp4MaxHeight")
+                .and_then(Value::as_u64)
+                .and_then(|height| u32::try_from(height).ok())
+            {
+                value.recording_max_height = max_height;
+            }
+            if let Some(bitrate) = raw_settings
+                .get("recordingMp4BitrateMbps")
+                .and_then(Value::as_u64)
+                .and_then(|bitrate| u32::try_from(bitrate).ok())
+            {
+                value.recording_bitrate_mbps = bitrate;
+            }
+        }
+        if previous_stock_gif_profile {
+            value.recording_gif_colors = 128;
+        }
+        value.normalize();
+        value
     }
 
     pub fn save(&self) -> Result<(), String> {
@@ -96,20 +145,20 @@ impl Settings {
         }
         self.scroll_step = self.scroll_step.clamp(120, 1600);
         self.text_size = self.text_size.clamp(10, 72);
-        if !RECORDING_FPS_OPTIONS.contains(&self.recording_mp4_fps) {
-            self.recording_mp4_fps = 15;
+        if !RECORDING_FPS_OPTIONS.contains(&self.recording_fps) {
+            self.recording_fps = 15;
         }
-        if ![720, 1080].contains(&self.recording_mp4_max_height) {
-            self.recording_mp4_max_height = 1080;
+        if ![720, 1080].contains(&self.recording_max_height) {
+            self.recording_max_height = 1080;
         }
-        if ![4, 6, 8, 10, 12, 16, 20, 24].contains(&self.recording_mp4_bitrate_mbps) {
-            self.recording_mp4_bitrate_mbps = 16;
+        if ![4, 6, 8, 10, 12, 16, 20, 24].contains(&self.recording_bitrate_mbps) {
+            self.recording_bitrate_mbps = 16;
         }
-        if !RECORDING_FPS_OPTIONS.contains(&self.recording_gif_fps) {
-            self.recording_gif_fps = 15;
+        if ![64, 128, 256].contains(&self.recording_gif_colors) {
+            self.recording_gif_colors = 128;
         }
-        if !RECORDING_FPS_OPTIONS.contains(&self.recording_webp_fps) {
-            self.recording_webp_fps = 15;
+        if ![50, 65, 80, 90, 95].contains(&self.recording_webp_quality) {
+            self.recording_webp_quality = 90;
         }
         self.annotation_color = normalize_color(&self.annotation_color);
         self.ocr_region = self.ocr_region.trim().to_string();
@@ -216,6 +265,8 @@ pub enum Annotation {
     Arrow(Point, Point, [u8; 4], u32, StrokeStyle),
     Line(Point, Point, [u8; 4], u32, StrokeStyle),
     Highlight(Point, Point, [u8; 4], u32),
+    /// Elliptical focus area; pixels outside the union of all spotlight shapes are dimmed.
+    Spotlight(RectI),
     Pen(Vec<Point>, [u8; 4], u32, StrokeStyle),
     Mosaic(Vec<Point>, u32),
     Text(Point, String, u32, [u8; 4]),
