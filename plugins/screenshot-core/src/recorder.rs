@@ -107,6 +107,15 @@ pub enum GifExportQuality {
     Small,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WebpExportSize {
+    #[default]
+    Recommended,
+    High,
+    Balanced,
+    Small,
+}
+
 impl AnimationFormat {
     pub fn extension(self) -> &'static str {
         match self {
@@ -458,6 +467,7 @@ impl RecordingManager {
         &self,
         format: AnimationFormat,
         gif_export_quality: GifExportQuality,
+        webp_export_size: WebpExportSize,
         path: PathBuf,
         output_fps: u32,
         mp4_bitrate_mbps: u32,
@@ -535,6 +545,7 @@ impl RecordingManager {
                             fps,
                             output_fps,
                             gif_export_quality,
+                            webp_export_size,
                             mp4_bitrate_mbps,
                             gif_colors,
                             webp_quality,
@@ -1097,6 +1108,7 @@ fn export_animation(
     fps: u32,
     output_fps: u32,
     gif_export_quality: GifExportQuality,
+    webp_export_size: WebpExportSize,
     mp4_bitrate_mbps: u32,
     gif_colors: u16,
     webp_quality: u8,
@@ -1113,6 +1125,8 @@ fn export_animation(
     };
     let result = match format {
         AnimationFormat::Webp => {
+            let (webp_width, webp_height) =
+                webp_export_dimensions(width, height, output_fps, webp_export_size);
             if let Some(source_video) = source_video {
                 #[cfg(windows)]
                 {
@@ -1122,6 +1136,8 @@ fn export_animation(
                         source_video,
                         width,
                         height,
+                        webp_width,
+                        webp_height,
                         fps,
                         output_fps,
                         webp_quality,
@@ -1140,6 +1156,8 @@ fn export_animation(
                     frames,
                     width,
                     height,
+                    webp_width,
+                    webp_height,
                     fps,
                     output_fps,
                     webp_quality,
@@ -1345,6 +1363,21 @@ fn gif_export_dimensions(
         GifExportQuality::High => (1920, 1080),
         GifExportQuality::Balanced => (1280, 720),
         GifExportQuality::Small => (960, 540),
+    };
+    fit_recording_dimensions(width, height, max_width, max_height)
+}
+
+fn webp_export_dimensions(
+    width: u32,
+    height: u32,
+    fps: u32,
+    size: WebpExportSize,
+) -> (u32, u32) {
+    let (max_width, max_height) = match size {
+        WebpExportSize::Recommended => gif_max_output_dimensions(width, height, fps),
+        WebpExportSize::High => (1920, 1080),
+        WebpExportSize::Balanced => (1280, 720),
+        WebpExportSize::Small => (960, 540),
     };
     fit_recording_dimensions(width, height, max_width, max_height)
 }
@@ -1821,8 +1854,192 @@ fn encode_gif_from_mp4(
     writer.get_ref().sync_all().map_err(|e| e.to_string())
 }
 
-fn encode_webp_frame_chunks(
+const WEBP_DIFF_RGB_THRESHOLD: i32 = 18;
+const WEBP_DIFF_ALPHA_THRESHOLD: i32 = 8;
+const WEBP_DELTA_PADDING: u32 = 8;
+
+struct WebpFrameCrop {
+    left: u32,
+    top: u32,
+    width: u32,
+    height: u32,
+    pixels: Vec<u8>,
+}
+
+struct WebpEncodedFrame {
+    left: u32,
+    top: u32,
+    width: u32,
+    height: u32,
+    chunks: Vec<u8>,
+    duration_ms: u64,
+}
+
+struct WebpFrameEncoder {
+    width: u32,
+    height: u32,
+    quality: u8,
+    previous_pixels: Option<Vec<u8>>,
+    pending_frame: Option<WebpEncodedFrame>,
+}
+
+impl WebpFrameEncoder {
+    fn new(width: u32, height: u32, quality: u8) -> Self {
+        Self {
+            width,
+            height,
+            quality,
+            previous_pixels: None,
+            pending_frame: None,
+        }
+    }
+
+    fn push_frame(
+        &mut self,
+        pixels: &[u8],
+        duration_ms: u64,
+    ) -> Result<Option<WebpEncodedFrame>, String> {
+        let crop = make_webp_delta_frame(
+            pixels,
+            self.previous_pixels.as_deref(),
+            self.width,
+            self.height,
+        )?;
+        let Some(crop) = crop else {
+            if let Some(pending) = self.pending_frame.as_mut() {
+                pending.duration_ms = pending.duration_ms.saturating_add(duration_ms);
+            }
+            return Ok(None);
+        };
+
+        let chunks = encode_webp_frame_chunks(
+            crop.pixels,
+            crop.width,
+            crop.height,
+            self.quality,
+        )?;
+        let next_frame = WebpEncodedFrame {
+            left: crop.left,
+            top: crop.top,
+            width: crop.width,
+            height: crop.height,
+            chunks,
+            duration_ms: duration_ms.max(1),
+        };
+        let previous_frame = self.pending_frame.replace(next_frame);
+        if let Some(previous_pixels) = self.previous_pixels.as_mut() {
+            previous_pixels.copy_from_slice(pixels);
+        } else {
+            self.previous_pixels = Some(pixels.to_vec());
+        }
+        Ok(previous_frame)
+    }
+
+    fn finish(&mut self) -> Option<WebpEncodedFrame> {
+        self.pending_frame.take()
+    }
+}
+
+fn make_webp_delta_frame(
     pixels: &[u8],
+    previous: Option<&[u8]>,
+    width: u32,
+    height: u32,
+) -> Result<Option<WebpFrameCrop>, String> {
+    let expected = width
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| "WebP 帧尺寸过大".to_string())? as usize;
+    if width == 0
+        || height == 0
+        || pixels.len() != expected
+        || previous.is_some_and(|frame| frame.len() != expected)
+    {
+        return Err("WebP 帧数据无效".into());
+    }
+    let Some(previous) = previous else {
+        return Ok(Some(WebpFrameCrop {
+            left: 0,
+            top: 0,
+            width,
+            height,
+            pixels: pixels.to_vec(),
+        }));
+    };
+
+    let mut min_x = width;
+    let mut min_y = height;
+    let mut max_x = 0;
+    let mut max_y = 0;
+    let row_bytes = width as usize * 4;
+    for y in 0..height {
+        let row_start = y as usize * row_bytes;
+        let current_row = &pixels[row_start..row_start + row_bytes];
+        let previous_row = &previous[row_start..row_start + row_bytes];
+        if current_row == previous_row {
+            continue;
+        }
+        for (x, current_pixel) in current_row.chunks_exact(4).enumerate() {
+            let pixel_start = row_start + x * 4;
+            let previous_pixel = &previous[pixel_start..pixel_start + 4];
+            if webp_pixel_changed(current_pixel, previous_pixel) {
+                min_x = min_x.min(x as u32);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x as u32);
+                max_y = max_y.max(y);
+            }
+        }
+    }
+    if min_x == width {
+        return Ok(None);
+    }
+
+    // Keep the crop origin even because ANMF stores offsets in two-pixel units.
+    // The small border also gives the lossy encoder context around changed edges.
+    let left = min_x.saturating_sub(WEBP_DELTA_PADDING) & !1;
+    let top = min_y.saturating_sub(WEBP_DELTA_PADDING) & !1;
+    let right = max_x
+        .saturating_add(WEBP_DELTA_PADDING)
+        .saturating_add(1)
+        .min(width);
+    let bottom = max_y
+        .saturating_add(WEBP_DELTA_PADDING)
+        .saturating_add(1)
+        .min(height);
+    let crop_width = right - left;
+    let crop_height = bottom - top;
+    let crop_len = (crop_width as usize)
+        .checked_mul(crop_height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| "WebP 差分区域过大".to_string())?;
+    let mut crop_pixels = vec![0; crop_len];
+    let crop_row_bytes = crop_width as usize * 4;
+    for row in 0..crop_height as usize {
+        let source_start = ((top as usize + row) * width as usize + left as usize) * 4;
+        let target_start = row * crop_row_bytes;
+        crop_pixels[target_start..target_start + crop_row_bytes]
+            .copy_from_slice(&pixels[source_start..source_start + crop_row_bytes]);
+    }
+
+    Ok(Some(WebpFrameCrop {
+        left,
+        top,
+        width: crop_width,
+        height: crop_height,
+        pixels: crop_pixels,
+    }))
+}
+
+fn webp_pixel_changed(current: &[u8], previous: &[u8]) -> bool {
+    let rgb_difference = (i32::from(current[0]) - i32::from(previous[0])).abs()
+        + (i32::from(current[1]) - i32::from(previous[1])).abs()
+        + (i32::from(current[2]) - i32::from(previous[2])).abs();
+    rgb_difference > WEBP_DIFF_RGB_THRESHOLD
+        || (i32::from(current[3]) - i32::from(previous[3])).abs() > WEBP_DIFF_ALPHA_THRESHOLD
+}
+
+fn encode_webp_frame_chunks(
+    pixels: Vec<u8>,
     width: u32,
     height: u32,
     quality: u8,
@@ -1837,11 +2054,14 @@ fn encode_webp_frame_chunks(
     let image = webp_rust::ImageBuffer {
         width: width as usize,
         height: height as usize,
-        rgba: pixels.to_vec(),
+        rgba: pixels,
     };
     let config = webp_rust::LossyEncodingConfig {
         quality: f32::from(quality),
-        method: 4,
+        // Animation export encodes many independent frames. The fast search
+        // mode keeps the selected quality while avoiding the expensive
+        // per-frame partition and filter searches of method 4.
+        method: 0,
         ..Default::default()
     };
     let encoded = webp_rust::encode_lossy_with_config(&image, &config, None)
@@ -1852,8 +2072,32 @@ fn encode_webp_frame_chunks(
     extract_webp_frame_chunks(&encoded)
 }
 
+fn write_webp_animation_frame(
+    writer: &mut impl Write,
+    frame: WebpEncodedFrame,
+    riff_size: &mut u64,
+) -> Result<(), String> {
+    let mut remaining_duration = frame.duration_ms.max(1);
+    while remaining_duration != 0 {
+        let duration_ms = remaining_duration.min(WEBP_CHUNK_LIMIT as u64) as u32;
+        let mut payload = Vec::with_capacity(16 + frame.chunks.len());
+        push_u24(&mut payload, frame.left / 2)?;
+        push_u24(&mut payload, frame.top / 2)?;
+        push_u24(&mut payload, frame.width - 1)?;
+        push_u24(&mut payload, frame.height - 1)?;
+        push_u24(&mut payload, duration_ms)?;
+        payload.push(0x02); // Replace the frame rectangle without blending.
+        payload.extend_from_slice(&frame.chunks);
+        write_riff_chunk(writer, *b"ANMF", &payload, riff_size)?;
+        remaining_duration -= u64::from(duration_ms);
+    }
+    Ok(())
+}
+
 fn encode_webp_animation(
     frames: &[RecordedFrame],
+    source_width: u32,
+    source_height: u32,
     width: u32,
     height: u32,
     source_fps: u32,
@@ -1866,49 +2110,59 @@ fn encode_webp_animation(
         return Err("WebP 尺寸或帧数据无效".into());
     }
     let mut chunks = Vec::new();
+    let mut riff_size = 4u64;
     let mut vp8x = Vec::with_capacity(10);
     vp8x.push(0x02); // Animation feature flag.
     vp8x.extend_from_slice(&[0, 0, 0]);
     push_u24(&mut vp8x, width - 1)?;
     push_u24(&mut vp8x, height - 1)?;
-    append_riff_chunk(&mut chunks, *b"VP8X", &vp8x)?;
+    write_riff_chunk(&mut chunks, *b"VP8X", &vp8x, &mut riff_size)?;
 
     let mut anim = Vec::with_capacity(6);
     anim.extend_from_slice(&[0, 0, 0, 0]); // BGRA background color.
     anim.extend_from_slice(&0u16.to_le_bytes()); // Infinite loop.
-    append_riff_chunk(&mut chunks, *b"ANIM", &anim)?;
+    write_riff_chunk(&mut chunks, *b"ANIM", &anim, &mut riff_size)?;
 
     let schedule = frame_schedule(frames, source_fps, output_fps);
     let total_frames = schedule.len();
     update_export_progress(progress, 0, total_frames);
-    let mut written_frames = 0usize;
+    let mut encoder = WebpFrameEncoder::new(width, height, quality);
+    let mut processed_frames = 0usize;
     for (frame_index, _, duration_ms) in schedule {
         if cancel.load(Ordering::Acquire) {
             return Err("导出已取消".into());
         }
         let frame = &frames[frame_index];
-        let frame_chunks = encode_webp_frame_chunks(&frame.pixels, width, height, quality)?;
-        let mut payload = Vec::with_capacity(16 + frame_chunks.len());
-        push_u24(&mut payload, 0)?;
-        push_u24(&mut payload, 0)?;
-        push_u24(&mut payload, width - 1)?;
-        push_u24(&mut payload, height - 1)?;
-        push_u24(&mut payload, duration_ms.min(WEBP_CHUNK_LIMIT as u32))?;
-        payload.push(0x02); // Do not blend; every frame covers the full canvas.
-        payload.extend_from_slice(&frame_chunks);
-        append_riff_chunk(&mut chunks, *b"ANMF", &payload)?;
-        written_frames += 1;
-        update_export_progress(progress, written_frames, total_frames);
+        let resized = (source_width != width || source_height != height)
+            .then(|| {
+                resize_rgba_pixels(
+                    &frame.pixels,
+                    source_width,
+                    source_height,
+                    width,
+                    height,
+                )
+            })
+            .transpose()?;
+        let pixels = resized.as_deref().unwrap_or(&frame.pixels);
+        if let Some(encoded_frame) = encoder.push_frame(pixels, u64::from(duration_ms))? {
+            write_webp_animation_frame(&mut chunks, encoded_frame, &mut riff_size)?;
+        }
+        processed_frames += 1;
+        update_export_progress(progress, processed_frames, total_frames);
     }
-    if written_frames == 0 {
+    if cancel.load(Ordering::Acquire) {
+        return Err("导出已取消".into());
+    }
+    if let Some(encoded_frame) = encoder.finish() {
+        write_webp_animation_frame(&mut chunks, encoded_frame, &mut riff_size)?;
+    }
+    if processed_frames == 0 {
         return Err("WebP 没有可导出的画面帧".into());
     }
 
-    let riff_size = chunks
-        .len()
-        .checked_add(4)
-        .and_then(|value| u32::try_from(value).ok())
-        .ok_or_else(|| "WebP 动画超过格式大小上限".to_string())?;
+    let riff_size = u32::try_from(riff_size)
+        .map_err(|_| "WebP 动画超过格式大小上限".to_string())?;
     let mut output = Vec::with_capacity(chunks.len() + 12);
     output.extend_from_slice(b"RIFF");
     output.extend_from_slice(&riff_size.to_le_bytes());
@@ -1921,6 +2175,8 @@ fn encode_webp_animation(
 fn encode_webp_from_mp4(
     path: &Path,
     source_video: &Path,
+    source_width: u32,
+    source_height: u32,
     width: u32,
     height: u32,
     source_fps: u32,
@@ -1951,31 +2207,38 @@ fn encode_webp_from_mp4(
     anim.extend_from_slice(&0u16.to_le_bytes());
     write_riff_chunk(&mut writer, *b"ANIM", &anim, &mut riff_size)?;
 
-    let mut written_frames = 0usize;
+    let mut encoder = WebpFrameEncoder::new(width, height, quality);
+    let mut processed_frames = 0usize;
     recording_mp4::visit_mp4_frames(
         source_video,
-        width,
-        height,
+        source_width,
+        source_height,
         source_fps,
         output_fps,
         cancel,
         |_, duration_ms, pixels| {
-            let frame_chunks = encode_webp_frame_chunks(pixels, width, height, quality)?;
-            let mut payload = Vec::with_capacity(16 + frame_chunks.len());
-            push_u24(&mut payload, 0)?;
-            push_u24(&mut payload, 0)?;
-            push_u24(&mut payload, width - 1)?;
-            push_u24(&mut payload, height - 1)?;
-            push_u24(&mut payload, duration_ms.min(WEBP_CHUNK_LIMIT as u64) as u32)?;
-            payload.push(0x02);
-            payload.extend_from_slice(&frame_chunks);
-            write_riff_chunk(&mut writer, *b"ANMF", &payload, &mut riff_size)?;
-            written_frames += 1;
-            update_export_progress(progress, written_frames, expected_output_frames);
+            if cancel.load(Ordering::Acquire) {
+                return Err("导出已取消".into());
+            }
+            let resized = (source_width != width || source_height != height)
+                .then(|| resize_rgba_pixels(pixels, source_width, source_height, width, height))
+                .transpose()?;
+            let pixels = resized.as_deref().unwrap_or(pixels);
+            if let Some(encoded_frame) = encoder.push_frame(pixels, duration_ms)? {
+                write_webp_animation_frame(&mut writer, encoded_frame, &mut riff_size)?;
+            }
+            processed_frames += 1;
+            update_export_progress(progress, processed_frames, expected_output_frames);
             Ok(())
         },
     )?;
-    if written_frames == 0 {
+    if cancel.load(Ordering::Acquire) {
+        return Err("导出已取消".into());
+    }
+    if let Some(encoded_frame) = encoder.finish() {
+        write_webp_animation_frame(&mut writer, encoded_frame, &mut riff_size)?;
+    }
+    if processed_frames == 0 {
         return Err("WebP 没有可导出的画面帧".into());
     }
 
@@ -2043,19 +2306,6 @@ fn extract_webp_frame_chunks(webp: &[u8]) -> Result<Vec<u8>, String> {
         return Err("静态 WebP 中没有可用帧数据".into());
     }
     Ok(output)
-}
-
-fn append_riff_chunk(output: &mut Vec<u8>, id: [u8; 4], data: &[u8]) -> Result<(), String> {
-    if data.len() > WEBP_CHUNK_LIMIT || data.len() > u32::MAX as usize {
-        return Err("WebP 动画区块过大".into());
-    }
-    output.extend_from_slice(&id);
-    output.extend_from_slice(&(data.len() as u32).to_le_bytes());
-    output.extend_from_slice(data);
-    if data.len() & 1 == 1 {
-        output.push(0);
-    }
-    Ok(())
 }
 
 fn push_u24(output: &mut Vec<u8>, value: u32) -> Result<(), String> {

@@ -1,6 +1,6 @@
 use super::{set_error, wide, UiState, DEFAULT_GUI_FONT};
-use crate::model::{ScreenPoint, ScreenRect};
-use crate::recorder::{AnimationFormat, GifExportQuality};
+use crate::model::{ScreenPoint, ScreenRect, RECORDING_FPS_OPTIONS};
+use crate::recorder::{AnimationFormat, GifExportQuality, WebpExportSize};
 use std::ffi::c_void;
 use std::mem::{size_of, zeroed};
 use std::path::PathBuf;
@@ -531,9 +531,11 @@ pub(super) fn export_recording(state: &mut UiState, format: AnimationFormat) {
         state.hwnd
     };
     state.recording_export_dialog_open = true;
-    let path = match save_animation_with_dialog(owner, format, &initial_dir) {
+    let source_fps = state.recording.snapshot().fps.max(1);
+    let path = match save_animation_with_dialog(owner, format, &initial_dir, source_fps) {
         Ok(path) => path,
         Err(error) => {
+            state.recording_export_dialog_open = false;
             set_error(state, error);
             return;
         }
@@ -542,10 +544,9 @@ pub(super) fn export_recording(state: &mut UiState, format: AnimationFormat) {
     if let Some(toolbar) = (!state.recording_toolbar.is_null()).then_some(state.recording_toolbar) {
         unsafe { SetTimer(toolbar, CONTROL_TIMER, 250, None) };
     }
-    let Some((path, gif_export_quality)) = path else {
+    let Some((path, gif_export_quality, webp_export_size, output_fps)) = path else {
         return;
     };
-    let output_fps = state.recording.snapshot().fps.max(1);
     let (_, recording_bitrate_mbps) =
         super::configured_recording_options(&state.settings);
     let (gif_colors, webp_quality) =
@@ -555,6 +556,7 @@ pub(super) fn export_recording(state: &mut UiState, format: AnimationFormat) {
         .export(
             format,
             gif_export_quality,
+            webp_export_size,
             path,
             output_fps,
             recording_bitrate_mbps,
@@ -648,7 +650,8 @@ fn save_animation_with_dialog(
     owner: windows_sys::Win32::Foundation::HWND,
     format: AnimationFormat,
     initial_dir: &str,
-) -> Result<Option<(PathBuf, GifExportQuality)>, String> {
+    source_fps: u32,
+) -> Result<Option<(PathBuf, GifExportQuality, WebpExportSize, u32)>, String> {
     let (title, default_name, filter) = match format {
         AnimationFormat::Webp => (
             "Export animated WebP",
@@ -696,6 +699,22 @@ fn save_animation_with_dialog(
     } else {
         GifExportQuality::Recommended
     };
+    let webp_export_size = if format == AnimationFormat::Webp {
+        let Some(size) = choose_webp_export_size(owner)? else {
+            return Ok(None);
+        };
+        size
+    } else {
+        WebpExportSize::Recommended
+    };
+    let output_fps = if matches!(format, AnimationFormat::Gif | AnimationFormat::Webp) {
+        let Some(fps) = choose_animation_export_fps(owner, format, source_fps)? else {
+            return Ok(None);
+        };
+        fps
+    } else {
+        source_fps
+    };
     let end = file
         .iter()
         .position(|value| *value == 0)
@@ -707,7 +726,12 @@ fn save_animation_with_dialog(
     }
     let mut path = PathBuf::from(selected);
     path.set_extension(format.extension());
-    Ok(Some((path, gif_export_quality)))
+    Ok(Some((
+        path,
+        gif_export_quality,
+        webp_export_size,
+        output_fps,
+    )))
 }
 
 fn choose_gif_export_quality(
@@ -776,4 +800,154 @@ fn choose_gif_export_quality(
         _ => GifExportQuality::Recommended,
     };
     Ok(Some(quality))
+}
+
+fn choose_webp_export_size(
+    owner: windows_sys::Win32::Foundation::HWND,
+) -> Result<Option<WebpExportSize>, String> {
+    let title = wide("WebP 导出参数");
+    let instruction = wide("选择导出规格");
+    let content = wide("智能推荐会根据录制尺寸和帧率自动选择；尺寸越小，导出越快，文件通常也越小。WebP 画质仍使用详情设置中的质量选项。");
+    let options = [
+        wide("智能推荐（默认）"),
+        wide("清晰（最高 1080p）"),
+        wide("均衡（最高 720p）"),
+        wide("快速导出（最高 540p）"),
+    ];
+    let radio_buttons = [
+        TASKDIALOG_BUTTON {
+            nButtonID: 1,
+            pszButtonText: options[0].as_ptr(),
+        },
+        TASKDIALOG_BUTTON {
+            nButtonID: 2,
+            pszButtonText: options[1].as_ptr(),
+        },
+        TASKDIALOG_BUTTON {
+            nButtonID: 3,
+            pszButtonText: options[2].as_ptr(),
+        },
+        TASKDIALOG_BUTTON {
+            nButtonID: 4,
+            pszButtonText: options[3].as_ptr(),
+        },
+    ];
+    let mut config: TASKDIALOGCONFIG = unsafe { zeroed() };
+    config.cbSize = size_of::<TASKDIALOGCONFIG>() as u32;
+    config.hwndParent = owner;
+    config.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION;
+    config.dwCommonButtons = TDCBF_OK_BUTTON | TDCBF_CANCEL_BUTTON;
+    config.pszWindowTitle = title.as_ptr();
+    config.pszMainInstruction = instruction.as_ptr();
+    config.pszContent = content.as_ptr();
+    config.cRadioButtons = radio_buttons.len() as u32;
+    config.pRadioButtons = radio_buttons.as_ptr();
+    config.nDefaultRadioButton = 1;
+    config.nDefaultButton = IDOK;
+
+    let mut clicked_button = 0;
+    let mut selected_option = 0;
+    let result = unsafe {
+        TaskDialogIndirect(
+            &config,
+            &mut clicked_button,
+            &mut selected_option,
+            std::ptr::null_mut(),
+        )
+    };
+    if result < 0 {
+        return Err(format!("无法打开 WebP 导出参数窗口（错误码 {result:#x}）"));
+    }
+    if clicked_button != IDOK {
+        return Ok(None);
+    }
+    let size = match selected_option {
+        2 => WebpExportSize::High,
+        3 => WebpExportSize::Balanced,
+        4 => WebpExportSize::Small,
+        _ => WebpExportSize::Recommended,
+    };
+    Ok(Some(size))
+}
+
+fn choose_animation_export_fps(
+    owner: windows_sys::Win32::Foundation::HWND,
+    format: AnimationFormat,
+    source_fps: u32,
+) -> Result<Option<u32>, String> {
+    let source_fps = source_fps.max(1);
+    let format_name = match format {
+        AnimationFormat::Gif => "GIF",
+        AnimationFormat::Webp => "WebP",
+        AnimationFormat::Mp4 => "MP4",
+    };
+    let title = wide(&format!("{format_name} 导出帧率"));
+    let instruction = wide("选择导出帧率");
+    let content =
+        wide("较低帧率会减少编码帧数，通常能加快导出；动画会更不连贯，但总时长保持不变。");
+    let mut fps_values = vec![source_fps];
+    fps_values.extend(
+        RECORDING_FPS_OPTIONS
+            .iter()
+            .rev()
+            .copied()
+            .filter(|fps| *fps < source_fps),
+    );
+    let options = fps_values
+        .iter()
+        .enumerate()
+        .map(|(index, fps)| {
+            if index == 0 {
+                wide(&format!("保持录制帧率（{fps} FPS，默认）"))
+            } else {
+                wide(&format!("{fps} FPS"))
+            }
+        })
+        .collect::<Vec<_>>();
+    let radio_buttons = options
+        .iter()
+        .enumerate()
+        .map(|(index, option)| TASKDIALOG_BUTTON {
+            nButtonID: index as i32 + 1,
+            pszButtonText: option.as_ptr(),
+        })
+        .collect::<Vec<_>>();
+    let mut config: TASKDIALOGCONFIG = unsafe { zeroed() };
+    config.cbSize = size_of::<TASKDIALOGCONFIG>() as u32;
+    config.hwndParent = owner;
+    config.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION;
+    config.dwCommonButtons = TDCBF_OK_BUTTON | TDCBF_CANCEL_BUTTON;
+    config.pszWindowTitle = title.as_ptr();
+    config.pszMainInstruction = instruction.as_ptr();
+    config.pszContent = content.as_ptr();
+    config.cRadioButtons = radio_buttons.len() as u32;
+    config.pRadioButtons = radio_buttons.as_ptr();
+    config.nDefaultRadioButton = 1;
+    config.nDefaultButton = IDOK;
+
+    let mut clicked_button = 0;
+    let mut selected_option = 0;
+    let result = unsafe {
+        TaskDialogIndirect(
+            &config,
+            &mut clicked_button,
+            &mut selected_option,
+            std::ptr::null_mut(),
+        )
+    };
+    if result < 0 {
+        return Err(format!(
+            "无法打开 {format_name} 导出帧率窗口（错误码 {result:#x}）"
+        ));
+    }
+    if clicked_button != IDOK {
+        return Ok(None);
+    }
+    let selected_index = selected_option.saturating_sub(1) as usize;
+    Ok(Some(
+        fps_values
+            .get(selected_index)
+            .copied()
+            .unwrap_or(source_fps),
+    ))
 }

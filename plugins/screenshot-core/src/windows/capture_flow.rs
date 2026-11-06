@@ -268,7 +268,11 @@ pub(super) fn cancel(state: &mut UiState) {
     ocr_ui::close_session_transients(state);
     state.recording_overlay = false;
     recording_ui::destroy_control_toolbar(state);
-    if state.recording_requested_fps.take().is_some() {
+    let closing_recording_preview = state
+        .editor
+        .as_ref()
+        .is_some_and(|editor| editor.recording_preview);
+    if state.recording_requested_fps.take().is_some() || closing_recording_preview {
         state.recording.cancel();
     }
     if state.editor.take().is_some() {
