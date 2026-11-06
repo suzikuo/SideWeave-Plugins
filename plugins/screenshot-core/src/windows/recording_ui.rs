@@ -36,11 +36,8 @@ const TIMER_TEXT_RECT: RECT = RECT { left: 48, top: 2, right: 314, bottom: 62 };
 const PAUSE_BUTTON: (i32, i32, i32, i32) = (48, 10, 92, 54);
 const STOP_BUTTON: (i32, i32, i32, i32) = (326, 9, 436, 55);
 const CANCEL_BUTTON: (i32, i32, i32, i32) = (326, 9, 436, 55);
-const CLEAR_BUTTON: (i32, i32, i32, i32) = (170, 14, 212, 50);
-const EDIT_BUTTON: (i32, i32, i32, i32) = (218, 14, 266, 50);
-const MP4_BUTTON: (i32, i32, i32, i32) = (272, 14, 318, 50);
-const GIF_BUTTON: (i32, i32, i32, i32) = (324, 14, 368, 50);
-const WEBP_BUTTON: (i32, i32, i32, i32) = (374, 14, 426, 50);
+const CLEAR_BUTTON: (i32, i32, i32, i32) = (176, 14, 232, 50);
+const EDIT_BUTTON: (i32, i32, i32, i32) = (242, 14, 426, 50);
 
 pub(super) fn create_control_toolbar(
     state: &mut UiState,
@@ -223,7 +220,18 @@ unsafe fn paint_control_toolbar(hwnd: HWND, state: &mut UiState) {
     FillRect(dc, &rect, background);
     DeleteObject(background as _);
 
-    let border = CreatePen(0, 1, 0x00e2e7ef);
+    let shadow = CreateSolidBrush(0x00cbd3dd);
+    let shadow_old_brush = SelectObject(dc, shadow as _);
+    let shadow_old_pen = SelectObject(
+        dc,
+        GetStockObject(windows_sys::Win32::Graphics::Gdi::NULL_PEN as i32),
+    );
+    RoundRect(dc, 2, 3, CONTROL_WIDTH - 2, CONTROL_HEIGHT - 1, 22, 22);
+    SelectObject(dc, shadow_old_pen);
+    SelectObject(dc, shadow_old_brush);
+    DeleteObject(shadow as _);
+
+    let border = CreatePen(0, 1, 0x00d8dee7);
     let white = CreateSolidBrush(0x00ffffff);
     let old_border = SelectObject(dc, border as _);
     let old_white = SelectObject(dc, white as _);
@@ -253,7 +261,8 @@ unsafe fn paint_control_toolbar(hwnd: HWND, state: &mut UiState) {
         "recording" => {
             draw_pause_toggle(dc, PAUSE_BUTTON, status.paused);
             draw_status_dot(dc, 111, 32, 0x00454af5);
-            draw_control_text(dc, 126, 10, 314, 54, &recording_time_text(&status), 0x004a5666);
+            draw_control_text(dc, 126, 6, 314, 31, "正在录制", 0x0076818f);
+            draw_control_text(dc, 126, 28, 314, 57, &recording_time_text(&status), 0x00343a45);
             draw_control_button(dc, STOP_BUTTON, "结束录制", 0x00454af5, true);
         }
         "processing" => {
@@ -269,10 +278,7 @@ unsafe fn paint_control_toolbar(hwnd: HWND, state: &mut UiState) {
         "preview" => {
             draw_control_text(dc, 48, 18, 164, 54, &label, 0x004a5666);
             draw_control_button(dc, CLEAR_BUTTON, "清除", 0x00f3f5f8, false);
-            draw_control_button(dc, EDIT_BUTTON, "编辑", 0x00f3f5f8, false);
-            draw_control_button(dc, MP4_BUTTON, "MP4", 0x00f76f16, true);
-            draw_control_button(dc, GIF_BUTTON, "GIF", 0x00f3f5f8, false);
-            draw_control_button(dc, WEBP_BUTTON, "WebP", 0x00f3f5f8, false);
+            draw_control_button(dc, EDIT_BUTTON, "打开预览", 0x00f76f16, true);
         }
         _ => {
             draw_control_text(dc, 48, 10, 314, 54, &label, 0x004a5666);
@@ -377,13 +383,14 @@ unsafe fn draw_control_progress_bar(
     percent: u8,
 ) {
     let track_brush = CreateSolidBrush(0x00dce2e9);
-    let track = RECT {
-        left,
-        top,
-        right,
-        bottom,
-    };
-    FillRect(dc, &track, track_brush);
+    let old_brush = SelectObject(dc, track_brush as _);
+    let old_pen = SelectObject(
+        dc,
+        GetStockObject(windows_sys::Win32::Graphics::Gdi::NULL_PEN as i32),
+    );
+    RoundRect(dc, left, top, right, bottom, bottom - top, bottom - top);
+    SelectObject(dc, old_pen);
+    SelectObject(dc, old_brush);
     DeleteObject(track_brush as _);
 
     let filled_right = left + ((right - left) * i32::from(percent.min(100)) / 100);
@@ -391,13 +398,14 @@ unsafe fn draw_control_progress_bar(
         return;
     }
     let progress_brush = CreateSolidBrush(0x00f76f16);
-    let progress = RECT {
-        left,
-        top,
-        right: filled_right,
-        bottom,
-    };
-    FillRect(dc, &progress, progress_brush);
+    let old_brush = SelectObject(dc, progress_brush as _);
+    let old_pen = SelectObject(
+        dc,
+        GetStockObject(windows_sys::Win32::Graphics::Gdi::NULL_PEN as i32),
+    );
+    RoundRect(dc, left, top, filled_right, bottom, bottom - top, bottom - top);
+    SelectObject(dc, old_pen);
+    SelectObject(dc, old_brush);
     DeleteObject(progress_brush as _);
 }
 
@@ -412,7 +420,7 @@ fn control_status_text(status: &crate::recorder::RecordingStatus) -> String {
         ),
         "cancelling" => "正在取消…".into(),
         "preview" => match status.message.as_deref() {
-            Some(message) if message.starts_with("导出失败：") => "导出失败，点编辑查看".into(),
+            Some(message) if message.starts_with("导出失败：") => "导出失败，打开预览".into(),
             Some(message) if message.starts_with("导出完成：") => "导出完成".into(),
             _ => format!("预览就绪 · {} 帧", status.frame_count),
         },
@@ -487,15 +495,6 @@ fn handle_control_click(state: &mut UiState, point: (i32, i32)) {
         }
         "preview" if inside(point, EDIT_BUTTON) => {
             super::queue_open_recording_editor(state);
-        }
-        "preview" if inside(point, MP4_BUTTON) => {
-            export_recording(state, AnimationFormat::Mp4);
-        }
-        "preview" if inside(point, GIF_BUTTON) => {
-            export_recording(state, AnimationFormat::Gif);
-        }
-        "preview" if inside(point, WEBP_BUTTON) => {
-            export_recording(state, AnimationFormat::Webp);
         }
         "preview" if inside(point, CLEAR_BUTTON) => {
             state.recording.cancel();

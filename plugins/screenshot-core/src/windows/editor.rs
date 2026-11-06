@@ -210,8 +210,9 @@ pub(super) fn open_editor(state: &mut UiState) {
         };
         let layout = toolbar_layout(canvas_rect);
         let toolbar_origin = if recording_preview {
+            let (_, export_rect, _) = recording_player_button_rects(client_width, client_height);
             ScreenPoint {
-                x: (client_width - 286).max(8),
+                x: (export_rect.0 - 39).clamp(8, (client_width - 224).max(8)),
                 y: client_height - 78,
             }
         } else {
@@ -542,9 +543,7 @@ pub(super) fn handle_recording_preview_click(state: &mut UiState, point: ScreenP
     let height = client.bottom - client.top;
     let footer_top = height - PLAYER_FOOTER_HEIGHT;
 
-    let play_rect = (16, footer_top + 14, 58, height - 8);
-    let export_rect = (width - 286, footer_top + 10, width - 176, height - 10);
-    let copy_rect = (width - 166, footer_top + 10, width - 16, height - 10);
+    let (play_rect, export_rect, copy_rect) = recording_player_button_rects(width, height);
 
     let export_menu_open = state
         .capture
@@ -604,6 +603,35 @@ pub(super) fn handle_recording_preview_click(state: &mut UiState, point: ScreenP
 pub(super) const PLAYER_FOOTER_HEIGHT: i32 = 66;
 pub(super) const PLAYER_TIMELINE_GAP: i32 = 13;
 pub(super) const PLAYER_SIDE_PADDING: i32 = 24;
+
+pub(super) fn recording_player_button_rects(
+    width: i32,
+    height: i32,
+) -> (
+    (i32, i32, i32, i32),
+    (i32, i32, i32, i32),
+    (i32, i32, i32, i32),
+) {
+    let footer_top = height - PLAYER_FOOTER_HEIGHT;
+    let button_top = footer_top + 12;
+    let button_bottom = height - 12;
+    let copy_width = 132;
+    let export_width = 138;
+    let button_gap = 12;
+    let copy_right = (width - PLAYER_SIDE_PADDING).max(PLAYER_SIDE_PADDING + copy_width);
+    let copy_left = copy_right - copy_width;
+    let export_right = copy_left - button_gap;
+    let export_left = export_right - export_width;
+    let play_rect = (
+        PLAYER_SIDE_PADDING,
+        button_top,
+        PLAYER_SIDE_PADDING + 44,
+        button_bottom,
+    );
+    let export_rect = (export_left, button_top, export_right, button_bottom);
+    let copy_rect = (copy_left, button_top, copy_right, button_bottom);
+    (play_rect, export_rect, copy_rect)
+}
 
 fn inside(point: ScreenPoint, rect: (i32, i32, i32, i32)) -> bool {
     point.x >= rect.0 && point.x < rect.2 && point.y >= rect.1 && point.y < rect.3

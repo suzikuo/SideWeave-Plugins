@@ -27,7 +27,7 @@ use windows_sys::Win32::Graphics::Gdi::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect;
 
-const PLAYER_ACCENT_COLOR: u32 = 0x0016_6f_f7;
+const PLAYER_ACCENT_COLOR: u32 = 0x00f7_6f_16;
 
 pub(super) struct GdiSurface {
     pub(super) dc: HDC,
@@ -707,11 +707,13 @@ unsafe fn draw_recording_player(
     state: &UiState,
 ) {
     let status = state.recording.snapshot();
-    draw_recording_player_header(dc, width, editor, state, &status);
+    draw_recording_player_header(dc, width, editor, &status);
 
     let footer_height = super::editor::PLAYER_FOOTER_HEIGHT;
     let footer_top = height - footer_height;
     let timeline_y = footer_top - super::editor::PLAYER_TIMELINE_GAP;
+    let (play_rect, export_rect, copy_rect) =
+        super::editor::recording_player_button_rects(width, height);
     let left = super::editor::PLAYER_SIDE_PADDING;
     let right = (width - super::editor::PLAYER_SIDE_PADDING).max(left + 1);
     let timeline_frame_count = status.timeline_frame_count();
@@ -724,30 +726,34 @@ unsafe fn draw_recording_player(
     .clamp(0.0, 1.0);
     let knob_x = left + ((right - left) as f64 * progress).round() as i32;
 
-    let track = CreateSolidBrush(0x00545a63);
+    let track = CreateSolidBrush(0x00d2d8df);
     let played = CreateSolidBrush(PLAYER_ACCENT_COLOR);
-    let track_rect = RECT {
+    let old_brush = SelectObject(dc, track as HGDIOBJ);
+    let old_pen = SelectObject(
+        dc,
+        GetStockObject(windows_sys::Win32::Graphics::Gdi::NULL_PEN as i32),
+    );
+    RoundRect(dc, left, timeline_y - 3, right, timeline_y + 3, 6, 6);
+    SelectObject(dc, played as HGDIOBJ);
+    RoundRect(
+        dc,
         left,
-        top: timeline_y - 2,
-        right,
-        bottom: timeline_y + 2,
-    };
-    let played_rect = RECT {
-        left,
-        top: timeline_y - 2,
-        right: knob_x.max(left + 1),
-        bottom: timeline_y + 2,
-    };
-    FillRect(dc, &track_rect, track);
-    FillRect(dc, &played_rect, played);
+        timeline_y - 3,
+        knob_x.max(left + 6),
+        timeline_y + 3,
+        6,
+        6,
+    );
+    SelectObject(dc, old_pen);
+    SelectObject(dc, old_brush);
     DeleteObject(track as HGDIOBJ);
     DeleteObject(played as HGDIOBJ);
 
     let knob_brush = CreateSolidBrush(PLAYER_ACCENT_COLOR);
-    let knob_pen = CreatePen(0, 1, 0x00ffffff);
+    let knob_pen = CreatePen(0, 2, 0x00ffffff);
     let old_brush = SelectObject(dc, knob_brush as HGDIOBJ);
     let old_pen = SelectObject(dc, knob_pen as HGDIOBJ);
-    Ellipse(dc, knob_x - 6, timeline_y - 6, knob_x + 6, timeline_y + 6);
+    Ellipse(dc, knob_x - 7, timeline_y - 7, knob_x + 7, timeline_y + 7);
     SelectObject(dc, old_brush);
     SelectObject(dc, old_pen);
     DeleteObject(knob_brush as HGDIOBJ);
@@ -772,44 +778,61 @@ unsafe fn draw_recording_player(
     FillRect(dc, &divider_rect, divider);
     DeleteObject(divider as HGDIOBJ);
 
-    let play_brush = CreateSolidBrush(0x00f3f5f8);
-    let play_pen = CreatePen(0, 1, 0x00e2e6ec);
+    let play_brush = CreateSolidBrush(0x00ffffff);
+    let play_pen = CreatePen(0, 1, 0x00dfe4eb);
     let old_brush = SelectObject(dc, play_brush as HGDIOBJ);
     let old_pen = SelectObject(dc, play_pen as HGDIOBJ);
-    RoundRect(dc, 16, footer_top + 15, 58, height - 9, 9, 9);
+    RoundRect(
+        dc,
+        play_rect.0,
+        play_rect.1,
+        play_rect.2,
+        play_rect.3,
+        10,
+        10,
+    );
     SelectObject(dc, old_brush);
     SelectObject(dc, old_pen);
     DeleteObject(play_brush as HGDIOBJ);
     DeleteObject(play_pen as HGDIOBJ);
+    let play_center = (play_rect.0 + play_rect.2) / 2;
+    let play_icon_color = CreateSolidBrush(PLAYER_ACCENT_COLOR);
     if editor.playing {
-        let pause = CreateSolidBrush(0x002a3038);
+        let pause = play_icon_color;
         let first = RECT {
-            left: 30,
-            top: footer_top + 23,
-            right: 35,
-            bottom: footer_top + 39,
+            left: play_center - 7,
+            top: play_rect.1 + 12,
+            right: play_center - 2,
+            bottom: play_rect.3 - 12,
         };
         let second = RECT {
-            left: 39,
-            top: footer_top + 23,
-            right: 44,
-            bottom: footer_top + 39,
+            left: play_center + 2,
+            top: play_rect.1 + 12,
+            right: play_center + 7,
+            bottom: play_rect.3 - 12,
         };
         FillRect(dc, &first, pause);
         FillRect(dc, &second, pause);
-        DeleteObject(pause as HGDIOBJ);
     } else {
         let points = [
-            POINT { x: 31, y: footer_top + 21 },
-            POINT { x: 31, y: footer_top + 41 },
-            POINT { x: 45, y: footer_top + 31 },
+            POINT {
+                x: play_center - 5,
+                y: play_rect.1 + 11,
+            },
+            POINT {
+                x: play_center - 5,
+                y: play_rect.3 - 11,
+            },
+            POINT {
+                x: play_center + 8,
+                y: (play_rect.1 + play_rect.3) / 2,
+            },
         ];
-        let play = CreateSolidBrush(0x002a3038);
-        let old = SelectObject(dc, play as HGDIOBJ);
+        let old = SelectObject(dc, play_icon_color as HGDIOBJ);
         Polygon(dc, points.as_ptr(), points.len() as i32);
         SelectObject(dc, old);
-        DeleteObject(play as HGDIOBJ);
     }
+    DeleteObject(play_icon_color as HGDIOBJ);
 
     if status.phase != "exporting" {
         let fps = status.fps.max(1) as u64;
@@ -825,20 +848,23 @@ unsafe fn draw_recording_player(
         let export_notice = status.message.as_deref().filter(|message| {
             message.starts_with("导出失败：") || message.starts_with("导出完成：")
         });
+        let timestamp_color = match export_notice {
+            Some(message) if message.starts_with("导出失败：") => 0x003b3bcf,
+            Some(_) => 0x00428a31,
+            None => 0x00635b50,
+        };
         draw_player_text(
             dc,
-            76,
+            play_rect.2 + 16,
             footer_top + 12,
-            270,
+            export_rect.0 - 14,
             height - 8,
             export_notice.unwrap_or(&timestamp),
-            if export_notice.is_some() { 0x00b34326 } else { 0x00635b50 },
+            timestamp_color,
             0,
         );
     }
 
-    let export_rect = (width - 286, footer_top + 10, width - 176, height - 10);
-    let copy_rect = (width - 166, footer_top + 10, width - 16, height - 10);
     if status.phase == "exporting" {
         let progress_label = format!(
             "{} {}%",
@@ -847,9 +873,9 @@ unsafe fn draw_recording_player(
         );
         draw_player_text(
             dc,
-            76,
+            play_rect.2 + 16,
             footer_top + 6,
-            width - 300,
+            export_rect.0 - 14,
             footer_top + 31,
             &progress_label,
             0x00635b50,
@@ -857,9 +883,9 @@ unsafe fn draw_recording_player(
         );
         draw_player_progress_bar(
             dc,
-            76,
+            play_rect.2 + 16,
             footer_top + 39,
-            width - 300,
+            export_rect.0 - 14,
             footer_top + 47,
             status.progress_percent,
         );
@@ -874,7 +900,6 @@ unsafe fn draw_recording_player_header(
     dc: HDC,
     width: i32,
     editor: &super::editor::EditorCanvas,
-    state: &UiState,
     status: &crate::recorder::RecordingStatus,
 ) {
     let header_height = super::editor::RECORDING_PREVIEW_HEADER_HEIGHT;
@@ -893,6 +918,15 @@ unsafe fn draw_recording_player_header(
     Ellipse(dc, 24, 22, 36, 34);
     SelectObject(dc, old_accent);
     DeleteObject(accent as HGDIOBJ);
+    let header_accent = CreateSolidBrush(PLAYER_ACCENT_COLOR);
+    let accent_rect = RECT {
+        left: 0,
+        top: header_height - 2,
+        right: width,
+        bottom: header_height,
+    };
+    FillRect(dc, &accent_rect, header_accent);
+    DeleteObject(header_accent as HGDIOBJ);
 
     let metadata = format!(
         "{}  ·  {} FPS  ·  {} 帧",
@@ -901,16 +935,7 @@ unsafe fn draw_recording_player_header(
         status.frame_count
     );
     draw_player_text(dc, 48, 8, width - 160, 34, "录制预览", 0x00f5f7fa, 0);
-    draw_player_text(
-        dc,
-        48,
-        34,
-        width - 160,
-        56,
-        &format!("录制源视频  ·  {metadata}"),
-        0x00b8c0ca,
-        0,
-    );
+    draw_player_text(dc, 48, 34, width - 160, 56, &metadata, 0x00b8c0ca, 0);
 
     let badge = RECT {
         left: width - 132,
@@ -959,13 +984,14 @@ unsafe fn draw_player_progress_bar(
         return;
     }
     let track_brush = CreateSolidBrush(0x00e4e7ec);
-    let track = RECT {
-        left,
-        top,
-        right,
-        bottom,
-    };
-    FillRect(dc, &track, track_brush);
+    let old_brush = SelectObject(dc, track_brush as HGDIOBJ);
+    let old_pen = SelectObject(
+        dc,
+        GetStockObject(windows_sys::Win32::Graphics::Gdi::NULL_PEN as i32),
+    );
+    RoundRect(dc, left, top, right, bottom, bottom - top, bottom - top);
+    SelectObject(dc, old_pen);
+    SelectObject(dc, old_brush);
     DeleteObject(track_brush as HGDIOBJ);
 
     let filled_right = left + ((right - left) * i32::from(percent.min(100)) / 100);
@@ -973,13 +999,22 @@ unsafe fn draw_player_progress_bar(
         return;
     }
     let progress_brush = CreateSolidBrush(PLAYER_ACCENT_COLOR);
-    let progress = RECT {
+    let old_brush = SelectObject(dc, progress_brush as HGDIOBJ);
+    let old_pen = SelectObject(
+        dc,
+        GetStockObject(windows_sys::Win32::Graphics::Gdi::NULL_PEN as i32),
+    );
+    RoundRect(
+        dc,
         left,
         top,
-        right: filled_right,
+        filled_right,
         bottom,
-    };
-    FillRect(dc, &progress, progress_brush);
+        bottom - top,
+        bottom - top,
+    );
+    SelectObject(dc, old_pen);
+    SelectObject(dc, old_brush);
     DeleteObject(progress_brush as HGDIOBJ);
 }
 

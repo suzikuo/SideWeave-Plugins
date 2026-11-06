@@ -23,7 +23,7 @@ use std::ptr::null_mut;
 use std::sync::OnceLock;
 use windows_sys::Win32::Foundation::{POINT, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
-    CreatePen, CreateSolidBrush, DeleteObject, DrawTextW, Ellipse, GetStockObject,
+    CreatePen, CreateSolidBrush, DeleteObject, DrawTextW, Ellipse, FillRect, GetStockObject,
     LineTo, MoveToEx, Polygon, RoundRect, SelectObject, SetBkMode, SetTextColor, HDC, HGDIOBJ,
 };
 use windows_sys::Win32::Graphics::GdiPlus::{
@@ -342,8 +342,9 @@ pub(super) unsafe fn draw_toolbar_gdi(
     can_undo: bool,
     can_redo: bool,
 ) {
-    // One soft shadow and a light outline keep attention on the selected area.
-    let shadow = CreateSolidBrush(0x00e9e9e9);
+    // Use a slightly stronger neutral shadow so the floating bar stays legible
+    // over bright screenshots without making the panel feel heavy.
+    let shadow = CreateSolidBrush(0x00d9dfe7);
     let old_shadow = SelectObject(dc, shadow as HGDIOBJ);
     let old_shadow_pen = SelectObject(
         dc,
@@ -362,7 +363,7 @@ pub(super) unsafe fn draw_toolbar_gdi(
     SelectObject(dc, old_shadow);
     DeleteObject(shadow as HGDIOBJ);
 
-    let outer_pen = CreatePen(0, 1, 0x00e1e3e6);
+    let outer_pen = CreatePen(0, 1, 0x00d8dee7);
     let outer_brush = CreateSolidBrush(0x00ffffff);
     let old_pen = SelectObject(dc, outer_pen as HGDIOBJ);
     let old_brush = SelectObject(dc, outer_brush as HGDIOBJ);
@@ -422,9 +423,8 @@ pub(super) unsafe fn draw_toolbar_gdi(
                     };
                     (Some(fill), Some(border), 0x005252d2)
                 }
-                _ if is_active || is_hovered => {
-                    (Some(0x00f1f1f1), None, 0x0034312e)
-                }
+                _ if is_active => (Some(0x00fff3e8), Some(0x00f76f16), 0x00f76f16),
+                _ if is_hovered => (Some(0x00f5f3f2), Some(0x00e4e8ed), 0x0034312e),
                 _ => (None, None, 0x0034312e),
             }
         };
@@ -447,6 +447,19 @@ pub(super) unsafe fn draw_toolbar_gdi(
             SelectObject(dc, old_p);
             DeleteObject(fill as HGDIOBJ);
             DeleteObject(border as HGDIOBJ);
+        }
+
+        if is_active && !disabled && !matches!(action, ToolbarAction::Finish | ToolbarAction::Cancel)
+        {
+            let indicator = CreateSolidBrush(0x00f76f16);
+            let indicator_rect = RECT {
+                left: bx + 13,
+                top: by + TOOLBAR_BUTTON_HEIGHT - 7,
+                right: bx + TOOLBAR_BUTTON_WIDTH - 13,
+                bottom: by + TOOLBAR_BUTTON_HEIGHT - 5,
+            };
+            FillRect(dc, &indicator_rect, indicator);
+            DeleteObject(indicator as HGDIOBJ);
         }
 
         let Some(icon_index) = toolbar_icon_index(action) else {
