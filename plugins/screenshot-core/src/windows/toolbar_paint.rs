@@ -1,164 +1,1023 @@
-use super::draw::{draw_ellipse_border, draw_line_gdi_style, gdi_color};
-use super::{wide, DEFAULT_GUI_FONT};
-use crate::model::{ScreenPoint, ScreenRect, StrokeStyle};
+//! SnowAir-grade GDI+ anti-aliased floating toolbar, secondary property bar,
+//! tooltips, dropdown menus, and uniform DPI-scaled monochrome vector icon renderer
+//! (matching Dark, Light & Custom themes and 1:1 synchronized with the Settings preview).
+
+use super::wide;
+use crate::model::{ScreenRect, StrokeStyle};
 use crate::scroll::MatchAxis;
+use crate::theme::ThemePalette;
 use crate::toolbar::{
-    button_origin as toolbar_button_origin, layout_for_item_count, layout_for_screen_width,
-    toolbar_icon_index, SecondaryBarItem, SecondaryBarLayout, Tool, ToolbarAction, ToolbarLayout,
-    ToolbarMenu, RecordingSetupLayout, COLOR_SWATCHES, MOSAIC_SIZES,
-    STROKE_SIZES, TEXT_SIZES, TOOLBAR_BUTTON_HEIGHT, TOOLBAR_BUTTON_WIDTH,
+    button_origin as toolbar_button_origin, layout_for_item_count_scaled, variants_for_tool,
+    RecordingSetupLayout, SecondaryBarItem, SecondaryBarLayout, Tool, ToolbarAction, ToolbarLayout,
+    ToolbarMenu, ToolbarMenuLayout, COLOR_SWATCHES, MOSAIC_SIZES, STROKE_SIZES, TEXT_SIZES,
 };
 
-pub(super) const SCROLL_TOOLBAR_ACTIONS: [ToolbarAction; 7] = [
-    ToolbarAction::Copy,
-    ToolbarAction::Ocr,
-    ToolbarAction::Save,
-    ToolbarAction::Pin,
+use std::ptr::null_mut;
+use std::sync::OnceLock;
+use windows_sys::Win32::Foundation::RECT;
+use windows_sys::Win32::Graphics::Gdi::{
+    CreateFontW, DeleteObject, DrawTextW, SelectObject, SetBkMode, SetTextColor, CLEARTYPE_QUALITY,
+    CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH, FF_DONTCARE, FW_MEDIUM, FW_NORMAL, HDC,
+    HFONT, HGDIOBJ, OUT_DEFAULT_PRECIS,
+};
+use windows_sys::Win32::Graphics::GdiPlus::{
+    DashCapRound, FillModeAlternate, GdipAddPathArc, GdipClosePathFigure, GdipCreateFromHDC,
+    GdipCreatePath, GdipCreatePen1, GdipCreateSolidFill, GdipDeleteBrush, GdipDeleteGraphics,
+    GdipDeletePath, GdipDeletePen, GdipDrawArc, GdipDrawBezier, GdipDrawEllipse, GdipDrawLine,
+    GdipDrawPath, GdipDrawRectangle, GdipFillEllipse, GdipFillPath, GdipFillRectangle,
+    GdipSetPenLineCap197819, GdipSetPenLineJoin, GdipSetPixelOffsetMode, GdipSetSmoothingMode,
+    GdiplusStartup, GdiplusStartupInput, GpBrush, GpGraphics, GpPath, GpPen, GpSolidFill,
+    LineCapRound, LineJoinRound, PixelOffsetModeHalf, SmoothingModeAntiAlias8x8, UnitPixel,
+};
+
+pub(super) const SCROLL_TOOLBAR_ACTIONS: [ToolbarAction; 8] = [
+    ToolbarAction::MoveToolbar,
+    ToolbarAction::ScrollPauseToggle,
     ToolbarAction::Edit,
+    ToolbarAction::Ocr,
+    ToolbarAction::Pin,
+    ToolbarAction::Save,
     ToolbarAction::Cancel,
     ToolbarAction::Finish,
 ];
 
-use std::ptr::null_mut;
-use std::sync::OnceLock;
-use windows_sys::Win32::Foundation::{POINT, RECT};
-use windows_sys::Win32::Graphics::Gdi::{
-    CreatePen, CreateSolidBrush, DeleteObject, DrawTextW, Ellipse, FillRect, GetStockObject,
-    LineTo, MoveToEx, Polygon, RoundRect, SelectObject, SetBkMode, SetTextColor, HDC, HGDIOBJ,
-};
-use windows_sys::Win32::Graphics::GdiPlus::{
-    GdipCreateFromHDC, GdipCreatePen1, GdipCreateSolidFill, GdipDeleteBrush, GdipDeleteGraphics,
-    GdipDeletePen, GdipDrawArc, GdipDrawBezier, GdipDrawEllipse, GdipDrawLine,
-    GdipFillEllipse, GdipFillRectangle, GdipSetPenLineCap197819, GdipSetPenLineJoin,
-    GdipSetPixelOffsetMode, GdipSetSmoothingMode, GdiplusStartup, GdiplusStartupInput,
-    GpBrush, GpGraphics, GpPen, GpSolidFill, DashCapRound, LineCapRound, LineJoinRound,
-    PixelOffsetModeHalf, SmoothingModeAntiAlias8x8, UnitPixel,
-};
+pub(super) fn scroll_toolbar_layout() -> ToolbarLayout {
+    layout_for_item_count_scaled(
+        SCROLL_TOOLBAR_ACTIONS.len(),
+        i32::MAX,
+        crate::theme::system_dpi_scale(),
+    )
+}
 
-pub(crate) fn toolbar_layout(screen: ScreenRect) -> ToolbarLayout {
-    layout_for_screen_width(screen.width() as i32)
+pub(super) fn scroll_toolbar_action(index: usize) -> Option<ToolbarAction> {
+    SCROLL_TOOLBAR_ACTIONS.get(index).copied()
+}
+
+pub(crate) fn toolbar_layout(item_count: usize, screen: ScreenRect) -> ToolbarLayout {
+    layout_for_item_count_scaled(item_count, screen.width() as i32, 1.0)
+}
+
+pub(crate) fn toolbar_layout_scaled(
+    item_count: usize,
+    screen: ScreenRect,
+    scale: f32,
+) -> ToolbarLayout {
+    layout_for_item_count_scaled(item_count, screen.width() as i32, scale)
+}
+
+pub(crate) fn toolbar_position_for_layout(
+    selection: ScreenRect,
+    screen: ScreenRect,
+    layout: ToolbarLayout,
+) -> (i32, i32) {
+    let gap = (10.0 * layout.scale()).round() as i32;
+    let mut x = selection.left;
+    if x + layout.width > screen.right - 8 {
+        x = (selection.right - layout.width).max(screen.left + 8);
+    }
+    x = x.clamp(
+        screen.left + 8,
+        (screen.right - layout.width - 8).max(screen.left + 8),
+    );
+    let mut y = selection.bottom + gap;
+    if y + layout.height > screen.bottom - 8 {
+        y = (selection.top - layout.height - gap).max(screen.top + 8);
+    }
+    (x, y)
+}
+
+pub(super) fn scroll_toolbar_position(selection: ScreenRect, screen: ScreenRect) -> (i32, i32) {
+    toolbar_position_for_layout(selection, screen, scroll_toolbar_layout())
+}
+
+pub(super) fn ensure_gdiplus() {
+    static INIT: OnceLock<()> = OnceLock::new();
+    INIT.get_or_init(|| unsafe {
+        let mut token = 0usize;
+        let input = GdiplusStartupInput {
+            GdiplusVersion: 1,
+            DebugEventCallback: 0,
+            SuppressBackgroundThread: 0,
+            SuppressExternalCodecs: 0,
+        };
+        let _ = GdiplusStartup(&mut token, &input, null_mut());
+    });
+}
+
+pub(super) fn argb(c: [u8; 4], alpha_override: Option<u8>) -> u32 {
+    let a = u32::from(alpha_override.unwrap_or(c[3]));
+    (a << 24) | (u32::from(c[0]) << 16) | (u32::from(c[1]) << 8) | u32::from(c[2])
+}
+
+pub(super) unsafe fn create_ui_font(dp_size: f32, scale: f32, medium: bool) -> HFONT {
+    let px = (dp_size * scale).round().max(11.0) as i32;
+    CreateFontW(
+        -px,
+        0,
+        0,
+        0,
+        if medium { FW_MEDIUM } else { FW_NORMAL } as i32,
+        0,
+        0,
+        0,
+        DEFAULT_CHARSET as u32,
+        OUT_DEFAULT_PRECIS as u32,
+        CLIP_DEFAULT_PRECIS as u32,
+        CLEARTYPE_QUALITY as u32,
+        (DEFAULT_PITCH | FF_DONTCARE) as u32,
+        wide("Microsoft YaHei UI").as_ptr(),
+    )
+}
+
+unsafe fn build_round_rect_path(x: f32, y: f32, w: f32, h: f32, r: f32) -> *mut GpPath {
+    let mut path: *mut GpPath = null_mut();
+    if GdipCreatePath(FillModeAlternate, &mut path) != 0 || path.is_null() {
+        return null_mut();
+    }
+    let rad = r.min(w * 0.5).min(h * 0.5).max(0.5);
+    let d = rad * 2.0;
+    GdipAddPathArc(path, x, y, d, d, 180.0, 90.0);
+    GdipAddPathArc(path, x + w - d, y, d, d, 270.0, 90.0);
+    GdipAddPathArc(path, x + w - d, y + h - d, d, d, 0.0, 90.0);
+    GdipAddPathArc(path, x, y + h - d, d, d, 90.0, 90.0);
+    GdipClosePathFigure(path);
+    path
+}
+
+pub(super) unsafe fn draw_round_rect_gdip(
+    g: *mut GpGraphics,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    r: f32,
+    fill_argb: Option<u32>,
+    stroke_argb: Option<(u32, f32)>,
+) {
+    let path = build_round_rect_path(x, y, w, h, r);
+    if path.is_null() {
+        return;
+    }
+    if let Some(fill_c) = fill_argb {
+        let mut brush: *mut GpSolidFill = null_mut();
+        if GdipCreateSolidFill(fill_c, &mut brush) == 0 && !brush.is_null() {
+            GdipFillPath(g, brush as *mut GpBrush, path);
+            GdipDeleteBrush(brush as *mut GpBrush);
+        }
+    }
+    if let Some((stroke_c, stroke_w)) = stroke_argb {
+        let mut pen: *mut GpPen = null_mut();
+        if GdipCreatePen1(stroke_c, stroke_w, UnitPixel, &mut pen) == 0 && !pen.is_null() {
+            GdipDrawPath(g, pen, path);
+            GdipDeletePen(pen);
+        }
+    }
+    GdipDeletePath(path);
+}
+
+pub(super) unsafe fn draw_soft_shadow_gdip(
+    g: *mut GpGraphics,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    r: f32,
+    scale: f32,
+    is_dark: bool,
+) {
+    let layers: [(f32, f32, u8); 4] = if is_dark {
+        [
+            (4.5 * scale, 4.5 * scale, 14),
+            (3.0 * scale, 3.5 * scale, 22),
+            (1.8 * scale, 2.5 * scale, 32),
+            (0.8 * scale, 1.5 * scale, 44),
+        ]
+    } else {
+        [
+            (4.0 * scale, 4.0 * scale, 8),
+            (2.5 * scale, 3.0 * scale, 14),
+            (1.5 * scale, 2.0 * scale, 20),
+            (0.6 * scale, 1.2 * scale, 26),
+        ]
+    };
+    for (spread, dy, alpha) in layers {
+        let col = (u32::from(alpha) << 24) | 0x0000_0000;
+        draw_round_rect_gdip(
+            g,
+            x - spread,
+            y + dy - spread * 0.35,
+            w + spread * 2.0,
+            h + spread * 1.4,
+            r + spread * 0.6,
+            Some(col),
+            None,
+        );
+    }
+}
+
+/// SnowAir Floating Main Toolbar (100% GDI+ anti-aliased, DPI-scaled, soft shadow, crisp icons)
+#[allow(clippy::too_many_arguments)]
+pub(super) unsafe fn draw_toolbar_gdi(
+    dc: HDC,
+    x: i32,
+    y: i32,
+    layout: ToolbarLayout,
+    actions: &[ToolbarAction],
+    active_tool: Tool,
+    hovered: Option<usize>,
+    can_undo: bool,
+    can_redo: bool,
+    scroll_paused: bool,
+    demo_passthrough: bool,
+    theme: &ThemePalette,
+) {
+    ensure_gdiplus();
+    let mut g: *mut GpGraphics = null_mut();
+    if GdipCreateFromHDC(dc, &mut g) != 0 || g.is_null() {
+        return;
+    }
+    GdipSetSmoothingMode(g, SmoothingModeAntiAlias8x8);
+    GdipSetPixelOffsetMode(g, PixelOffsetModeHalf);
+
+    let s = layout.scale();
+    let fx = x as f32;
+    let fy = y as f32;
+    let fw = layout.width as f32;
+    let fh = layout.height as f32;
+    let outer_r = 12.0 * s;
+
+    // 1. Soft multi-layer elevation shadow
+    draw_soft_shadow_gdip(g, fx, fy, fw, fh, outer_r, s, theme.is_dark);
+
+    // 2. Smooth SnowAir rounded container + crisp subtle 1px border
+    let border_argb = argb(theme.icon, Some(if theme.is_dark { 0x2A } else { 0x26 }));
+    draw_round_rect_gdip(
+        g,
+        fx,
+        fy,
+        fw,
+        fh,
+        outer_r,
+        Some(argb(theme.bg, Some(0xFA))),
+        Some((border_argb, (1.0 * s).max(1.0))),
+    );
+
+    let icon_argb = argb(theme.icon, Some(0xFF));
+    let drag_argb = argb(theme.icon, Some(0x78));
+    let disabled_argb = argb(theme.icon_disabled, Some(0x88));
+    let accent_argb = argb(theme.accent, Some(0xFF));
+    let danger_argb = argb(theme.danger, Some(0xFF));
+    let hover_argb = argb(theme.hover, Some(0xFF));
+    let active_bg_argb = argb(theme.accent, Some(if theme.is_dark { 0x26 } else { 0x1E }));
+    let divider_argb = argb(theme.icon, Some(0x28));
+
+    let mut div_pen: *mut GpPen = null_mut();
+    GdipCreatePen1(divider_argb, (1.0 * s).max(1.0), UnitPixel, &mut div_pen);
+
+    for (pos, &action) in actions.iter().enumerate() {
+        let Some((bx, by)) = toolbar_button_origin((x, y), pos, layout) else {
+            continue;
+        };
+        let cx = bx as f32 + layout.button_w as f32 * 0.5;
+        let cy = by as f32 + layout.button_h as f32 * 0.5;
+
+        // Subtle SnowAir group divider
+        if pos > 0 && (pos == 1 || action.needs_leading_divider()) && !div_pen.is_null() {
+            let sep_x = bx as f32 - 0.5;
+            let half_h = 10.5 * s;
+            GdipDrawLine(g, div_pen, sep_x, cy - half_h, sep_x, cy + half_h);
+        }
+
+        let is_active = action.matches_tool(active_tool)
+            || (action == ToolbarAction::DemoPassThrough && demo_passthrough)
+            || (action == ToolbarAction::ScrollPauseToggle && scroll_paused);
+        let is_hovered = hovered == Some(pos);
+        let disabled = (action == ToolbarAction::Undo && !can_undo)
+            || (action == ToolbarAction::Redo && !can_redo);
+
+        let (fill_opt, draw_col) = if disabled {
+            (None, disabled_argb)
+        } else {
+            match action {
+                ToolbarAction::MoveToolbar => (is_hovered.then_some(hover_argb), drag_argb),
+                ToolbarAction::Finish => (is_hovered.then_some(hover_argb), accent_argb),
+                ToolbarAction::Cancel => (is_hovered.then_some(hover_argb), danger_argb),
+                _ if is_active => (Some(active_bg_argb), accent_argb),
+                _ if is_hovered => (Some(hover_argb), icon_argb),
+                _ => (None, icon_argb),
+            }
+        };
+
+        if let Some(fill_col) = fill_opt {
+            let inset = 3.0 * s;
+            draw_round_rect_gdip(
+                g,
+                bx as f32 + inset,
+                by as f32 + inset,
+                layout.button_w as f32 - inset * 2.0,
+                layout.button_h as f32 - inset * 2.0,
+                8.5 * s,
+                Some(fill_col),
+                None,
+            );
+        }
+
+        // Sleek SnowAir active pill indicator bar at bottom center
+        if is_active
+            && !disabled
+            && !matches!(
+                action,
+                ToolbarAction::Finish | ToolbarAction::Cancel | ToolbarAction::MoveToolbar
+            )
+        {
+            let ind_w = 10.0 * s;
+            let ind_h = 2.6 * s;
+            draw_round_rect_gdip(
+                g,
+                cx - ind_w * 0.5,
+                by as f32 + layout.button_h as f32 - ind_h - 3.0 * s,
+                ind_w,
+                ind_h,
+                ind_h * 0.5,
+                Some(accent_argb),
+                None,
+            );
+        }
+
+        // Render active sub-tool variant icon when grouped
+        let visual_action = match action {
+            ToolbarAction::Tool(Tool::Rectangle) if active_tool.is_shape_group() => {
+                ToolbarAction::Tool(active_tool)
+            }
+            ToolbarAction::Tool(Tool::Arrow) if active_tool.is_arrow_group() => {
+                ToolbarAction::Tool(active_tool)
+            }
+            ToolbarAction::Tool(Tool::Pen) if active_tool.is_pen_group() => {
+                ToolbarAction::Tool(active_tool)
+            }
+            ToolbarAction::Tool(Tool::Mosaic) if active_tool.is_effect_group() => {
+                ToolbarAction::Tool(active_tool)
+            }
+            other => other,
+        };
+        draw_action_icon_on_graphics(g, visual_action, cx, cy, s, draw_col, scroll_paused);
+    }
+
+    if !div_pen.is_null() {
+        GdipDeletePen(div_pen);
+    }
+    GdipDeleteGraphics(g);
+}
+
+/// SnowAir Secondary Property Bar (Variants + Filled/Dashed/Rounded + 4 Sizes + 7 Square Swatches)
+#[allow(clippy::too_many_arguments)]
+pub(super) unsafe fn draw_secondary_bar_gdi(
+    dc: HDC,
+    layout: SecondaryBarLayout,
+    active_tool: Tool,
+    hovered: Option<SecondaryBarItem>,
+    annotation_color: [u8; 4],
+    stroke_width: u32,
+    brush_size: u32,
+    text_size: u32,
+    stroke_style: StrokeStyle,
+    shape_filled: bool,
+    shape_rounded: bool,
+    theme: &ThemePalette,
+) {
+    ensure_gdiplus();
+    let mut g: *mut GpGraphics = null_mut();
+    if GdipCreateFromHDC(dc, &mut g) != 0 || g.is_null() {
+        return;
+    }
+    GdipSetSmoothingMode(g, SmoothingModeAntiAlias8x8);
+    GdipSetPixelOffsetMode(g, PixelOffsetModeHalf);
+
+    let s = layout.scale();
+    let outer_r = 11.0 * s;
+
+    draw_soft_shadow_gdip(
+        g,
+        layout.left as f32,
+        layout.top as f32,
+        layout.width as f32,
+        layout.height as f32,
+        outer_r,
+        s,
+        theme.is_dark,
+    );
+
+    let border_argb = argb(theme.icon, Some(if theme.is_dark { 0x2A } else { 0x26 }));
+    draw_round_rect_gdip(
+        g,
+        layout.left as f32,
+        layout.top as f32,
+        layout.width as f32,
+        layout.height as f32,
+        outer_r,
+        Some(argb(theme.bg, Some(0xFA))),
+        Some((border_argb, (1.0 * s).max(1.0))),
+    );
+
+    let icon_argb = argb(theme.icon, Some(0xFF));
+    let accent_argb = argb(theme.accent, Some(0xFF));
+    let hover_argb = argb(theme.hover, Some(0xFF));
+    let active_bg_argb = argb(theme.accent, Some(if theme.is_dark { 0x26 } else { 0x1E }));
+    let divider_argb = argb(theme.icon, Some(0x28));
+
+    // 1. Sub-tool variants
+    let variants = variants_for_tool(active_tool);
+    for (i, &variant) in variants.iter().enumerate() {
+        let Some((l, t, r, b)) = layout.variant_rect(i) else {
+            continue;
+        };
+        let is_sel = variant == active_tool;
+        let is_hov = hovered == Some(SecondaryBarItem::Variant(variant));
+        if is_sel || is_hov {
+            draw_round_rect_gdip(
+                g,
+                l as f32 + 2.0 * s,
+                t as f32 + 1.0 * s,
+                (r - l) as f32 - 4.0 * s,
+                (b - t) as f32 - 2.0 * s,
+                8.0 * s,
+                Some(if is_sel { active_bg_argb } else { hover_argb }),
+                None,
+            );
+        }
+        draw_action_icon_on_graphics(
+            g,
+            ToolbarAction::Tool(variant),
+            (l + r) as f32 * 0.5,
+            (t + b) as f32 * 0.5,
+            s * 0.92,
+            if is_sel { accent_argb } else { icon_argb },
+            false,
+        );
+    }
+
+    // 2. Style toggles (Filled / Dashed / Rounded)
+    if layout.has_styles {
+        let items: Vec<(SecondaryBarItem, bool)> = if active_tool.is_shape_group() {
+            vec![
+                (SecondaryBarItem::ToggleFilled, shape_filled),
+                (
+                    SecondaryBarItem::ToggleDashed,
+                    stroke_style == StrokeStyle::Dashed,
+                ),
+                (SecondaryBarItem::ToggleRounded, shape_rounded),
+            ]
+        } else {
+            vec![(
+                SecondaryBarItem::ToggleDashed,
+                stroke_style == StrokeStyle::Dashed,
+            )]
+        };
+        for (idx, (item, is_on)) in items.into_iter().enumerate() {
+            let Some((l, t, r, b)) = layout.style_rect(idx) else {
+                continue;
+            };
+            let is_hov = hovered == Some(item);
+            if is_on || is_hov {
+                draw_round_rect_gdip(
+                    g,
+                    l as f32 + 2.0 * s,
+                    t as f32 + 1.0 * s,
+                    (r - l) as f32 - 4.0 * s,
+                    (b - t) as f32 - 2.0 * s,
+                    7.5 * s,
+                    Some(if is_on { active_bg_argb } else { hover_argb }),
+                    None,
+                );
+            }
+            let cx = (l + r) as f32 * 0.5;
+            let cy = (t + b) as f32 * 0.5;
+            let col = if is_on { accent_argb } else { icon_argb };
+            let mut pen: *mut GpPen = null_mut();
+            GdipCreatePen1(col, 1.8 * s, UnitPixel, &mut pen);
+            if !pen.is_null() {
+                GdipSetPenLineCap197819(pen, LineCapRound, LineCapRound, DashCapRound);
+            }
+            match item {
+                SecondaryBarItem::ToggleFilled => {
+                    draw_round_rect_gdip(
+                        g,
+                        cx - 7.0 * s,
+                        cy - 7.0 * s,
+                        14.0 * s,
+                        14.0 * s,
+                        3.0 * s,
+                        Some(col),
+                        None,
+                    );
+                }
+                SecondaryBarItem::ToggleDashed => {
+                    if !pen.is_null() {
+                        GdipDrawLine(g, pen, cx - 7.5 * s, cy, cx - 3.5 * s, cy);
+                        GdipDrawLine(g, pen, cx - 1.5 * s, cy, cx + 1.5 * s, cy);
+                        GdipDrawLine(g, pen, cx + 3.5 * s, cy, cx + 7.5 * s, cy);
+                    }
+                }
+                SecondaryBarItem::ToggleRounded => {
+                    draw_round_rect_gdip(
+                        g,
+                        cx - 7.0 * s,
+                        cy - 7.0 * s,
+                        14.0 * s,
+                        14.0 * s,
+                        5.5 * s,
+                        None,
+                        Some((col, 1.8 * s)),
+                    );
+                }
+                _ => {}
+            }
+            if !pen.is_null() {
+                GdipDeletePen(pen);
+            }
+        }
+    }
+
+    // 3. Size dots (4 stepped circles)
+    if layout.has_size {
+        let selected_idx = if active_tool == Tool::Text {
+            TEXT_SIZES
+                .iter()
+                .position(|&v| v == text_size)
+                .unwrap_or(1)
+        } else if matches!(active_tool, Tool::Mosaic | Tool::Patina) {
+            MOSAIC_SIZES
+                .iter()
+                .position(|&v| v == brush_size)
+                .unwrap_or(1)
+        } else {
+            STROKE_SIZES
+                .iter()
+                .position(|&v| v == stroke_width)
+                .unwrap_or(1)
+        };
+        let radii = [2.6f32, 4.2, 5.8, 7.6];
+        for (i, r_dp) in radii.into_iter().enumerate() {
+            let Some((l, t, r, b)) = layout.size_rect(i) else {
+                continue;
+            };
+            let is_sel = i == selected_idx;
+            let is_hov = hovered == Some(SecondaryBarItem::Size(i));
+            if is_sel || is_hov {
+                draw_round_rect_gdip(
+                    g,
+                    l as f32 + 2.0 * s,
+                    t as f32 + 2.0 * s,
+                    (r - l) as f32 - 4.0 * s,
+                    (b - t) as f32 - 4.0 * s,
+                    7.5 * s,
+                    Some(if is_sel { active_bg_argb } else { hover_argb }),
+                    None,
+                );
+            }
+            let cx = (l + r) as f32 * 0.5;
+            let cy = (t + b) as f32 * 0.5;
+            let rad = r_dp * s;
+            let mut br: *mut GpSolidFill = null_mut();
+            if GdipCreateSolidFill(if is_sel { accent_argb } else { icon_argb }, &mut br) == 0
+                && !br.is_null()
+            {
+                GdipFillEllipse(
+                    g,
+                    br as *mut GpBrush,
+                    cx - rad,
+                    cy - rad,
+                    rad * 2.0,
+                    rad * 2.0,
+                );
+                GdipDeleteBrush(br as *mut GpBrush);
+            }
+        }
+    }
+
+    // 4. SnowAir 7 rounded-square color swatches (matches SnowAir screenshot!)
+    if layout.has_color {
+        for (i, &sw) in COLOR_SWATCHES.iter().enumerate() {
+            let Some((l, t, r, b)) = layout.color_rect(i) else {
+                continue;
+            };
+            let is_sel =
+                sw[0] == annotation_color[0] && sw[1] == annotation_color[1] && sw[2] == annotation_color[2];
+            let is_hov = hovered == Some(SecondaryBarItem::Color(i));
+            let w = (r - l) as f32;
+            let h = (b - t) as f32;
+            if is_sel || is_hov {
+                let ring = 2.5 * s;
+                draw_round_rect_gdip(
+                    g,
+                    l as f32 - ring,
+                    t as f32 - ring,
+                    w + ring * 2.0,
+                    h + ring * 2.0,
+                    5.5 * s,
+                    None,
+                    Some((if is_sel { accent_argb } else { icon_argb }, 1.8 * s)),
+                );
+            }
+            let sw_border = argb(theme.icon, Some(0x36));
+            draw_round_rect_gdip(
+                g,
+                l as f32,
+                t as f32,
+                w,
+                h,
+                4.0 * s,
+                Some(argb(sw, Some(0xFF))),
+                Some((sw_border, (1.0 * s).max(1.0))),
+            );
+        }
+    }
+
+    // Section dividers
+    let mut div_pen: *mut GpPen = null_mut();
+    if GdipCreatePen1(divider_argb, (1.0 * s).max(1.0), UnitPixel, &mut div_pen) == 0
+        && !div_pen.is_null()
+    {
+        for dx in layout.divider_xs() {
+            let cy = layout.top as f32 + layout.height as f32 * 0.5;
+            GdipDrawLine(g, div_pen, dx as f32, cy - 10.0 * s, dx as f32, cy + 10.0 * s);
+        }
+        GdipDeletePen(div_pen);
+    }
+
+    GdipDeleteGraphics(g);
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) unsafe fn draw_toolbar_tooltip(
+    dc: HDC,
+    x: i32,
+    y: i32,
+    layout: ToolbarLayout,
+    screen_w: i32,
+    screen_h: i32,
+    label: &str,
+    index: usize,
+    theme: &ThemePalette,
+) {
+    let Some((bx, by)) = toolbar_button_origin((x, y), index, layout) else {
+        return;
+    };
+    draw_floating_tooltip(
+        dc,
+        bx + layout.button_w / 2,
+        by,
+        by + layout.button_h,
+        screen_w,
+        screen_h,
+        label,
+        layout.scale(),
+        theme,
+    );
+}
+
+pub(super) unsafe fn draw_secondary_bar_tooltip(
+    dc: HDC,
+    layout: SecondaryBarLayout,
+    screen_w: i32,
+    screen_h: i32,
+    item: SecondaryBarItem,
+    tool: Tool,
+    theme: &ThemePalette,
+) {
+    let label = item.tooltip(tool);
+    if label.is_empty() {
+        return;
+    }
+    let anchor_x = match item {
+        SecondaryBarItem::Variant(v) => variants_for_tool(tool)
+            .iter()
+            .position(|&x| x == v)
+            .and_then(|i| layout.variant_rect(i))
+            .map(|(l, _, r, _)| (l + r) / 2),
+        SecondaryBarItem::ToggleFilled => layout.style_rect(0).map(|(l, _, r, _)| (l + r) / 2),
+        SecondaryBarItem::ToggleDashed => layout
+            .style_rect(if tool.is_shape_group() { 1 } else { 0 })
+            .map(|(l, _, r, _)| (l + r) / 2),
+        SecondaryBarItem::ToggleRounded => layout.style_rect(2).map(|(l, _, r, _)| (l + r) / 2),
+        SecondaryBarItem::Size(i) => layout.size_rect(i).map(|(l, _, r, _)| (l + r) / 2),
+        SecondaryBarItem::Color(i) => layout.color_rect(i).map(|(l, _, r, _)| (l + r) / 2),
+    }
+    .unwrap_or(layout.left + layout.width / 2);
+
+    draw_floating_tooltip(
+        dc,
+        anchor_x,
+        layout.top,
+        layout.top + layout.height,
+        screen_w,
+        screen_h,
+        label,
+        layout.scale(),
+        theme,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn draw_floating_tooltip(
+    dc: HDC,
+    center_x: i32,
+    anchor_top: i32,
+    anchor_bottom: i32,
+    screen_w: i32,
+    screen_h: i32,
+    label: &str,
+    scale: f32,
+    theme: &ThemePalette,
+) {
+    let w = ((label.chars().count() as f32 * 13.0 + 24.0) * scale)
+        .round()
+        .clamp(68.0 * scale, 220.0 * scale) as i32;
+    let h = (28.0 * scale).round() as i32;
+    let gap = (8.0 * scale).round() as i32;
+    let left = (center_x - w / 2).clamp(6, (screen_w - w - 6).max(6));
+    let top = if anchor_bottom + gap + h <= screen_h - 6 {
+        anchor_bottom + gap
+    } else {
+        (anchor_top - h - gap).max(6)
+    };
+
+    ensure_gdiplus();
+    let mut g: *mut GpGraphics = null_mut();
+    if GdipCreateFromHDC(dc, &mut g) == 0 && !g.is_null() {
+        GdipSetSmoothingMode(g, SmoothingModeAntiAlias8x8);
+        let border_argb = argb(theme.icon, Some(0x2A));
+        draw_round_rect_gdip(
+            g,
+            left as f32,
+            top as f32,
+            w as f32,
+            h as f32,
+            7.0 * scale,
+            Some(argb(theme.info_bg, Some(0xF5))),
+            Some((border_argb, (1.0 * scale).max(1.0))),
+        );
+        GdipDeleteGraphics(g);
+    }
+
+    let font = create_ui_font(12.5, scale, false);
+    let old_f = if !font.is_null() {
+        SelectObject(dc, font as HGDIOBJ)
+    } else {
+        null_mut()
+    };
+    SetBkMode(dc, 1);
+    SetTextColor(dc, ThemePalette::colorref(theme.info_text));
+    let text = wide(label);
+    let mut rc = RECT {
+        left: left + 4,
+        top,
+        right: left + w - 4,
+        bottom: top + h,
+    };
+    DrawTextW(dc, text.as_ptr(), -1, &mut rc, 0x1 | 0x4 | 0x20);
+    if !old_f.is_null() {
+        SelectObject(dc, old_f);
+    }
+    if !font.is_null() {
+        DeleteObject(font as HGDIOBJ);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) unsafe fn draw_toolbar_menu_gdi(
+    dc: HDC,
+    layout: ToolbarMenuLayout,
+    menu: ToolbarMenu,
+    scroll_axis: Option<MatchAxis>,
+    hovered: Option<usize>,
+    theme: &ThemePalette,
+) {
+    let scale = crate::theme::system_dpi_scale();
+    ensure_gdiplus();
+    let mut g: *mut GpGraphics = null_mut();
+    if GdipCreateFromHDC(dc, &mut g) == 0 && !g.is_null() {
+        GdipSetSmoothingMode(g, SmoothingModeAntiAlias8x8);
+        draw_soft_shadow_gdip(
+            g,
+            layout.left as f32,
+            layout.top as f32,
+            layout.width as f32,
+            layout.height() as f32,
+            11.0,
+            scale,
+            theme.is_dark,
+        );
+        let border_argb = argb(theme.icon, Some(0x2A));
+        draw_round_rect_gdip(
+            g,
+            layout.left as f32,
+            layout.top as f32,
+            layout.width as f32,
+            layout.height() as f32,
+            11.0,
+            Some(argb(theme.bg, Some(0xFA))),
+            Some((border_argb, 1.0)),
+        );
+        GdipDeleteGraphics(g);
+    }
+
+    let text_c = ThemePalette::colorref(theme.info_text);
+    let muted_c = ThemePalette::colorref(theme.info_muted);
+    let accent_c = ThemePalette::colorref(theme.accent);
+
+    let font = create_ui_font(13.5, 1.0, false);
+    let old_f = if !font.is_null() {
+        SelectObject(dc, font as HGDIOBJ)
+    } else {
+        null_mut()
+    };
+    SetBkMode(dc, 1);
+
+    if layout.header_height > 0 {
+        let title = match menu {
+            ToolbarMenu::RecordingExport => "选择导出格式",
+            _ => "选项",
+        };
+        SetTextColor(dc, muted_c);
+        let t = wide(title);
+        let mut hrc = RECT {
+            left: layout.left + 14,
+            top: layout.top + 8,
+            right: layout.left + layout.width - 14,
+            bottom: layout.top + layout.header_height,
+        };
+        DrawTextW(dc, t.as_ptr(), -1, &mut hrc, 0x4 | 0x20);
+    }
+
+    let items: &[&str] = match menu {
+        ToolbarMenu::ScrollMode => &["纵向滚动长截图", "横向滚动长截图"],
+        ToolbarMenu::Recognition => &["OCR 文字识别", "图片一键翻译", "识别二维码"],
+        ToolbarMenu::RecordingExport => &["导出为 MP4 视频", "导出为 GIF 动图", "导出为 WebP 动图"],
+        ToolbarMenu::DemoBg => &[
+            "透明桌面（实时穿透）",
+            "纯白白板背景",
+            "深黑演播室背景",
+            "护眼黑板绿背景",
+            "加载图片 / PPT 幻灯片",
+        ],
+        ToolbarMenu::RecordingFps => &["开始录制", "取消"],
+    };
+
+    for (i, label) in items.iter().enumerate() {
+        let Some((l, t, r, b)) = layout.item_rect(i) else {
+            continue;
+        };
+        let is_hov = hovered == Some(i);
+        let is_selected = match menu {
+            ToolbarMenu::ScrollMode => {
+                (i == 0 && scroll_axis == Some(MatchAxis::Vertical))
+                    || (i == 1 && scroll_axis == Some(MatchAxis::Horizontal))
+            }
+            _ => false,
+        };
+        if is_hov || is_selected {
+            let mut g2: *mut GpGraphics = null_mut();
+            if GdipCreateFromHDC(dc, &mut g2) == 0 && !g2.is_null() {
+                GdipSetSmoothingMode(g2, SmoothingModeAntiAlias8x8);
+                draw_round_rect_gdip(
+                    g2,
+                    (l + 3) as f32,
+                    (t + 2) as f32,
+                    (r - l - 6) as f32,
+                    (b - t - 4) as f32,
+                    7.0,
+                    Some(argb(theme.hover, Some(0xFF))),
+                    None,
+                );
+                GdipDeleteGraphics(g2);
+            }
+        }
+        SetTextColor(dc, if is_selected { accent_c } else { text_c });
+        let txt = wide(label);
+        let mut rc = RECT {
+            left: l + 14,
+            top: t,
+            right: r - 14,
+            bottom: b,
+        };
+        DrawTextW(dc, txt.as_ptr(), -1, &mut rc, 0x4 | 0x20);
+    }
+
+    if !old_f.is_null() {
+        SelectObject(dc, old_f);
+    }
+    if !font.is_null() {
+        DeleteObject(font as HGDIOBJ);
+    }
 }
 
 pub(super) unsafe fn draw_recording_setup_gdi(
     dc: HDC,
     layout: RecordingSetupLayout,
     show_cursor: bool,
+    theme: &ThemePalette,
 ) {
-    let shadow = CreateSolidBrush(0x00303030);
-    let old_shadow = SelectObject(dc, shadow as HGDIOBJ);
-    RoundRect(
-        dc,
-        layout.left + 2,
-        layout.top + 4,
-        layout.left + layout.width + 2,
-        layout.top + layout.height + 4,
-        14,
-        14,
-    );
-    SelectObject(dc, old_shadow);
-    DeleteObject(shadow as HGDIOBJ);
+    let scale = crate::theme::system_dpi_scale();
+    ensure_gdiplus();
+    let mut g: *mut GpGraphics = null_mut();
+    if GdipCreateFromHDC(dc, &mut g) == 0 && !g.is_null() {
+        GdipSetSmoothingMode(g, SmoothingModeAntiAlias8x8);
+        draw_soft_shadow_gdip(
+            g,
+            layout.left as f32,
+            layout.top as f32,
+            layout.width as f32,
+            layout.height as f32,
+            14.0,
+            scale,
+            theme.is_dark,
+        );
+        draw_round_rect_gdip(
+            g,
+            layout.left as f32,
+            layout.top as f32,
+            layout.width as f32,
+            layout.height as f32,
+            14.0,
+            Some(argb(theme.bg, Some(0xFA))),
+            Some((argb(theme.icon, Some(0x28)), 1.0)),
+        );
+        let start = layout.start_rect();
+        draw_round_rect_gdip(
+            g,
+            start.0 as f32,
+            start.1 as f32,
+            (start.2 - start.0) as f32,
+            (start.3 - start.1) as f32,
+            10.0,
+            Some(argb(theme.accent, Some(0xFF))),
+            None,
+        );
+        let mut sep_pen: *mut GpPen = null_mut();
+        if GdipCreatePen1(argb(theme.icon, Some(0x22)), 1.0, UnitPixel, &mut sep_pen) == 0
+            && !sep_pen.is_null()
+        {
+            GdipDrawLine(
+                g,
+                sep_pen,
+                (layout.left + 16) as f32,
+                (layout.top + 82) as f32,
+                (layout.left + layout.width - 16) as f32,
+                (layout.top + 82) as f32,
+            );
+            GdipDeletePen(sep_pen);
+        }
+        let controls_on = [true, true, true, show_cursor];
+        for (index, on) in controls_on.into_iter().enumerate() {
+            let rect = layout.control_rect(index).unwrap();
+            let cx = (rect.0 + rect.2) as f32 * 0.5;
+            let mut br: *mut GpSolidFill = null_mut();
+            let col = if on {
+                argb(theme.accent, Some(0xFF))
+            } else {
+                argb(theme.info_muted, Some(0x99))
+            };
+            if GdipCreateSolidFill(col, &mut br) == 0 && !br.is_null() {
+                GdipFillEllipse(g, br as *mut GpBrush, cx - 5.5, (layout.top + 153) as f32, 11.0, 11.0);
+                GdipDeleteBrush(br as *mut GpBrush);
+            }
+        }
+        GdipDeleteGraphics(g);
+    }
 
-    let panel = CreateSolidBrush(0x00ffffff);
-    let outline = CreatePen(0, 1, 0x00d9dee7);
-    let old_panel = SelectObject(dc, panel as HGDIOBJ);
-    let old_outline = SelectObject(dc, outline as HGDIOBJ);
-    RoundRect(
-        dc,
-        layout.left,
-        layout.top,
-        layout.left + layout.width,
-        layout.top + layout.height,
-        14,
-        14,
-    );
-    SelectObject(dc, old_panel);
-    SelectObject(dc, old_outline);
-    DeleteObject(panel as HGDIOBJ);
-    DeleteObject(outline as HGDIOBJ);
-
+    let text_c = ThemePalette::colorref(theme.info_text);
+    let muted_c = ThemePalette::colorref(theme.info_muted);
     let start = layout.start_rect();
-    let primary = CreateSolidBrush(0x00f76f16);
-    let no_outline = CreatePen(0, 1, 0x00f76f16);
-    let old_primary = SelectObject(dc, primary as HGDIOBJ);
-    let old_pen = SelectObject(dc, no_outline as HGDIOBJ);
-    RoundRect(dc, start.0, start.1, start.2, start.3, 12, 12);
-    SelectObject(dc, old_primary);
-    SelectObject(dc, old_pen);
-    DeleteObject(primary as HGDIOBJ);
-    DeleteObject(no_outline as HGDIOBJ);
-    draw_setup_text(dc, start, "开始录制", 0x00ffffff, true);
-
-    let separator = CreatePen(0, 1, 0x00e7e9ed);
-    let old_separator = SelectObject(dc, separator as HGDIOBJ);
-    MoveToEx(dc, layout.left + 1, layout.top + 82, null_mut());
-    LineTo(dc, layout.left + layout.width - 1, layout.top + 82);
-    SelectObject(dc, old_separator);
-    DeleteObject(separator as HGDIOBJ);
-
+    draw_setup_text(dc, start, "开始录制（支持录制期实时标注与鼠标穿透）", 0x00FF_FFFF, true, true);
     draw_setup_text(
         dc,
-        (
-            layout.left + 28,
-            layout.top + 88,
-            layout.left + 132,
-            layout.top + 126,
-        ),
+        (layout.left + 24, layout.top + 88, layout.left + 132, layout.top + 126),
         "导出格式",
-        0x00505b68,
+        text_c,
         false,
+        true,
     );
     draw_setup_text(
         dc,
         layout.output_note_rect(),
-        "结束后在预览页选择 MP4 / GIF / WebP",
-        0x00505b68,
+        "结束后支持 MP4 / GIF / WebP 动图导出",
+        muted_c,
+        false,
         false,
     );
-
-    let controls = ["扬声器", "麦克风", "摄像头", "鼠标设置"];
-    for (index, label) in controls.into_iter().enumerate() {
+    let controls = [
+        ("实时标注", "录制期可画板标注"),
+        ("鼠标穿透", "快捷键 ` 切换"),
+        ("动图导出", "GIF / WebP / MP4"),
+        ("鼠标光标", if show_cursor { "显示鼠标" } else { "隐藏鼠标" }),
+    ];
+    for (index, (label, detail)) in controls.into_iter().enumerate() {
         let rect = layout.control_rect(index).unwrap();
-        let center_x = (rect.0 + rect.2) / 2;
-        let icon_top = layout.top + 146;
-        let enabled = index == 3;
-        let color = if enabled { 0x00343a45 } else { 0x00939da8 };
-        match index {
-            0 => draw_setup_speaker_icon(dc, center_x, icon_top, color),
-            1 => draw_microphone_setup_icon(dc, center_x, icon_top, color),
-            2 => draw_camera_setup_icon(dc, center_x, icon_top, color),
-            _ => draw_cursor_setup_icon(dc, center_x - 5, icon_top + 3, color),
-        }
-        draw_setup_text(
-            dc,
-            (rect.0, layout.top + 178, rect.2, layout.top + 200),
-            label,
-            color,
-            false,
-        );
-        let detail = match index {
-            0 | 1 | 2 => "后续支持",
-            _ if show_cursor => "显示鼠标",
-            _ => "隐藏鼠标",
-        };
-        draw_setup_text(
-            dc,
-            (rect.0, layout.top + 199, rect.2, layout.top + 219),
-            detail,
-            if enabled { 0x0076818f } else { 0x00a5adb7 },
-            false,
-        );
-        if index == 3 {
-            draw_setup_dropdown(dc, rect.2 - 12, icon_top + 11, color);
-            let indicator = CreateSolidBrush(if show_cursor { 0x00f76f16 } else { 0x00adb5bf });
-            let old_indicator = SelectObject(dc, indicator as HGDIOBJ);
-            Ellipse(dc, rect.2 - 25, icon_top + 2, rect.2 - 17, icon_top + 10);
-            SelectObject(dc, old_indicator);
-            DeleteObject(indicator as HGDIOBJ);
-        }
+        draw_setup_text(dc, (rect.0, layout.top + 174, rect.2, layout.top + 196), label, text_c, true, true);
+        draw_setup_text(dc, (rect.0, layout.top + 196, rect.2, layout.top + 216), detail, muted_c, true, false);
     }
-
-    let close = layout.close_rect();
-    draw_setup_text(dc, close, "×", 0x0077808c, false);
+    draw_setup_text(dc, layout.close_rect(), "×", muted_c, true, true);
 }
 
 unsafe fn draw_setup_text(
@@ -167,9 +1026,14 @@ unsafe fn draw_setup_text(
     label: &str,
     color: u32,
     centered: bool,
+    medium: bool,
 ) {
-    let font = GetStockObject(DEFAULT_GUI_FONT);
-    let old_font = SelectObject(dc, font);
+    let font = create_ui_font(13.5, 1.0, medium);
+    let old_font = if !font.is_null() {
+        SelectObject(dc, font as HGDIOBJ)
+    } else {
+        null_mut()
+    };
     SetBkMode(dc, 1);
     SetTextColor(dc, color);
     let text = wide(label);
@@ -184,1533 +1048,395 @@ unsafe fn draw_setup_text(
         text.as_ptr(),
         -1,
         &mut target,
-        if centered { 1 | 4 | 0x20 } else { 1 | 4 },
+        if centered { 1 | 4 | 0x20 } else { 4 | 0x20 },
     );
-    SelectObject(dc, old_font);
-}
-
-unsafe fn draw_setup_speaker_icon(dc: HDC, center_x: i32, top: i32, color: u32) {
-    let speaker = [
-        POINT { x: center_x - 15, y: top + 11 },
-        POINT { x: center_x - 8, y: top + 11 },
-        POINT { x: center_x + 1, y: top + 4 },
-        POINT { x: center_x + 1, y: top + 30 },
-        POINT { x: center_x - 8, y: top + 23 },
-        POINT { x: center_x - 15, y: top + 23 },
-    ];
-    let brush = CreateSolidBrush(color);
-    let old = SelectObject(dc, brush as HGDIOBJ);
-    Polygon(dc, speaker.as_ptr(), speaker.len() as i32);
-    let pen = CreatePen(0, 2, color);
-    let old_pen = SelectObject(dc, pen as HGDIOBJ);
-    for offset in [0, 6] {
-        MoveToEx(dc, center_x + 7 + offset, top + 11 - offset / 2, null_mut());
-        LineTo(dc, center_x + 11 + offset, top + 17);
-        LineTo(dc, center_x + 7 + offset, top + 23 + offset / 2);
+    if !old_font.is_null() {
+        SelectObject(dc, old_font);
     }
-    SelectObject(dc, old_pen);
-    DeleteObject(pen as HGDIOBJ);
-    SelectObject(dc, old);
-    DeleteObject(brush as HGDIOBJ);
-}
-
-unsafe fn draw_microphone_setup_icon(dc: HDC, center_x: i32, top: i32, color: u32) {
-    let pen = CreatePen(0, 2, color);
-    let brush = CreateSolidBrush(0x00ffffff);
-    let old_pen = SelectObject(dc, pen as HGDIOBJ);
-    let old_brush = SelectObject(dc, brush as HGDIOBJ);
-    RoundRect(dc, center_x - 7, top + 3, center_x + 7, top + 23, 9, 9);
-    MoveToEx(dc, center_x - 13, top + 17, null_mut());
-    LineTo(dc, center_x - 13, top + 20);
-    LineTo(dc, center_x - 8, top + 26);
-    LineTo(dc, center_x, top + 29);
-    LineTo(dc, center_x + 8, top + 26);
-    LineTo(dc, center_x + 13, top + 20);
-    LineTo(dc, center_x + 13, top + 17);
-    MoveToEx(dc, center_x, top + 29, null_mut());
-    LineTo(dc, center_x, top + 34);
-    SelectObject(dc, old_brush);
-    SelectObject(dc, old_pen);
-    DeleteObject(brush as HGDIOBJ);
-    DeleteObject(pen as HGDIOBJ);
-}
-
-unsafe fn draw_camera_setup_icon(dc: HDC, center_x: i32, top: i32, color: u32) {
-    let pen = CreatePen(0, 2, color);
-    let brush = CreateSolidBrush(0x00ffffff);
-    let old_pen = SelectObject(dc, pen as HGDIOBJ);
-    let old_brush = SelectObject(dc, brush as HGDIOBJ);
-    RoundRect(dc, center_x - 17, top + 7, center_x + 11, top + 27, 4, 4);
-    let lens = [
-        POINT { x: center_x + 11, y: top + 12 },
-        POINT { x: center_x + 19, y: top + 7 },
-        POINT { x: center_x + 19, y: top + 27 },
-        POINT { x: center_x + 11, y: top + 22 },
-    ];
-    Polygon(dc, lens.as_ptr(), lens.len() as i32);
-    MoveToEx(dc, center_x - 18, top + 3, null_mut());
-    LineTo(dc, center_x + 20, top + 31);
-    SelectObject(dc, old_brush);
-    SelectObject(dc, old_pen);
-    DeleteObject(brush as HGDIOBJ);
-    DeleteObject(pen as HGDIOBJ);
-}
-
-unsafe fn draw_cursor_setup_icon(dc: HDC, left: i32, top: i32, color: u32) {
-    let points = [
-        POINT { x: left, y: top },
-        POINT { x: left + 1, y: top + 31 },
-        POINT { x: left + 9, y: top + 23 },
-        POINT { x: left + 15, y: top + 35 },
-        POINT { x: left + 21, y: top + 32 },
-        POINT { x: left + 15, y: top + 20 },
-        POINT { x: left + 26, y: top + 20 },
-    ];
-    let brush = CreateSolidBrush(color);
-    let pen = CreatePen(0, 1, 0x00ffffff);
-    let old_brush = SelectObject(dc, brush as HGDIOBJ);
-    let old_pen = SelectObject(dc, pen as HGDIOBJ);
-    Polygon(dc, points.as_ptr(), points.len() as i32);
-    SelectObject(dc, old_brush);
-    SelectObject(dc, old_pen);
-    DeleteObject(brush as HGDIOBJ);
-    DeleteObject(pen as HGDIOBJ);
-}
-
-unsafe fn draw_setup_dropdown(dc: HDC, x: i32, y: i32, color: u32) {
-    let points = [
-        POINT { x, y },
-        POINT { x: x + 7, y },
-        POINT { x: x + 3, y: y + 4 },
-    ];
-    let brush = CreateSolidBrush(color);
-    let old = SelectObject(dc, brush as HGDIOBJ);
-    Polygon(dc, points.as_ptr(), points.len() as i32);
-    SelectObject(dc, old);
-    DeleteObject(brush as HGDIOBJ);
-}
-
-pub(super) fn scroll_toolbar_layout() -> ToolbarLayout {
-    layout_for_item_count(SCROLL_TOOLBAR_ACTIONS.len(), i32::MAX)
-}
-
-pub(super) fn scroll_toolbar_action(index: usize) -> Option<ToolbarAction> {
-    SCROLL_TOOLBAR_ACTIONS.get(index).copied()
-}
-
-pub(crate) fn toolbar_position(selection: ScreenRect, screen: ScreenRect) -> (i32, i32) {
-    toolbar_position_for_layout(selection, screen, toolbar_layout(screen))
-}
-
-pub(super) fn scroll_toolbar_position(selection: ScreenRect, screen: ScreenRect) -> (i32, i32) {
-    toolbar_position_for_layout(selection, screen, scroll_toolbar_layout())
-}
-
-pub(super) fn toolbar_position_for_layout(
-    selection: ScreenRect,
-    screen: ScreenRect,
-    layout: ToolbarLayout,
-) -> (i32, i32) {
-    let mut x = selection.right - layout.width;
-    x = x.max(screen.left + 8);
-    if x + layout.width > screen.right - 8 {
-        x = (screen.right - layout.width - 8).max(screen.left + 8);
-    }
-    let mut y = selection.bottom + 8;
-    if y + layout.height > screen.bottom - 8 {
-        y = (selection.top - layout.height - 8).max(screen.top + 8);
-    }
-    (x, y)
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) unsafe fn draw_toolbar_gdi(
-    dc: HDC,
-    x: i32,
-    y: i32,
-    layout: ToolbarLayout,
-    active_tool: Tool,
-    hovered: Option<usize>,
-    tool_palette_open: bool,
-    action_at: fn(usize) -> Option<ToolbarAction>,
-    button_count: usize,
-    annotation_color: [u8; 4],
-    stroke_width: u32,
-    brush_size: u32,
-    text_size: u32,
-    stroke_style: StrokeStyle,
-    can_undo: bool,
-    can_redo: bool,
-) {
-    // Use a slightly stronger neutral shadow so the floating bar stays legible
-    // over bright screenshots without making the panel feel heavy.
-    let shadow = CreateSolidBrush(0x00d9dfe7);
-    let old_shadow = SelectObject(dc, shadow as HGDIOBJ);
-    let old_shadow_pen = SelectObject(
-        dc,
-        GetStockObject(windows_sys::Win32::Graphics::Gdi::NULL_PEN as i32),
-    );
-    RoundRect(
-        dc,
-        x,
-        y + 2,
-        x + layout.width,
-        y + layout.height + 2,
-        12,
-        12,
-    );
-    SelectObject(dc, old_shadow_pen);
-    SelectObject(dc, old_shadow);
-    DeleteObject(shadow as HGDIOBJ);
-
-    let outer_pen = CreatePen(0, 1, 0x00d8dee7);
-    let outer_brush = CreateSolidBrush(0x00ffffff);
-    let old_pen = SelectObject(dc, outer_pen as HGDIOBJ);
-    let old_brush = SelectObject(dc, outer_brush as HGDIOBJ);
-    RoundRect(dc, x, y, x + layout.width, y + layout.height, 10, 10);
-    SelectObject(dc, old_pen);
-    SelectObject(dc, old_brush);
-    DeleteObject(outer_pen as HGDIOBJ);
-    DeleteObject(outer_brush as HGDIOBJ);
-
-    for item_position in 0..button_count {
-        let Some(action) = action_at(item_position) else {
-            continue;
-        };
-        let Some((bx, by)) = toolbar_button_origin((x, y), item_position, layout) else {
-            continue;
-        };
-        let center_x = bx + TOOLBAR_BUTTON_WIDTH / 2;
-        let center_y = by + TOOLBAR_BUTTON_HEIGHT / 2;
-
-        if action == ToolbarAction::Undo {
-            let separator = CreatePen(0, 1, 0x00ebe6e5);
-            let old = SelectObject(dc, separator as HGDIOBJ);
-            MoveToEx(dc, bx - 1, center_y - 8, null_mut());
-            LineTo(dc, bx - 1, center_y + 8);
-            SelectObject(dc, old);
-            DeleteObject(separator as HGDIOBJ);
-        }
-
-        let tool = match action {
-            ToolbarAction::Tool(tool) => Some(tool),
-            _ => None,
-        };
-
-        let is_active = tool == Some(active_tool)
-            || (action == ToolbarAction::Tools && (tool_palette_open || active_tool != Tool::Select));
-        let is_hovered = hovered == Some(item_position);
-        let is_undo = action == ToolbarAction::Undo;
-        let is_redo = action == ToolbarAction::Redo;
-        let disabled = (is_undo && !can_undo) || (is_redo && !can_redo);
-        let (fill_color, border_color, icon_color) = if disabled {
-            (None, None, 0x00c2bbb6)
-        } else {
-            match action {
-                ToolbarAction::Finish => {
-                    let (fill, border) = if is_hovered {
-                        (0x00ffe5cf, 0x00f0c9a8)
-                    } else {
-                        (0x00ffefe1, 0x00f8d3b7)
-                    };
-                    (Some(fill), Some(border), 0x00cd7032)
-                }
-                ToolbarAction::Cancel => {
-                    let (fill, border) = if is_hovered {
-                        (0x00d6d6ff, 0x00bdbdf0)
-                    } else {
-                        (0x00e7e7ff, 0x00c2c2f8)
-                    };
-                    (Some(fill), Some(border), 0x005252d2)
-                }
-                _ if is_active => (Some(0x00fff3e8), Some(0x00f76f16), 0x00f76f16),
-                _ if is_hovered => (Some(0x00f5f3f2), Some(0x00e4e8ed), 0x0034312e),
-                _ => (None, None, 0x0034312e),
-            }
-        };
-
-        if let Some(color) = fill_color {
-            let fill = CreateSolidBrush(color);
-            let border = CreatePen(0, 1, border_color.unwrap_or(color));
-            let old_b = SelectObject(dc, fill as HGDIOBJ);
-            let old_p = SelectObject(dc, border as HGDIOBJ);
-            RoundRect(
-                dc,
-                bx + 5,
-                by + 5,
-                bx + TOOLBAR_BUTTON_WIDTH - 5,
-                by + TOOLBAR_BUTTON_HEIGHT - 5,
-                8,
-                8,
-            );
-            SelectObject(dc, old_b);
-            SelectObject(dc, old_p);
-            DeleteObject(fill as HGDIOBJ);
-            DeleteObject(border as HGDIOBJ);
-        }
-
-        if is_active && !disabled && !matches!(action, ToolbarAction::Finish | ToolbarAction::Cancel)
-        {
-            let indicator = CreateSolidBrush(0x00f76f16);
-            let indicator_rect = RECT {
-                left: bx + 13,
-                top: by + TOOLBAR_BUTTON_HEIGHT - 7,
-                right: bx + TOOLBAR_BUTTON_WIDTH - 13,
-                bottom: by + TOOLBAR_BUTTON_HEIGHT - 5,
-            };
-            FillRect(dc, &indicator_rect, indicator);
-            DeleteObject(indicator as HGDIOBJ);
-        }
-
-        let Some(icon_index) = toolbar_icon_index(action) else {
-            continue;
-        };
-        draw_toolbar_icon(
-            dc,
-            icon_index,
-            center_x,
-            center_y,
-            active_tool,
-            icon_color,
-            annotation_color,
-            stroke_width,
-            brush_size,
-            text_size,
-            stroke_style,
-        );
+    if !font.is_null() {
+        DeleteObject(font as HGDIOBJ);
     }
 }
 
-/// 图 2：二级属性浮条（Secondary Property Bar）GDI 绘制
-pub(super) unsafe fn draw_secondary_bar_gdi(
-    dc: HDC,
-    layout: SecondaryBarLayout,
-    tool: Tool,
-    hovered: Option<SecondaryBarItem>,
-    annotation_color: [u8; 4],
-    stroke_width: u32,
-    brush_size: u32,
-    text_size: u32,
+// -------------------------------------------------------------------------
+// SnowAir-Grade Uniform DPI-Scaled Vector Icon Renderer
+// Coordinate space: logical [-9.0..+9.0] multiplied by `s`, rounded caps/joins
+// Synchronized 1:1 with `ui/src/components/ToolbarIcon.vue`!
+// -------------------------------------------------------------------------
+
+unsafe fn draw_action_icon_on_graphics(
+    g: *mut GpGraphics,
+    action: ToolbarAction,
+    cx: f32,
+    cy: f32,
+    s: f32,
+    argb_color: u32,
+    scroll_paused: bool,
 ) {
-    // 多层微阴影
-    let null_brush = GetStockObject(windows_sys::Win32::Graphics::Gdi::NULL_BRUSH as i32);
-    let old_sb = SelectObject(dc, null_brush);
-
-    let shadow1 = CreatePen(0, 1, 0x00f4f0ee);
-    let old_sp = SelectObject(dc, shadow1 as HGDIOBJ);
-    RoundRect(
-        dc,
-        layout.left - 1,
-        layout.top + 1,
-        layout.left + layout.width + 1,
-        layout.top + layout.height + 3,
-        10,
-        10,
-    );
-
-    let shadow2 = CreatePen(0, 1, 0x00e8e3e0);
-    SelectObject(dc, shadow2 as HGDIOBJ);
-    RoundRect(
-        dc,
-        layout.left,
-        layout.top + 1,
-        layout.left + layout.width,
-        layout.top + layout.height + 2,
-        9,
-        9,
-    );
-
-    let shadow3 = CreatePen(0, 1, 0x00ded8d5);
-    SelectObject(dc, shadow3 as HGDIOBJ);
-    RoundRect(
-        dc,
-        layout.left,
-        layout.top + 1,
-        layout.left + layout.width,
-        layout.top + layout.height + 1,
-        8,
-        8,
-    );
-
-    SelectObject(dc, old_sp);
-    SelectObject(dc, old_sb);
-    DeleteObject(shadow1 as HGDIOBJ);
-    DeleteObject(shadow2 as HGDIOBJ);
-    DeleteObject(shadow3 as HGDIOBJ);
-
-    // 纯白浮层 + 浅灰精细边框 (8px 圆角)
-    let outer_pen = CreatePen(0, 1, 0x00e3e0de);
-    let outer_brush = CreateSolidBrush(0x00ffffff);
-    let old_pen = SelectObject(dc, outer_pen as HGDIOBJ);
-    let old_brush = SelectObject(dc, outer_brush as HGDIOBJ);
-    RoundRect(
-        dc,
-        layout.left,
-        layout.top,
-        layout.left + layout.width,
-        layout.top + layout.height,
-        8,
-        8,
-    );
-    SelectObject(dc, old_pen);
-    SelectObject(dc, old_brush);
-    DeleteObject(outer_pen as HGDIOBJ);
-    DeleteObject(outer_brush as HGDIOBJ);
-
-    // 1. 绘制 4 档大小 (文字工具显示 14, 18, 24, 32 明确字号；笔触/马赛克显示圆点)
-    let current_size_index = if tool == Tool::Text {
-        TEXT_SIZES
-            .iter()
-            .enumerate()
-            .min_by_key(|(_, &s)| (s as i32 - text_size as i32).abs())
-            .map(|(idx, _)| idx)
-            .unwrap_or(1)
-    } else if tool == Tool::Mosaic {
-        MOSAIC_SIZES
-            .iter()
-            .enumerate()
-            .min_by_key(|(_, &s)| (s as i32 - brush_size as i32).abs())
-            .map(|(idx, _)| idx)
-            .unwrap_or(1)
-    } else {
-        STROKE_SIZES
-            .iter()
-            .enumerate()
-            .min_by_key(|(_, &s)| (s as i32 - stroke_width as i32).abs())
-            .map(|(idx, _)| idx)
-            .unwrap_or(1)
-    };
-
-    let dot_radii: [i32; 4] = [2, 3, 5, 7]; // 4 档圆点半径 (直径 4, 6, 10, 14)
-    let text_labels = ["14", "18", "24", "32"];
-
-    for i in 0..4 {
-        let Some((left, top, right, bottom)) = layout.size_rect(i) else {
-            continue;
-        };
-        let is_selected = i == current_size_index;
-        let is_hovered = hovered == Some(SecondaryBarItem::Size(i));
-
-        if tool == Tool::Text {
-            // 文字工具：绘制清晰的字号选项卡
-            if is_selected {
-                // 选中高亮状态：淡蓝底色 #E8F3FF + 飞书品牌蓝微边框 #166FF7
-                let sel_brush = CreateSolidBrush(0x00fff3e8); // BGR for #E8F3FF
-                let sel_pen = CreatePen(0, 1, 0x00f76f16); // BGR for #166FF7
-                let old_b = SelectObject(dc, sel_brush as HGDIOBJ);
-                let old_p = SelectObject(dc, sel_pen as HGDIOBJ);
-                RoundRect(dc, left + 1, top + 2, right - 1, bottom - 2, 6, 6);
-                SelectObject(dc, old_b);
-                SelectObject(dc, old_p);
-                DeleteObject(sel_brush as HGDIOBJ);
-                DeleteObject(sel_pen as HGDIOBJ);
-            } else if is_hovered {
-                // 悬停未选中：极浅灰背景 #F2F3F5
-                let hbrush = CreateSolidBrush(0x00f5f3f2); // BGR for #F2F3F5
-                let null_p = GetStockObject(windows_sys::Win32::Graphics::Gdi::NULL_PEN as i32);
-                let old_b = SelectObject(dc, hbrush as HGDIOBJ);
-                let old_p = SelectObject(dc, null_p);
-                RoundRect(dc, left + 1, top + 2, right - 1, bottom - 2, 6, 6);
-                SelectObject(dc, old_b);
-                SelectObject(dc, old_p);
-                DeleteObject(hbrush as HGDIOBJ);
-            }
-
-            // 绘制字号数值 (14, 18, 24, 32)
-            let text_color = if is_selected {
-                0x00f76f16 // 飞书蓝 #166FF7
-            } else if is_hovered {
-                0x001d2129 // 深黑 #1D2129
-            } else {
-                0x00594e4e // 中性深灰 #4E5969
-            };
-
-            let gui_font = GetStockObject(DEFAULT_GUI_FONT);
-            let old_f = SelectObject(dc, gui_font);
-            SetBkMode(dc, 1);
-            SetTextColor(dc, text_color);
-            let text = wide(text_labels[i]);
-            let mut text_rect = RECT {
-                left: left + 1,
-                top: top + 2,
-                right: right - 1,
-                bottom: bottom - 2,
-            };
-            DrawTextW(dc, text.as_ptr(), -1, &mut text_rect, 0x1 | 0x4 | 0x20);
-            SelectObject(dc, old_f);
-        } else {
-            let cx = (left + right) / 2;
-            let cy = (top + bottom) / 2;
-
-            if is_hovered && !is_selected {
-                let hbrush = CreateSolidBrush(0x00f5f2f0);
-                let old_b = SelectObject(dc, hbrush as HGDIOBJ);
-                RoundRect(dc, left + 2, top + 2, right - 2, bottom - 2, 6, 6);
-                SelectObject(dc, old_b);
-                DeleteObject(hbrush as HGDIOBJ);
-            }
-
-            let r = dot_radii[i];
-            let dot_color = if is_selected {
-                0x00f76f16 // 飞书蓝：选中时圆点使用品牌蓝 #166FF7 (图 2 规范)
-            } else {
-                0x008e958f // 未选中时中性灰 #8F958E
-            };
-            let brush = CreateSolidBrush(dot_color);
-            let null_p = GetStockObject(windows_sys::Win32::Graphics::Gdi::NULL_PEN as i32);
-            let old_b = SelectObject(dc, brush as HGDIOBJ);
-            let old_p = SelectObject(dc, null_p);
-            Ellipse(dc, cx - r, cy - r, cx + r + 1, cy + r + 1);
-            SelectObject(dc, old_b);
-            SelectObject(dc, old_p);
-            DeleteObject(brush as HGDIOBJ);
-
-            // 选中外环：同心飞书蓝圆环
-            if is_selected {
-                let ring_r = r + 4;
-                let ring_pen = CreatePen(0, 1, 0x00f76f16);
-                let old_p = SelectObject(dc, ring_pen as HGDIOBJ);
-                let null_b = GetStockObject(windows_sys::Win32::Graphics::Gdi::NULL_BRUSH as i32);
-                let old_nb = SelectObject(dc, null_b);
-                Ellipse(dc, cx - ring_r, cy - ring_r, cx + ring_r + 1, cy + ring_r + 1);
-                SelectObject(dc, old_p);
-                SelectObject(dc, old_nb);
-                DeleteObject(ring_pen as HGDIOBJ);
-            }
-        }
-    }
-
-    // 2. 绘制分割线（如果有颜色区）
-    if let Some(sx) = layout.separator_x() {
-        let cy = layout.top + layout.height / 2;
-        let sep_pen = CreatePen(0, 1, 0x00e5e6eb);
-        let old_p = SelectObject(dc, sep_pen as HGDIOBJ);
-        MoveToEx(dc, sx, cy - 8, null_mut());
-        LineTo(dc, sx, cy + 8);
-        SelectObject(dc, old_p);
-        DeleteObject(sep_pen as HGDIOBJ);
-    }
-
-    // 3. 绘制 7 色色卡
-    if layout.has_color {
-        for (i, &color) in COLOR_SWATCHES.iter().enumerate() {
-            let Some((left, top, right, bottom)) = layout.color_rect(i) else {
-                continue;
-            };
-            let is_selected = color == annotation_color;
-            let is_hovered = hovered == Some(SecondaryBarItem::Color(i));
-            let is_white = color == [255, 255, 255, 255];
-
-            // 悬停未选中微外环
-            if is_hovered && !is_selected {
-                let hpen = CreatePen(0, 1, 0x00a0a5ad);
-                let old_hp = SelectObject(dc, hpen as HGDIOBJ);
-                let null_b = GetStockObject(windows_sys::Win32::Graphics::Gdi::NULL_BRUSH as i32);
-                let old_nb = SelectObject(dc, null_b);
-                RoundRect(dc, left - 2, top - 2, right + 2, bottom + 2, 5, 5);
-                SelectObject(dc, old_hp);
-                SelectObject(dc, old_nb);
-                DeleteObject(hpen as HGDIOBJ);
-            }
-
-            let gdi_c = gdi_color(&color);
-            let brush = CreateSolidBrush(gdi_c);
-            let border_color = if is_white { 0x00d0d5dd } else { gdi_c };
-            let pen = CreatePen(0, 1, border_color);
-            let old_b = SelectObject(dc, brush as HGDIOBJ);
-            let old_p = SelectObject(dc, pen as HGDIOBJ);
-            RoundRect(dc, left, top, right, bottom, 4, 4);
-            SelectObject(dc, old_b);
-            SelectObject(dc, old_p);
-            DeleteObject(brush as HGDIOBJ);
-            DeleteObject(pen as HGDIOBJ);
-
-            // 选中对勾 ✓ (白底绘制深灰对勾，其他颜色纯白对勾)
-            if is_selected {
-                let check_color = if is_white { 0x001d2129 } else { 0x00ffffff };
-                let pen = CreatePen(0, 2, check_color);
-                let old_p = SelectObject(dc, pen as HGDIOBJ);
-                let cx = (left + right) / 2;
-                let cy = (top + bottom) / 2;
-                MoveToEx(dc, cx - 4, cy, null_mut());
-                LineTo(dc, cx - 1, cy + 3);
-                LineTo(dc, cx + 5, cy - 3);
-                SelectObject(dc, old_p);
-                DeleteObject(pen as HGDIOBJ);
-            }
-        }
-    }
-}
-
-pub(super) fn toolbar_label(index: usize) -> Option<&'static str> {
-    crate::toolbar::toolbar_label(index)
-}
-
-#[allow(clippy::too_many_arguments, clippy::if_same_then_else)]
-pub(super) unsafe fn draw_toolbar_menu_gdi(
-    dc: HDC,
-    layout: crate::toolbar::ToolbarMenuLayout,
-    menu: ToolbarMenu,
-    tool: Tool,
-    scroll_axis: Option<MatchAxis>,
-    hovered: Option<usize>,
-    annotation_color: [u8; 4],
-    stroke_width: u32,
-    brush_size: u32,
-    text_size: u32,
-    stroke_style: StrokeStyle,
-) {
-    // 底部 1px 极柔环境微阴影
-    let shadow_pen = CreatePen(0, 1, 0x00d8dbe0);
-    let null_brush = GetStockObject(windows_sys::Win32::Graphics::Gdi::NULL_BRUSH as i32);
-    let old_p = SelectObject(dc, shadow_pen as HGDIOBJ);
-    let old_b = SelectObject(dc, null_brush);
-    RoundRect(
-        dc,
-        layout.left,
-        layout.top + 1,
-        layout.left + layout.width,
-        layout.top + layout.height() + 2,
-        10,
-        10,
-    );
-    SelectObject(dc, old_p);
-    SelectObject(dc, old_b);
-    DeleteObject(shadow_pen as HGDIOBJ);
-
-    // 纯白浮层 + 飞书浅灰边框 (10px 圆角)
-    let outer_pen = CreatePen(0, 1, 0x00dce0e6);
-    let outer_brush = CreateSolidBrush(0x00ffffff);
-    let old_pen = SelectObject(dc, outer_pen as HGDIOBJ);
-    let old_brush = SelectObject(dc, outer_brush as HGDIOBJ);
-    RoundRect(
-        dc,
-        layout.left,
-        layout.top,
-        layout.left + layout.width,
-        layout.top + layout.height(),
-        10,
-        10,
-    );
-    SelectObject(dc, old_pen);
-    SelectObject(dc, old_brush);
-    DeleteObject(outer_pen as HGDIOBJ);
-    DeleteObject(outer_brush as HGDIOBJ);
-
-    if layout.header_height > 0 {
-        let title = match menu {
-            ToolbarMenu::Recognition => "",
-            ToolbarMenu::RecordingFps => "录制设置",
-            ToolbarMenu::RecordingExport => "选择导出格式",
-            _ => "",
-        };
-        let subtitle = match menu {
-            ToolbarMenu::Recognition => "",
-            ToolbarMenu::RecordingFps => "使用详情设置页中的统一录制帧率",
-            ToolbarMenu::RecordingExport => "预览后选择 MP4、GIF 或 WebP",
-            _ => "",
-        };
-        draw_menu_text(
-            dc,
-            layout.left + 12,
-            layout.top - 1,
-            layout.left + layout.width - 12,
-            layout.top + 30,
-            title,
-        );
-        draw_menu_muted_text(
-            dc,
-            layout.left + 12,
-            layout.top + 22,
-            layout.left + layout.width - 12,
-            layout.top + 50,
-            subtitle,
-        );
-        let separator = CreatePen(0, 1, 0x00e9edf2);
-        let old = SelectObject(dc, separator as HGDIOBJ);
-        MoveToEx(
-            dc,
-            layout.left + 12,
-            layout.top + layout.header_height,
-            null_mut(),
-        );
-        LineTo(dc, layout.left + layout.width - 12, layout.top + layout.header_height);
-        SelectObject(dc, old);
-        DeleteObject(separator as HGDIOBJ);
-    }
-
-    for index in 0..layout.count {
-        let Some((left, top, right, bottom)) = layout.item_rect(index) else {
-            continue;
-        };
-        let center_y = (top + bottom) / 2;
-        let selected = match menu {
-            ToolbarMenu::Color => COLOR_SWATCHES
-                .get(index)
-                .is_some_and(|color| *color == annotation_color),
-            ToolbarMenu::Size => {
-                let sizes = if tool == Tool::Text {
-                    &crate::toolbar::TEXT_SIZES[..]
-                } else if tool == Tool::Mosaic {
-                    &crate::toolbar::MOSAIC_SIZES[..]
-                } else {
-                    &crate::toolbar::STROKE_SIZES[..]
-                };
-                sizes.get(index).is_some_and(|size| {
-                    if tool == Tool::Text {
-                        *size == text_size
-                    } else if tool == Tool::Mosaic {
-                        *size == brush_size
-                    } else {
-                        *size == stroke_width
-                    }
-                })
-            }
-            ToolbarMenu::Style => {
-                matches!(
-                    (index, stroke_style),
-                    (0, StrokeStyle::Solid) | (1, StrokeStyle::Dashed) | (2, StrokeStyle::Dotted)
-                )
-            }
-            ToolbarMenu::ScrollMode => {
-                scroll_axis
-                    == Some(if index == 0 {
-                        MatchAxis::Vertical
-                    } else {
-                        MatchAxis::Horizontal
-                    })
-            }
-            ToolbarMenu::Recognition => false,
-            ToolbarMenu::RecordingFps => false,
-            ToolbarMenu::RecordingExport => false,
-        };
-
-        if selected {
-            let brush = CreateSolidBrush(0x00fff3e8);
-            let pen = CreatePen(0, 1, 0x00ff7033);
-            let old_b = SelectObject(dc, brush as HGDIOBJ);
-            let old_p = SelectObject(dc, pen as HGDIOBJ);
-            RoundRect(dc, left, top, right, bottom, 8, 8);
-            SelectObject(dc, old_b);
-            SelectObject(dc, old_p);
-            DeleteObject(brush as HGDIOBJ);
-            DeleteObject(pen as HGDIOBJ);
-        } else if hovered == Some(index) {
-            let brush = CreateSolidBrush(0x00f5f3f2);
-            let old = SelectObject(dc, brush as HGDIOBJ);
-            RoundRect(dc, left, top, right, bottom, 8, 8);
-            SelectObject(dc, old);
-            DeleteObject(brush as HGDIOBJ);
-        }
-
-        match menu {
-            ToolbarMenu::Color => {
-                let color = COLOR_SWATCHES[index];
-                let brush = CreateSolidBrush(gdi_color(&color));
-                let old = SelectObject(dc, brush as HGDIOBJ);
-                Ellipse(dc, left + 10, center_y - 8, left + 26, center_y + 8);
-                SelectObject(dc, old);
-                DeleteObject(brush as HGDIOBJ);
-                if selected {
-                    draw_ellipse_border(
-                        dc,
-                        ScreenRect {
-                            left: left + 8,
-                            top: center_y - 10,
-                            right: left + 28,
-                            bottom: center_y + 10,
-                        },
-                        0x00ff7033,
-                        2,
-                    );
-                }
-                let label = format!("颜色 {}", index + 1);
-                draw_menu_text(dc, left + 38, top, right - 8, bottom, &label);
-            }
-            ToolbarMenu::Size => {
-                let sizes = if tool == Tool::Text {
-                    &crate::toolbar::TEXT_SIZES[..]
-                } else if tool == Tool::Mosaic {
-                    &crate::toolbar::MOSAIC_SIZES[..]
-                } else {
-                    &crate::toolbar::STROKE_SIZES[..]
-                };
-                let value = sizes[index];
-                let line_width = if tool == Tool::Text {
-                    2
-                } else {
-                    value.min(8) as i32
-                };
-                let pen_color = if selected { 0x00ff7033 } else { 0x004e5969 };
-                let pen = CreatePen(0, line_width, pen_color);
-                let old = SelectObject(dc, pen as HGDIOBJ);
-                MoveToEx(dc, left + 10, center_y, null_mut());
-                LineTo(dc, left + 38, center_y);
-                SelectObject(dc, old);
-                DeleteObject(pen as HGDIOBJ);
-                let label = if tool == Tool::Text {
-                    format!("{} pt", value)
-                } else {
-                    format!("{} px", value)
-                };
-                draw_menu_text(dc, left + 48, top, right - 8, bottom, &label);
-            }
-            ToolbarMenu::Style => {
-                let preview = match index {
-                    0 => StrokeStyle::Solid,
-                    1 => StrokeStyle::Dashed,
-                    _ => StrokeStyle::Dotted,
-                };
-                let line_color = if selected { 0x00ff7033 } else { 0x004e5969 };
-                draw_line_gdi_style(
-                    dc,
-                    ScreenPoint {
-                        x: left + 10,
-                        y: center_y,
-                    },
-                    ScreenPoint {
-                        x: left + 44,
-                        y: center_y,
-                    },
-                    line_color,
-                    stroke_width.max(2) as i32,
-                    preview,
-                );
-                let label = match index {
-                    0 => "实线",
-                    1 => "虚线",
-                    _ => "点线",
-                };
-                draw_menu_text(dc, left + 54, top, right - 8, bottom, label);
-            }
-            ToolbarMenu::RecordingFps => {
-                let label = if index == 0 {
-                    "标准录制     15 FPS"
-                } else {
-                    "流畅录制     30 FPS"
-                };
-                draw_menu_text(dc, left + 12, top, right - 8, bottom, label);
-            }
-            ToolbarMenu::RecordingExport => {
-                let label = match index {
-                    0 => "MP4 视频",
-                    1 => "GIF 动图",
-                    _ => "WebP 动图",
-                };
-                draw_menu_text(dc, left + 12, top, right - 8, bottom, label);
-            }
-            ToolbarMenu::Recognition => {
-                let label = if index == 0 { "二维码" } else { "OCR" };
-                draw_menu_text(dc, left + 12, top, right - 8, bottom, label);
-            }
-            ToolbarMenu::ScrollMode => {
-                let label = if index == 0 { "纵向滚动" } else { "横向滚动" };
-                draw_menu_text(dc, left + 14, top, right - 8, bottom, label);
-            }
-        }
-    }
-}
-
-pub(super) unsafe fn draw_menu_text(
-    dc: HDC,
-    left: i32,
-    top: i32,
-    right: i32,
-    bottom: i32,
-    label: &str,
-) {
-    let gui_font = GetStockObject(DEFAULT_GUI_FONT);
-    let old_f = SelectObject(dc, gui_font);
-    SetBkMode(dc, 1);
-    SetTextColor(dc, 0x001d2129);
-    let text = wide(label);
-    let mut rect = RECT {
-        left,
-        top: top + 7,
-        right,
-        bottom: bottom - 5,
-    };
-    DrawTextW(dc, text.as_ptr(), -1, &mut rect, 1 | 4);
-    SelectObject(dc, old_f);
-}
-
-unsafe fn draw_menu_muted_text(
-    dc: HDC,
-    left: i32,
-    top: i32,
-    right: i32,
-    bottom: i32,
-    label: &str,
-) {
-    let gui_font = GetStockObject(DEFAULT_GUI_FONT);
-    let old_f = SelectObject(dc, gui_font);
-    SetBkMode(dc, 1);
-    SetTextColor(dc, 0x00818b9a);
-    let text = wide(label);
-    let mut rect = RECT {
-        left,
-        top: top + 5,
-        right,
-        bottom: bottom - 3,
-    };
-    DrawTextW(dc, text.as_ptr(), -1, &mut rect, 1 | 4 | 0x20);
-    SelectObject(dc, old_f);
-}
-
-pub(super) unsafe fn draw_toolbar_tooltip(
-    dc: HDC,
-    x: i32,
-    y: i32,
-    layout: ToolbarLayout,
-    screen_width: i32,
-    screen_height: i32,
-    index: usize,
-) {
-    let Some(label) = toolbar_label(index) else {
-        return;
-    };
-    draw_toolbar_tooltip_label(
-        dc,
-        x,
-        y,
-        layout,
-        screen_width,
-        screen_height,
-        index,
-        label,
-    );
-}
-
-pub(super) unsafe fn draw_tool_palette_tooltip(
-    dc: HDC,
-    x: i32,
-    y: i32,
-    layout: ToolbarLayout,
-    screen_width: i32,
-    screen_height: i32,
-    index: usize,
-) {
-    let Some(label) = crate::toolbar::tool_palette_label(index) else {
-        return;
-    };
-    draw_toolbar_tooltip_label(
-        dc,
-        x,
-        y,
-        layout,
-        screen_width,
-        screen_height,
-        index,
-        label,
-    );
-}
-
-unsafe fn draw_toolbar_tooltip_label(
-    dc: HDC,
-    x: i32,
-    y: i32,
-    layout: ToolbarLayout,
-    screen_width: i32,
-    screen_height: i32,
-    index: usize,
-    label: &str,
-) {
-    let Some((button_x, button_y)) = toolbar_button_origin((x, y), index, layout) else {
-        return;
-    };
-    let width = if label.chars().count() > 5 { 96 } else { 68 };
-    let height = 24;
-    let center = button_x + TOOLBAR_BUTTON_WIDTH / 2;
-    let left = (center - width / 2).clamp(4, (screen_width - width - 4).max(4));
-    let below = button_y + TOOLBAR_BUTTON_HEIGHT + 6;
-    let top = if below + height <= screen_height - 4 {
-        below
-    } else {
-        (y - height - 6).max(4)
-    };
-
-    // 微投影
-    let shadow_pen = CreatePen(0, 1, 0x00d0d3d8);
-    let null_brush = GetStockObject(windows_sys::Win32::Graphics::Gdi::NULL_BRUSH as i32);
-    let old_sp = SelectObject(dc, shadow_pen as HGDIOBJ);
-    let old_sb = SelectObject(dc, null_brush);
-    RoundRect(dc, left, top + 1, left + width, top + height + 2, 6, 6);
-    SelectObject(dc, old_sp);
-    SelectObject(dc, old_sb);
-    DeleteObject(shadow_pen as HGDIOBJ);
-
-    let brush = CreateSolidBrush(0x001d2129);
-    let old_brush = SelectObject(dc, brush as HGDIOBJ);
-    let pen = CreatePen(0, 1, 0x003b3531);
-    let old_pen = SelectObject(dc, pen as HGDIOBJ);
-    RoundRect(dc, left, top, left + width, top + height, 6, 6);
-    SelectObject(dc, old_brush);
-    SelectObject(dc, old_pen);
-    DeleteObject(brush as HGDIOBJ);
-    DeleteObject(pen as HGDIOBJ);
-
-    let gui_font = GetStockObject(DEFAULT_GUI_FONT);
-    let old_f = SelectObject(dc, gui_font);
-    SetBkMode(dc, 1);
-    SetTextColor(dc, 0x00ffffff);
-    let text = wide(label);
-    let mut rect = RECT {
-        left,
-        top: top + 1,
-        right: left + width,
-        bottom: top + height,
-    };
-    DrawTextW(dc, text.as_ptr(), -1, &mut rect, 0x1 | 0x4 | 0x20);
-    SelectObject(dc, old_f);
-}
-
-pub(super) unsafe fn draw_secondary_bar_tooltip(
-    dc: HDC,
-    layout: SecondaryBarLayout,
-    screen_width: i32,
-    screen_height: i32,
-    item: SecondaryBarItem,
-    tool: Tool,
-) {
-    let (cx, label) = match item {
-        SecondaryBarItem::Size(i) => {
-            let Some((l, _, r, _)) = layout.size_rect(i) else {
-                return;
-            };
-            let text = if tool == Tool::Text {
-                match i {
-                    0 => "字号: 14",
-                    1 => "字号: 18",
-                    2 => "字号: 24",
-                    3 => "字号: 32",
-                    _ => "字号",
-                }
-            } else if tool == Tool::Mosaic {
-                match i {
-                    0 => "画笔: 细",
-                    1 => "画笔: 中",
-                    2 => "画笔: 粗",
-                    3 => "画笔: 特粗",
-                    _ => "画笔大小",
-                }
-            } else {
-                match i {
-                    0 => "粗细: 细",
-                    1 => "粗细: 中",
-                    2 => "粗细: 粗",
-                    3 => "粗细: 特粗",
-                    _ => "粗细",
-                }
-            };
-            ((l + r) / 2, text)
-        }
-        SecondaryBarItem::Color(i) => {
-            let Some((l, _, r, _)) = layout.color_rect(i) else {
-                return;
-            };
-            let text = match i {
-                0 => "红色",
-                1 => "橙色",
-                2 => "绿色",
-                3 => "蓝色",
-                4 => "紫色",
-                5 => "黑色",
-                6 => "白色",
-                _ => "颜色",
-            };
-            ((l + r) / 2, text)
-        }
-    };
-
-    let char_count = label.chars().count();
-    let width = if char_count > 4 { 72 } else { 52 };
-    let height = 24;
-    let left = (cx - width / 2).clamp(4, (screen_width - width - 4).max(4));
-    let above = layout.top - height - 6;
-    let top = if above >= 4 {
-        above
-    } else {
-        (layout.top + layout.height + 6).min(screen_height - height - 4)
-    };
-
-    // 微投影
-    let shadow_pen = CreatePen(0, 1, 0x00d0d3d8);
-    let null_brush = GetStockObject(windows_sys::Win32::Graphics::Gdi::NULL_BRUSH as i32);
-    let old_sp = SelectObject(dc, shadow_pen as HGDIOBJ);
-    let old_sb = SelectObject(dc, null_brush);
-    RoundRect(dc, left, top + 1, left + width, top + height + 2, 6, 6);
-    SelectObject(dc, old_sp);
-    SelectObject(dc, old_sb);
-    DeleteObject(shadow_pen as HGDIOBJ);
-
-    let brush = CreateSolidBrush(0x001d2129);
-    let old_brush = SelectObject(dc, brush as HGDIOBJ);
-    let pen = CreatePen(0, 1, 0x003b3531);
-    let old_pen = SelectObject(dc, pen as HGDIOBJ);
-    RoundRect(dc, left, top, left + width, top + height, 6, 6);
-    SelectObject(dc, old_brush);
-    SelectObject(dc, old_pen);
-    DeleteObject(brush as HGDIOBJ);
-    DeleteObject(pen as HGDIOBJ);
-
-    let gui_font = GetStockObject(DEFAULT_GUI_FONT);
-    let old_f = SelectObject(dc, gui_font);
-    SetBkMode(dc, 1);
-    SetTextColor(dc, 0x00ffffff);
-    let text = wide(label);
-    let mut rect = RECT {
-        left,
-        top: top + 1,
-        right: left + width,
-        bottom: top + height,
-    };
-    DrawTextW(dc, text.as_ptr(), -1, &mut rect, 0x1 | 0x4 | 0x20);
-    SelectObject(dc, old_f);
-}
-
-static GDI_PLUS_TOKEN: OnceLock<usize> = OnceLock::new();
-const TOOLBAR_ICON_SCALE: f32 = 1.3;
-
-fn toolbar_icon_coordinate(value: f32) -> f32 {
-    12.0 + (value - 12.0) * TOOLBAR_ICON_SCALE
-}
-
-unsafe fn gdiplus_graphics(dc: HDC) -> *mut GpGraphics {
-    let token = GDI_PLUS_TOKEN.get_or_init(|| {
-        let input = GdiplusStartupInput {
-            GdiplusVersion: 1,
-            DebugEventCallback: 0,
-            SuppressBackgroundThread: 0,
-            SuppressExternalCodecs: 0,
-        };
-        let mut token = 0usize;
-        let status = GdiplusStartup(&mut token, &input, null_mut());
-        if status == 0 { token } else { 0 }
-    });
-    if *token == 0 {
-        return null_mut();
-    }
-
-    let mut graphics = null_mut();
-    if GdipCreateFromHDC(dc, &mut graphics) == 0 {
-        GdipSetSmoothingMode(graphics, SmoothingModeAntiAlias8x8);
-        GdipSetPixelOffsetMode(graphics, PixelOffsetModeHalf);
-        graphics
-    } else {
-        null_mut()
-    }
-}
-
-unsafe fn icon_line(
-    graphics: *mut GpGraphics,
-    pen: *mut GpPen,
-    left: i32,
-    top: i32,
-    x1: f32,
-    y1: f32,
-    x2: f32,
-    y2: f32,
-) {
-    GdipDrawLine(
-        graphics,
-        pen,
-        left as f32 + toolbar_icon_coordinate(x1),
-        top as f32 + toolbar_icon_coordinate(y1),
-        left as f32 + toolbar_icon_coordinate(x2),
-        top as f32 + toolbar_icon_coordinate(y2),
-    );
-}
-
-unsafe fn icon_polyline(
-    graphics: *mut GpGraphics,
-    pen: *mut GpPen,
-    left: i32,
-    top: i32,
-    points: &[(f32, f32)],
-) {
-    for pair in points.windows(2) {
-        icon_line(
-            graphics, pen, left, top, pair[0].0, pair[0].1, pair[1].0, pair[1].1,
-        );
-    }
-}
-
-unsafe fn icon_bezier(
-    graphics: *mut GpGraphics,
-    pen: *mut GpPen,
-    left: i32,
-    top: i32,
-    points: [(f32, f32); 4],
-) {
-    GdipDrawBezier(
-        graphics,
-        pen,
-        left as f32 + toolbar_icon_coordinate(points[0].0),
-        top as f32 + toolbar_icon_coordinate(points[0].1),
-        left as f32 + toolbar_icon_coordinate(points[1].0),
-        top as f32 + toolbar_icon_coordinate(points[1].1),
-        left as f32 + toolbar_icon_coordinate(points[2].0),
-        top as f32 + toolbar_icon_coordinate(points[2].1),
-        left as f32 + toolbar_icon_coordinate(points[3].0),
-        top as f32 + toolbar_icon_coordinate(points[3].1),
-    );
-}
-
-unsafe fn icon_ellipse(
-    graphics: *mut GpGraphics,
-    pen: *mut GpPen,
-    left: i32,
-    top: i32,
-    x: f32,
-    y: f32,
-    width: f32,
-    height: f32,
-) {
-    GdipDrawEllipse(
-        graphics,
-        pen,
-        left as f32 + toolbar_icon_coordinate(x),
-        top as f32 + toolbar_icon_coordinate(y),
-        width * TOOLBAR_ICON_SCALE,
-        height * TOOLBAR_ICON_SCALE,
-    );
-}
-
-unsafe fn icon_round_rectangle(
-    graphics: *mut GpGraphics,
-    pen: *mut GpPen,
-    left: i32,
-    top: i32,
-    x: f32,
-    y: f32,
-    width: f32,
-    height: f32,
-    radius: f32,
-) {
-    let scaled_x = toolbar_icon_coordinate(x);
-    let scaled_y = toolbar_icon_coordinate(y);
-    let scaled_width = width * TOOLBAR_ICON_SCALE;
-    let scaled_height = height * TOOLBAR_ICON_SCALE;
-    let diameter = radius * 2.0 * TOOLBAR_ICON_SCALE;
-    icon_line(graphics, pen, left, top, x + radius, y, x + width - radius, y);
-    GdipDrawArc(
-        graphics,
-        pen,
-        left as f32 + scaled_x + scaled_width - diameter,
-        top as f32 + scaled_y,
-        diameter,
-        diameter,
-        -90.0,
-        90.0,
-    );
-    icon_line(
-        graphics,
-        pen,
-        left,
-        top,
-        x + width,
-        y + radius,
-        x + width,
-        y + height - radius,
-    );
-    GdipDrawArc(
-        graphics,
-        pen,
-        left as f32 + scaled_x + scaled_width - diameter,
-        top as f32 + scaled_y + scaled_height - diameter,
-        diameter,
-        diameter,
-        0.0,
-        90.0,
-    );
-    icon_line(
-        graphics,
-        pen,
-        left,
-        top,
-        x + width - radius,
-        y + height,
-        x + radius,
-        y + height,
-    );
-    GdipDrawArc(
-        graphics,
-        pen,
-        left as f32 + scaled_x,
-        top as f32 + scaled_y + scaled_height - diameter,
-        diameter,
-        diameter,
-        90.0,
-        90.0,
-    );
-    icon_line(
-        graphics,
-        pen,
-        left,
-        top,
-        x,
-        y + height - radius,
-        x,
-        y + radius,
-    );
-    GdipDrawArc(
-        graphics,
-        pen,
-        left as f32 + scaled_x,
-        top as f32 + scaled_y,
-        diameter,
-        diameter,
-        180.0,
-        90.0,
-    );
-}
-
-unsafe fn icon_filled_dot(
-    graphics: *mut GpGraphics,
-    color: u32,
-    left: i32,
-    top: i32,
-    x: f32,
-    y: f32,
-    size: f32,
-) {
-    let mut brush: *mut GpSolidFill = null_mut();
-    if GdipCreateSolidFill(color, &mut brush) == 0 {
-        GdipFillEllipse(
-            graphics,
-            brush as *mut GpBrush,
-            left as f32 + toolbar_icon_coordinate(x),
-            top as f32 + toolbar_icon_coordinate(y),
-            size * TOOLBAR_ICON_SCALE,
-            size * TOOLBAR_ICON_SCALE,
-        );
-        GdipDeleteBrush(brush as *mut GpBrush);
-    }
-}
-
-unsafe fn icon_filled_rectangle(
-    graphics: *mut GpGraphics,
-    color: u32,
-    left: i32,
-    top: i32,
-    x: f32,
-    y: f32,
-    width: f32,
-    height: f32,
-) {
-    let mut brush: *mut GpSolidFill = null_mut();
-    if GdipCreateSolidFill(color, &mut brush) == 0 {
-        GdipFillRectangle(
-            graphics,
-            brush as *mut GpBrush,
-            left as f32 + toolbar_icon_coordinate(x),
-            top as f32 + toolbar_icon_coordinate(y),
-            width * TOOLBAR_ICON_SCALE,
-            height * TOOLBAR_ICON_SCALE,
-        );
-        GdipDeleteBrush(brush as *mut GpBrush);
-    }
-}
-
-unsafe fn draw_toolbar_icon_shape(
-    graphics: *mut GpGraphics,
-    pen: *mut GpPen,
-    color: u32,
-    index: usize,
-    left: i32,
-    top: i32,
-) {
-    match index {
-        // Six-dot grip like the reference toolbar.
-        0 => {
-            for y in [6.0, 12.0, 18.0] {
-                for x in [8.0, 16.0] {
-                    icon_filled_dot(graphics, color, left, top, x - 1.2, y - 1.2, 2.4);
-                }
-            }
-        }
-        1 => icon_round_rectangle(graphics, pen, left, top, 4.0, 4.0, 16.0, 16.0, 1.5),
-        2 => icon_ellipse(graphics, pen, left, top, 4.0, 4.0, 16.0, 16.0),
-        3 => {
-            icon_line(graphics, pen, left, top, 3.0, 12.0, 20.0, 12.0);
-            icon_polyline(graphics, pen, left, top, &[(14.0, 7.0), (20.0, 12.0), (14.0, 17.0)]);
-        }
-        // Pen stroke with a small freehand flourish.
-        4 => {
-            icon_polyline(
-                graphics,
-                pen,
-                left,
-                top,
-                &[(6.0, 16.0), (15.5, 5.5), (19.0, 9.0), (9.5, 19.5), (6.0, 16.0)],
-            );
-            icon_line(graphics, pen, left, top, 9.0, 13.0, 12.5, 16.5);
-            icon_bezier(graphics, pen, left, top, [(3.0, 20.0), (5.0, 16.5), (7.0, 22.0), (9.0, 18.5)]);
-            icon_bezier(graphics, pen, left, top, [(9.0, 18.5), (12.0, 15.5), (13.0, 22.0), (17.0, 18.0)]);
-        }
-        // Mosaic: a compact tile mark with one filled cell.
-        5 => {
-            icon_round_rectangle(graphics, pen, left, top, 4.0, 4.0, 16.0, 16.0, 1.5);
-            icon_line(graphics, pen, left, top, 12.0, 4.5, 12.0, 19.5);
-            icon_line(graphics, pen, left, top, 4.5, 12.0, 19.5, 12.0);
-            icon_filled_rectangle(graphics, color, left, top, 13.0, 5.0, 6.0, 6.0);
-        }
-        6 => {
-            icon_line(graphics, pen, left, top, 3.5, 5.0, 20.5, 5.0);
-            icon_line(graphics, pen, left, top, 12.0, 5.0, 12.0, 20.0);
-        }
-        // Tag-shaped number marker.
-        7 => {
-            icon_polyline(
-                graphics,
-                pen,
-                left,
-                top,
-                &[(4.0, 6.0), (13.0, 6.0), (20.0, 13.0), (13.0, 20.0), (4.0, 11.0), (4.0, 6.0)],
-            );
-            icon_ellipse(graphics, pen, left, top, 7.0, 8.0, 2.0, 2.0);
-        }
-        // Pinned screenshot tile with a clear plus badge.
-        8 => {
-            icon_round_rectangle(graphics, pen, left, top, 3.5, 5.0, 14.0, 14.0, 1.5);
-            icon_ellipse(graphics, pen, left, top, 7.0, 8.0, 2.5, 2.5);
-            icon_polyline(graphics, pen, left, top, &[(5.0, 17.0), (9.0, 13.0), (12.0, 16.0), (15.0, 12.5), (17.5, 15.5)]);
-            icon_line(graphics, pen, left, top, 19.0, 4.0, 19.0, 11.0);
-            icon_line(graphics, pen, left, top, 15.5, 7.5, 22.5, 7.5);
-        }
-        // Long capture page with a vertical scroll cue.
-        9 => {
-            icon_round_rectangle(graphics, pen, left, top, 5.0, 3.0, 14.0, 18.0, 1.5);
-            icon_line(graphics, pen, left, top, 8.0, 8.0, 14.0, 8.0);
-            icon_line(graphics, pen, left, top, 8.0, 11.0, 12.0, 11.0);
-            icon_line(graphics, pen, left, top, 16.0, 8.0, 16.0, 17.0);
-            icon_polyline(graphics, pen, left, top, &[(14.0, 10.0), (16.0, 8.0), (18.0, 10.0)]);
-            icon_polyline(graphics, pen, left, top, &[(14.0, 15.0), (16.0, 17.0), (18.0, 15.0)]);
-        }
-        10 => {
-            icon_bezier(graphics, pen, left, top, [(19.0, 17.0), (20.0, 8.0), (13.0, 5.0), (8.0, 8.0)]);
-            icon_polyline(graphics, pen, left, top, &[(8.5, 4.0), (5.0, 8.0), (10.0, 8.5)]);
-        }
-        // Download arrow and tray.
-        11 => {
-            icon_line(graphics, pen, left, top, 12.0, 3.5, 12.0, 15.0);
-            icon_polyline(graphics, pen, left, top, &[(7.5, 11.0), (12.0, 15.5), (16.5, 11.0)]);
-            icon_polyline(graphics, pen, left, top, &[(4.0, 17.0), (4.0, 20.0), (20.0, 20.0), (20.0, 17.0)]);
-        }
-        12 => {
-            icon_line(graphics, pen, left, top, 5.0, 5.0, 19.0, 19.0);
-            icon_line(graphics, pen, left, top, 19.0, 5.0, 5.0, 19.0);
-        }
-        13 => icon_polyline(graphics, pen, left, top, &[(4.5, 12.5), (9.5, 17.5), (20.0, 6.5)]),
-        // Pencil used by the edit action.
-        14 => {
-            icon_polyline(graphics, pen, left, top, &[(5.0, 17.5), (16.5, 6.0), (19.0, 8.5), (7.5, 20.0), (5.0, 20.5), (5.0, 17.5)]);
-            icon_line(graphics, pen, left, top, 14.0, 8.5, 16.5, 11.0);
-        }
-        15 => {
-            icon_ellipse(graphics, pen, left, top, 3.5, 3.5, 17.0, 17.0);
-            icon_filled_dot(graphics, color, left, top, 9.0, 9.0, 6.0);
-        }
-        // Scan corners and short text rows for OCR.
-        16 => {
-            for (x, y, sx, sy) in [
-                (4.0, 8.0, 1.0, 1.0),
-                (20.0, 8.0, -1.0, 1.0),
-                (4.0, 16.0, 1.0, -1.0),
-                (20.0, 16.0, -1.0, -1.0),
-            ] {
-                icon_line(graphics, pen, left, top, x, y, x + sx * 4.0, y);
-                icon_line(graphics, pen, left, top, x, y, x, y + sy * 3.0);
-            }
-            icon_line(graphics, pen, left, top, 9.0, 10.0, 15.0, 10.0);
-            icon_line(graphics, pen, left, top, 9.0, 13.0, 15.0, 13.0);
-        }
-        17 => icon_line(graphics, pen, left, top, 3.5, 12.0, 20.5, 12.0),
-        // Broad marker body and the highlight stroke it leaves behind.
-        18 => {
-            icon_polyline(graphics, pen, left, top, &[(6.0, 15.5), (15.5, 6.0), (19.0, 9.5), (9.5, 19.0), (6.0, 15.5)]);
-            icon_line(graphics, pen, left, top, 5.0, 20.0, 10.0, 20.0);
-            icon_line(graphics, pen, left, top, 8.0, 13.5, 11.5, 17.0);
-        }
-        // Plugin mark: crop corners around a lens and two pixel accents.
-        19 => {
-            icon_polyline(graphics, pen, left, top, &[(8.0, 3.5), (4.0, 3.5), (4.0, 8.0)]);
-            icon_polyline(graphics, pen, left, top, &[(16.0, 3.5), (20.0, 3.5), (20.0, 8.0)]);
-            icon_polyline(graphics, pen, left, top, &[(20.0, 16.0), (20.0, 20.0), (16.0, 20.0)]);
-            icon_polyline(graphics, pen, left, top, &[(8.0, 20.0), (4.0, 20.0), (4.0, 16.0)]);
-            icon_ellipse(graphics, pen, left, top, 9.0, 9.0, 6.0, 6.0);
-            icon_filled_dot(graphics, color, left, top, 17.0, 6.0, 1.8);
-            icon_filled_dot(graphics, color, left, top, 5.5, 17.0, 1.8);
-        }
-        // Selection cursor.
-        20 => {
-            icon_polyline(graphics, pen, left, top, &[(5.0, 3.5), (5.0, 19.5), (9.5, 15.0), (12.5, 21.0), (15.0, 19.5), (12.0, 13.5), (19.0, 13.5), (5.0, 3.5)]);
-        }
-        // Spotlight lens with four short focus rays.
-        21 => {
-            icon_ellipse(graphics, pen, left, top, 6.0, 6.0, 12.0, 12.0);
-            icon_line(graphics, pen, left, top, 12.0, 2.5, 12.0, 4.5);
-            icon_line(graphics, pen, left, top, 12.0, 19.5, 12.0, 21.5);
-            icon_line(graphics, pen, left, top, 2.5, 12.0, 4.5, 12.0);
-            icon_line(graphics, pen, left, top, 19.5, 12.0, 21.5, 12.0);
-        }
-        // Color controls.
-        23 => {
-            icon_ellipse(graphics, pen, left, top, 4.0, 4.0, 16.0, 16.0);
-            icon_filled_dot(graphics, color, left, top, 8.0, 6.0, 3.0);
-            icon_filled_dot(graphics, color, left, top, 14.0, 7.0, 3.0);
-            icon_filled_dot(graphics, color, left, top, 6.0, 13.0, 3.0);
-            icon_filled_dot(graphics, color, left, top, 14.0, 15.0, 3.0);
-        }
-        // Redo: a clockwise return arrow.
-        24 => {
-            icon_bezier(graphics, pen, left, top, [(7.0, 8.0), (11.0, 3.0), (19.0, 6.0), (18.0, 12.0)]);
-            icon_polyline(graphics, pen, left, top, &[(14.0, 10.0), (18.5, 13.0), (21.0, 8.0)]);
-        }
-        // Additional annotation tools: a shape, an ellipse, and a stroke.
-        25 => {
-            icon_round_rectangle(graphics, pen, left, top, 3.5, 4.0, 9.0, 8.0, 1.5);
-            icon_ellipse(graphics, pen, left, top, 14.5, 4.0, 7.0, 8.0);
-            icon_line(graphics, pen, left, top, 4.0, 17.5, 20.0, 17.5);
-        }
-        // Two overlapping frames for copy.
-        100 => {
-            icon_round_rectangle(graphics, pen, left, top, 8.0, 4.0, 12.0, 14.0, 1.5);
-            icon_round_rectangle(graphics, pen, left, top, 4.0, 8.0, 12.0, 12.0, 1.5);
-        }
-        _ => {}
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) unsafe fn draw_toolbar_icon(
-    dc: HDC,
-    index: usize,
-    x: i32,
-    y: i32,
-    _active_tool: Tool,
-    icon_color: u32,
-    _annotation_color: [u8; 4],
-    _stroke_width: u32,
-    _brush_size: u32,
-    _text_size: u32,
-    _stroke_style: StrokeStyle,
-) {
-    let graphics = gdiplus_graphics(dc);
-    if graphics.is_null() {
-        return;
-    }
-
-    let red = icon_color & 0xff;
-    let green = (icon_color >> 8) & 0xff;
-    let blue = (icon_color >> 16) & 0xff;
-    let color = 0xff00_0000 | (red << 16) | (green << 8) | blue;
     let mut pen: *mut GpPen = null_mut();
-    if GdipCreatePen1(color, 2.0, UnitPixel, &mut pen) == 0 {
+    let mut fill: *mut GpSolidFill = null_mut();
+    let stroke_w = (1.85 * s).max(1.5);
+    GdipCreatePen1(argb_color, stroke_w, UnitPixel, &mut pen);
+    GdipCreateSolidFill(argb_color, &mut fill);
+    if !pen.is_null() {
         GdipSetPenLineCap197819(pen, LineCapRound, LineCapRound, DashCapRound);
         GdipSetPenLineJoin(pen, LineJoinRound);
-        draw_toolbar_icon_shape(graphics, pen, color, index, x - 12, y - 12);
+    }
+
+    let line = |x1: f32, y1: f32, x2: f32, y2: f32| {
+        GdipDrawLine(g, pen, cx + x1 * s, cy + y1 * s, cx + x2 * s, cy + y2 * s);
+    };
+    let dot = |dx: f32, dy: f32, r: f32| {
+        let rr = r * s;
+        GdipFillEllipse(
+            g,
+            fill as *mut GpBrush,
+            cx + dx * s - rr,
+            cy + dy * s - rr,
+            rr * 2.0,
+            rr * 2.0,
+        );
+    };
+    let round_box = |rx: f32, ry: f32, rw: f32, rh: f32, rad: f32| {
+        draw_round_rect_gdip(
+            g,
+            cx + rx * s,
+            cy + ry * s,
+            rw * s,
+            rh * s,
+            rad * s,
+            None,
+            Some((argb_color, stroke_w)),
+        );
+    };
+
+    match action {
+        ToolbarAction::MoveToolbar => {
+            for row in [-5.5f32, 0.0, 5.5] {
+                dot(-2.6, row, 1.45);
+                dot(2.6, row, 1.45);
+            }
+        }
+        ToolbarAction::Tool(Tool::Select) | ToolbarAction::DemoPassThrough => {
+            // Sleek SnowAir tilted cursor pointer (closed crisp arrow)
+            line(-5.5, -7.2, 6.2, 0.2);
+            line(6.2, 0.2, 0.6, 1.8);
+            line(0.6, 1.8, -1.6, 7.2);
+            line(-1.6, 7.2, -5.5, -7.2);
+        }
+        ToolbarAction::Tool(Tool::Rectangle) => {
+            round_box(-7.8, -6.6, 15.6, 13.2, 2.8);
+        }
+        ToolbarAction::Tool(Tool::Ellipse) => {
+            GdipDrawEllipse(
+                g,
+                pen,
+                cx - 8.0 * s,
+                cy - 6.8 * s,
+                16.0 * s,
+                13.6 * s,
+            );
+        }
+        ToolbarAction::Tool(Tool::Triangle) => {
+            line(0.0, -7.5, 8.0, 6.8);
+            line(8.0, 6.8, -8.0, 6.8);
+            line(-8.0, 6.8, 0.0, -7.5);
+        }
+        ToolbarAction::Tool(Tool::Star) => {
+            let mut prev = (0.0f32, 0.0f32);
+            let mut first = (0.0f32, 0.0f32);
+            for i in 0..10 {
+                let a = -std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::PI / 5.0;
+                let r = if i % 2 == 0 { 8.4 } else { 3.7 };
+                let p = (r * a.cos(), r * a.sin());
+                if i == 0 {
+                    first = p;
+                } else {
+                    line(prev.0, prev.1, p.0, p.1);
+                }
+                prev = p;
+            }
+            line(prev.0, prev.1, first.0, first.1);
+        }
+        ToolbarAction::Tool(Tool::Bubble) => {
+            line(-7.5, -6.5, 7.5, -6.5);
+            line(7.5, -6.5, 7.5, 3.2);
+            line(7.5, 3.2, 0.2, 3.2);
+            line(0.2, 3.2, -4.2, 7.8);
+            line(-4.2, 7.8, -3.6, 3.2);
+            line(-3.6, 3.2, -7.5, 3.2);
+            line(-7.5, 3.2, -7.5, -6.5);
+        }
+        ToolbarAction::Tool(Tool::Burst) => {
+            let mut prev = (0.0f32, 0.0f32);
+            let mut first = (0.0f32, 0.0f32);
+            for i in 0..12 {
+                let a = i as f32 * std::f32::consts::TAU / 12.0;
+                let r = if i % 2 == 0 { 8.4 } else { 5.0 };
+                let p = (r * a.cos(), r * a.sin());
+                if i == 0 {
+                    first = p;
+                } else {
+                    line(prev.0, prev.1, p.0, p.1);
+                }
+                prev = p;
+            }
+            line(prev.0, prev.1, first.0, first.1);
+        }
+        ToolbarAction::Tool(Tool::Arrow) => {
+            line(-6.6, 6.6, 6.6, -6.6);
+            line(0.8, -6.6, 6.6, -6.6);
+            line(6.6, -6.6, 6.6, -0.8);
+        }
+        ToolbarAction::Tool(Tool::DoubleArrow) => {
+            line(-7.5, 0.0, 7.5, 0.0);
+            line(-7.5, 0.0, -3.8, -3.8);
+            line(-7.5, 0.0, -3.8, 3.8);
+            line(7.5, 0.0, 3.8, -3.8);
+            line(7.5, 0.0, 3.8, 3.8);
+        }
+        ToolbarAction::Tool(Tool::CurvedArrow) => {
+            GdipDrawBezier(
+                g,
+                pen,
+                cx - 7.0 * s,
+                cy + 6.0 * s,
+                cx - 6.5 * s,
+                cy - 5.8 * s,
+                cx + 2.2 * s,
+                cy - 7.0 * s,
+                cx + 7.0 * s,
+                cy - 3.6 * s,
+            );
+            line(7.0, -3.6, 2.6, -5.8);
+            line(7.0, -3.6, 4.8, 0.8);
+        }
+        ToolbarAction::Tool(Tool::Line) => {
+            line(-6.8, 6.8, 6.8, -6.8);
+        }
+        ToolbarAction::Tool(Tool::Dimension) => {
+            line(-7.5, 0.0, 7.5, 0.0);
+            line(-7.5, -4.8, -7.5, 4.8);
+            line(7.5, -4.8, 7.5, 4.8);
+        }
+        ToolbarAction::Tool(Tool::Angle) => {
+            line(-6.5, 6.5, 7.5, 6.5);
+            line(-6.5, 6.5, 3.2, -6.8);
+            GdipDrawArc(g, pen, cx - 12.5 * s, cy + 0.5 * s, 12.0 * s, 12.0 * s, -52.0, 52.0);
+        }
+        ToolbarAction::Tool(Tool::Wave) => {
+            GdipDrawBezier(
+                g,
+                pen,
+                cx - 8.0 * s,
+                cy + 1.0 * s,
+                cx - 3.8 * s,
+                cy - 6.5 * s,
+                cx + 3.8 * s,
+                cy + 7.5 * s,
+                cx + 8.0 * s,
+                cy - 1.0 * s,
+            );
+        }
+        ToolbarAction::Tool(Tool::Pen) => {
+            line(-6.8, 7.0, -4.5, 1.8);
+            line(-4.5, 1.8, 4.2, -7.0);
+            line(4.2, -7.0, 7.2, -4.0);
+            line(7.2, -4.0, -1.6, 4.8);
+            line(-1.6, 4.8, -6.8, 7.0);
+            line(1.8, -4.6, 4.8, -1.6);
+        }
+        ToolbarAction::Tool(Tool::Highlight) => {
+            line(-6.8, 5.8, 2.8, -6.4);
+            line(-1.4, 7.0, 7.0, -3.2);
+            line(-6.8, 5.8, -1.4, 7.0);
+            line(2.8, -6.4, 7.0, -3.2);
+        }
+        ToolbarAction::Tool(Tool::FadePen) => {
+            line(1.6, -8.0, -5.4, 1.0);
+            line(-5.4, 1.0, 0.5, 1.0);
+            line(0.5, 1.0, -1.6, 8.0);
+            line(-1.6, 8.0, 5.4, -1.0);
+            line(5.4, -1.0, -0.5, -1.0);
+            line(-0.5, -1.0, 1.6, -8.0);
+        }
+        ToolbarAction::Tool(Tool::Text) => {
+            round_box(-7.5, -7.5, 15.0, 15.0, 3.0);
+            line(-3.8, -3.2, 3.8, -3.2);
+            line(0.0, -3.2, 0.0, 4.4);
+        }
+        ToolbarAction::Tool(Tool::Number) | ToolbarAction::PlaceNumber => {
+            GdipDrawEllipse(g, pen, cx - 8.0 * s, cy - 8.0 * s, 16.0 * s, 16.0 * s);
+            line(0.2, -4.0, 0.2, 4.2);
+            line(-2.2, -1.8, 0.2, -4.0);
+            line(-2.4, 4.2, 2.6, 4.2);
+        }
+        ToolbarAction::Tool(Tool::Mosaic) => {
+            round_box(-7.5, -7.5, 15.0, 15.0, 2.8);
+            for gy in 0..3 {
+                for gx in 0..3 {
+                    if (gx + gy) % 2 == 0 {
+                        GdipFillRectangle(
+                            g,
+                            fill as *mut GpBrush,
+                            cx + (-5.6 + gx as f32 * 3.8) * s,
+                            cy + (-5.6 + gy as f32 * 3.8) * s,
+                            3.3 * s,
+                            3.3 * s,
+                        );
+                    }
+                }
+            }
+        }
+        ToolbarAction::Tool(Tool::Patina) => {
+            GdipDrawEllipse(g, pen, cx - 8.0 * s, cy - 8.0 * s, 16.0 * s, 16.0 * s);
+            line(0.0, 1.2, 4.4, -3.8);
+            dot(0.0, 1.6, 1.6);
+        }
+        ToolbarAction::Tool(Tool::Watermark) => {
+            line(-6.4, 0.0, 0.0, -6.4);
+            line(-5.4, 5.8, 5.8, -5.4);
+            line(0.4, 6.4, 6.4, 0.4);
+        }
+        ToolbarAction::Tool(Tool::Spotlight) => {
+            GdipDrawEllipse(g, pen, cx - 8.0 * s, cy - 8.0 * s, 16.0 * s, 16.0 * s);
+            line(0.0, -8.0, 0.0, 8.0);
+            line(0.0, -3.8, 6.2, -3.8);
+            line(0.0, 0.0, 7.6, 0.0);
+            line(0.0, 3.8, 6.2, 3.8);
+        }
+        ToolbarAction::Tool(Tool::Eraser) => {
+            line(-7.0, 2.0, 1.0, -6.4);
+            line(1.0, -6.4, 7.4, 0.0);
+            line(7.4, 0.0, 1.2, 6.8);
+            line(1.2, 6.8, -3.8, 6.8);
+            line(-3.8, 6.8, -7.0, 2.0);
+            line(-2.6, -2.0, 3.6, 4.2);
+            line(1.2, 6.8, 7.2, 6.8);
+        }
+        ToolbarAction::Undo => {
+            line(-6.8, -2.6, -2.6, -6.8);
+            line(-6.8, -2.6, -2.6, 1.6);
+            line(-6.8, -2.6, 2.4, -2.6);
+            GdipDrawArc(g, pen, cx - 2.2 * s, cy - 2.6 * s, 9.6 * s, 9.6 * s, -90.0, 180.0);
+            line(-2.4, 7.0, 2.6, 7.0);
+        }
+        ToolbarAction::Redo => {
+            line(6.8, -2.6, 2.6, -6.8);
+            line(6.8, -2.6, 2.6, 1.6);
+            line(6.8, -2.6, -2.4, -2.6);
+            GdipDrawArc(g, pen, cx - 7.4 * s, cy - 2.6 * s, 9.6 * s, 9.6 * s, 90.0, 180.0);
+            line(-2.6, 7.0, 2.4, 7.0);
+        }
+        ToolbarAction::Record => {
+            // SnowAir viewfinder brackets + solid center dot
+            line(-8.0, -3.6, -8.0, -8.0);
+            line(-8.0, -8.0, -3.6, -8.0);
+            line(3.6, -8.0, 8.0, -8.0);
+            line(8.0, -8.0, 8.0, -3.6);
+            line(-8.0, 3.6, -8.0, 8.0);
+            line(-8.0, 8.0, -3.6, 8.0);
+            line(3.6, 8.0, 8.0, 8.0);
+            line(8.0, 8.0, 8.0, 3.6);
+            dot(0.0, 0.0, 3.1);
+        }
+        ToolbarAction::Pin => {
+            line(-0.8, -7.2, 7.2, 0.8);
+            line(0.8, -5.6, -3.4, -0.4);
+            line(5.6, -0.8, 0.4, 3.4);
+            line(-5.2, -1.2, 1.2, 5.2);
+            line(-2.4, 2.4, -7.4, 7.4);
+        }
+        ToolbarAction::Ocr => {
+            line(-8.0, -3.6, -8.0, -8.0);
+            line(-8.0, -8.0, -3.6, -8.0);
+            line(3.6, -8.0, 8.0, -8.0);
+            line(8.0, -8.0, 8.0, -3.6);
+            line(-8.0, 3.6, -8.0, 8.0);
+            line(-8.0, 8.0, -3.6, 8.0);
+            line(3.6, 8.0, 8.0, 8.0);
+            line(8.0, 8.0, 8.0, 3.6);
+            line(-4.2, -2.6, 4.2, -2.6);
+            line(-4.2, 0.6, 4.2, 0.6);
+            line(-4.2, 3.8, 1.6, 3.8);
+        }
+        ToolbarAction::Translate => {
+            line(-8.0, -4.8, -0.6, -4.8);
+            line(-4.3, -7.6, -4.3, -4.8);
+            line(-2.2, -4.8, -7.0, 2.6);
+            line(-6.4, -3.0, -1.6, 1.6);
+            line(1.2, 7.0, 4.8, -1.6);
+            line(4.8, -1.6, 8.2, 7.0);
+            line(2.4, 4.2, 7.0, 4.2);
+        }
+        ToolbarAction::Qr => {
+            GdipDrawRectangle(g, pen, cx - 7.5 * s, cy - 7.5 * s, 5.8 * s, 5.8 * s);
+            GdipDrawRectangle(g, pen, cx + 1.7 * s, cy - 7.5 * s, 5.8 * s, 5.8 * s);
+            GdipDrawRectangle(g, pen, cx - 7.5 * s, cy + 1.7 * s, 5.8 * s, 5.8 * s);
+            dot(3.2, 3.2, 1.5);
+            dot(6.4, 6.4, 1.5);
+        }
+        ToolbarAction::Scroll => {
+            round_box(-6.4, -8.0, 12.8, 16.0, 2.6);
+            line(0.0, -4.4, 0.0, 4.4);
+            line(-2.8, -1.6, 0.0, -4.4);
+            line(2.8, -1.6, 0.0, -4.4);
+            line(-2.8, 1.6, 0.0, 4.4);
+            line(2.8, 1.6, 0.0, 4.4);
+        }
+        ToolbarAction::ScrollPauseToggle => {
+            round_box(-7.5, -7.0, 15.0, 14.0, 2.8);
+            if scroll_paused {
+                line(-2.2, -3.4, 3.8, 0.0);
+                line(3.8, 0.0, -2.2, 3.4);
+                line(-2.2, 3.4, -2.2, -3.4);
+            } else {
+                line(-2.4, -3.4, -2.4, 3.4);
+                line(2.4, -3.4, 2.4, 3.4);
+            }
+        }
+        ToolbarAction::Edit => {
+            round_box(-7.5, -7.0, 15.0, 14.0, 2.8);
+            line(-1.0, -7.0, -1.0, 7.0);
+            line(-1.0, 0.0, 7.5, 0.0);
+        }
+        ToolbarAction::Copy => {
+            round_box(-6.0, -3.6, 9.6, 10.6, 2.0);
+            line(-2.6, -7.0, 6.4, -7.0);
+            line(6.4, -7.0, 6.4, 3.6);
+        }
+        ToolbarAction::Save => {
+            line(0.0, -7.6, 0.0, 2.6);
+            line(-3.8, -1.2, 0.0, 2.6);
+            line(3.8, -1.2, 0.0, 2.6);
+            line(-7.2, 2.6, -7.2, 7.0);
+            line(-7.2, 7.0, 7.2, 7.0);
+            line(7.2, 7.0, 7.2, 2.6);
+        }
+        ToolbarAction::Cancel => {
+            line(-6.0, -6.0, 6.0, 6.0);
+            line(6.0, -6.0, -6.0, 6.0);
+        }
+        ToolbarAction::Finish => {
+            line(-7.0, 0.4, -1.6, 6.0);
+            line(-1.6, 6.0, 7.6, -5.0);
+        }
+        ToolbarAction::DemoBackground => {
+            round_box(-8.0, -6.4, 16.0, 11.4, 2.2);
+            line(-4.4, 7.6, 4.4, 7.6);
+            line(0.0, 5.0, 0.0, 7.6);
+        }
+        ToolbarAction::DemoClear => {
+            GdipDrawArc(g, pen, cx - 7.0 * s, cy - 7.0 * s, 14.0 * s, 14.0 * s, -45.0, 290.0);
+            line(3.8, -6.6, 7.0, -2.8);
+            line(7.0, -2.8, 2.6, -1.6);
+        }
+    }
+
+    if !fill.is_null() {
+        GdipDeleteBrush(fill as *mut GpBrush);
+    }
+    if !pen.is_null() {
         GdipDeletePen(pen);
     }
-    GdipDeleteGraphics(graphics);
 }

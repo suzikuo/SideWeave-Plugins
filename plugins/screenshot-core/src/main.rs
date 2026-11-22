@@ -1,26 +1,33 @@
-use sideweave_plugin_api::{
-    ErrorCode, PluginError, PluginHandshakeResponse, PluginId, PluginRequest,
-    PluginRequestKind, PluginResponse, PluginWireMessage, API_VERSION,
-};
-use sideweave_plugin_ipc::{FrameReader, FrameWriter};
+use base64::Engine;
+use image::GenericImageView;
 use model::{Settings, StatusSnapshot};
 use serde_json::{json, Value};
+use sideweave_plugin_api::{
+    ErrorCode, PluginError, PluginHandshakeResponse, PluginId, PluginRequest, PluginRequestKind,
+    PluginResponse, PluginWireMessage, API_VERSION,
+};
+use sideweave_plugin_ipc::{FrameReader, FrameWriter};
 use std::env;
 use std::fs::OpenOptions;
+use std::io::Cursor;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 #[cfg(windows)]
 mod capture;
-#[cfg(windows)]
-mod hdr_capture;
+mod doc_export;
 #[cfg(windows)]
 mod export;
+#[cfg(windows)]
+mod hdr_capture;
+mod history;
 mod host_services;
 mod model;
-#[cfg(windows)]
-mod recorder;
+mod ocr;
 #[cfg(windows)]
 mod qr;
+#[cfg(windows)]
+mod recorder;
 #[cfg(windows)]
 mod scroll;
 #[cfg(windows)]
@@ -28,6 +35,7 @@ mod scroll_input;
 #[cfg(windows)]
 mod session;
 pub mod tencent_ocr;
+mod theme;
 mod toolbar;
 mod translation;
 #[cfg(windows)]
@@ -127,9 +135,22 @@ fn main() -> Result<(), String> {
             host_services::HostServicesClient::new(&mut reader, &mut writer, plugin_id.clone());
         let response = core.handle(&request, &mut host);
         drop(host);
-        writer
-            .write_message(&PluginWireMessage::Response(response))
-            .map_err(|error| format!("写入插件响应失败：{error:?}"))?;
+        if let Err(error) = writer.write_message(&PluginWireMessage::Response(response)) {
+            match error {
+                sideweave_plugin_ipc::IpcError::Protocol(
+                    sideweave_plugin_api::ProtocolError::MessageTooLarge(bytes),
+                ) => {
+                    let fallback = failure(
+                        &request,
+                        format!("返回数据超出 IPC 帧限制（{bytes} 字节），已安全拦截"),
+                    );
+                    writer
+                        .write_message(&PluginWireMessage::Response(fallback))
+                        .map_err(|e| format!("写入错误响应失败：{e:?}"))?;
+                }
+                other => return Err(format!("写入插件响应失败：{other:?}")),
+            }
+        }
         if should_stop {
             break;
         }
@@ -156,9 +177,6 @@ impl Core {
         let result = match request.kind {
             PluginRequestKind::Call => self.call(request, host),
             PluginRequestKind::Activate => {
-                // The native hotkey can open the capture toolbar without going
-                // through `start_capture`, so warm the in-memory OCR credentials
-                // as soon as the host activates this plugin.
                 self.refresh_tencent_credentials(host).map(|_| json!(null))
             }
             PluginRequestKind::Deactivate => Ok(json!(null)),
@@ -167,17 +185,32 @@ impl Core {
                 self.ui.shutdown();
                 Ok(json!(null))
             }
-            PluginRequestKind::GetInfo => {
-                // Some hosts query info without sending Activate first. Load the
-                // credentials here as well so a hotkey-triggered toolbar works
-                // immediately after the plugin process is restarted.
-                self.refresh_tencent_credentials(host).map(|_| {
-                    json!({
-                        "native": true,
-                        "features": ["region", "annotation", "scroll", "ocr", "translation", "pin", "watermark", "recording", "animated_webp", "gif", "mp4"]
-                    })
+            PluginRequestKind::GetInfo => self.refresh_tencent_credentials(host).map(|_| {
+                json!({
+                    "native": true,
+                    "features": [
+                        "region",
+                        "annotation",
+                        "scroll",
+                        "ocr",
+                        "offline_ocr",
+                        "translation",
+                        "in_place_translation",
+                        "pin",
+                        "quick_pin",
+                        "demo",
+                        "watermark",
+                        "recording",
+                        "animated_webp",
+                        "gif",
+                        "mp4",
+                        "collage",
+                        "pdf_export",
+                        "pptx_export",
+                        "history"
+                    ]
                 })
-            }
+            }),
         };
         match result {
             Ok(result) => success(request, result),
@@ -197,6 +230,7 @@ impl Core {
                 let mut value =
                     serde_json::to_value(settings).map_err(|error| error.to_string())?;
                 value["tencentOcrConfigured"] = json!(configured);
+                value["systemPrefersLight"] = json!(theme::system_prefers_light());
                 Ok(value)
             }
             Some("set_settings") => {
@@ -207,7 +241,7 @@ impl Core {
                 next.save()?;
                 *self.settings.lock().map_err(|_| "设置锁已损坏")? = next.clone();
                 #[cfg(windows)]
-                self.ui.update_hotkey(&next.hotkey);
+                self.ui.update_hotkeys(next);
                 Ok(json!(null))
             }
             Some("start_capture") => {
@@ -227,6 +261,17 @@ impl Core {
                 #[cfg(not(windows))]
                 {
                     Err("截图核心目前只支持 Windows".into())
+                }
+            }
+            Some("start_demo") => {
+                #[cfg(windows)]
+                {
+                    self.ui.start_demo();
+                    Ok(json!(null))
+                }
+                #[cfg(not(windows))]
+                {
+                    Err("演示模式目前只支持 Windows".into())
                 }
             }
             Some("start_recording") => {
@@ -270,11 +315,7 @@ impl Core {
             Some("export_recording") => {
                 #[cfg(windows)]
                 {
-                    let format = match request
-                        .payload
-                        .get("format")
-                        .and_then(Value::as_str)
-                    {
+                    let format = match request.payload.get("format").and_then(Value::as_str) {
                         Some("gif") => recorder::AnimationFormat::Gif,
                         Some("webp") => recorder::AnimationFormat::Webp,
                         Some("mp4") => recorder::AnimationFormat::Mp4,
@@ -322,6 +363,266 @@ impl Core {
                 {
                     Err("贴图目前只支持 Windows".into())
                 }
+            }
+            Some("quick_pin") => {
+                #[cfg(windows)]
+                {
+                    self.ui.quick_pin();
+                    Ok(json!(null))
+                }
+                #[cfg(not(windows))]
+                {
+                    Err("贴图目前只支持 Windows".into())
+                }
+            }
+            Some("pin_file") => {
+                #[cfg(windows)]
+                {
+                    let path = request
+                        .payload
+                        .get("path")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| "缺少图片路径".to_string())?;
+                    self.ui.pin_file(path.to_string());
+                    Ok(json!(null))
+                }
+                #[cfg(not(windows))]
+                {
+                    Err("贴图目前只支持 Windows".into())
+                }
+            }
+            Some("copy_file") => {
+                #[cfg(windows)]
+                {
+                    let path = request
+                        .payload
+                        .get("path")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| "缺少图片路径".to_string())?;
+                    let img = image::open(Path::new(path))
+                        .map_err(|e| format!("读取图片失败：{e}"))?;
+                    let rgba = img.to_rgba8();
+                    let (w, h) = rgba.dimensions();
+                    export::copy_to_clipboard(w as usize, h as usize, rgba.as_raw())?;
+                    Ok(json!(null))
+                }
+                #[cfg(not(windows))]
+                {
+                    Err("仅支持 Windows".into())
+                }
+            }
+            Some("copy_image_data_url") => {
+                #[cfg(windows)]
+                {
+                    let data_url = request
+                        .payload
+                        .get("dataUrl")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| "缺少图片数据".to_string())?;
+                    let img = doc_export::decode_page_image(data_url)?;
+                    let rgba = img.to_rgba8();
+                    let (w, h) = rgba.dimensions();
+                    export::copy_to_clipboard(w as usize, h as usize, rgba.as_raw())?;
+                    Ok(json!(null))
+                }
+                #[cfg(not(windows))]
+                {
+                    Err("仅支持 Windows".into())
+                }
+            }
+            Some("quick_translate") => {
+                let text = request
+                    .payload
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let source_lang = request
+                    .payload
+                    .get("sourceLang")
+                    .and_then(Value::as_str)
+                    .unwrap_or("auto");
+                let target_lang = request
+                    .payload
+                    .get("targetLang")
+                    .and_then(Value::as_str)
+                    .unwrap_or("zh-CN");
+                let provider_str = request
+                    .payload
+                    .get("provider")
+                    .and_then(Value::as_str)
+                    .unwrap_or("youdao");
+                let provider = translation::TranslateProvider::from_str(provider_str);
+                let resp = translation::translate_text(text, source_lang, target_lang, provider)?;
+                serde_json::to_value(resp).map_err(|e| e.to_string())
+            }
+            Some("get_history") => {
+                let save_dir = self
+                    .settings
+                    .lock()
+                    .map_err(|_| "设置锁已损坏")?
+                    .resolved_save_directory();
+                let kind = request.payload.get("kind").and_then(Value::as_str);
+                let tag = request.payload.get("tag").and_then(Value::as_str);
+                let query = request.payload.get("query").and_then(Value::as_str);
+                let include_dir = request
+                    .payload
+                    .get("includeDirScan")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true);
+                let items = history::list_items(&save_dir, kind, tag, query, include_dir);
+                serde_json::to_value(items).map_err(|e| e.to_string())
+            }
+            Some("add_history_tag") => {
+                let id = request
+                    .payload
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "缺少历史项 id".to_string())?;
+                let path = request.payload.get("path").and_then(Value::as_str);
+                let tag = request
+                    .payload
+                    .get("tag")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "缺少标签内容".to_string())?;
+                let tags = history::add_tag(id, path, tag)?;
+                Ok(json!(tags))
+            }
+            Some("remove_history_tag") => {
+                let id = request
+                    .payload
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "缺少历史项 id".to_string())?;
+                let path = request.payload.get("path").and_then(Value::as_str);
+                let tag = request
+                    .payload
+                    .get("tag")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "缺少标签内容".to_string())?;
+                let tags = history::remove_tag(id, path, tag)?;
+                Ok(json!(tags))
+            }
+            Some("delete_history_item") => {
+                let id = request
+                    .payload
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "缺少历史项 id".to_string())?;
+                let path = request.payload.get("path").and_then(Value::as_str);
+                let delete_file = request
+                    .payload
+                    .get("deleteFile")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                history::delete_item(id, path, delete_file)?;
+                Ok(json!(null))
+            }
+            Some("clear_history") => {
+                history::clear_all()?;
+                Ok(json!(null))
+            }
+            Some("clear_thumb_cache") => {
+                history::clear_thumb_cache()?;
+                Ok(json!(null))
+            }
+            Some("open_history_file") => {
+                let path = request
+                    .payload
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "缺少文件路径".to_string())?;
+                let reveal = request
+                    .payload
+                    .get("reveal")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                open_or_reveal_file(path, reveal)?;
+                Ok(json!(null))
+            }
+            Some("read_image_data_url") => {
+                let path = request
+                    .payload
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "缺少图片路径".to_string())?;
+                let max_dim = request
+                    .payload
+                    .get("maxDim")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0) as u32;
+                read_image_as_data_url(path, max_dim)
+            }
+            Some("read_image_chunk") => {
+                let path = request
+                    .payload
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "缺少图片路径".to_string())?;
+                let max_dim = request
+                    .payload
+                    .get("maxDim")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(1600) as u32;
+                let chunk_index = request
+                    .payload
+                    .get("chunkIndex")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0) as usize;
+                let chunk_size = request
+                    .payload
+                    .get("chunkSize")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(140_000)
+                    .clamp(16_384, 180_000) as usize;
+                read_image_chunk(path, max_dim, chunk_index, chunk_size)
+            }
+            Some("upload_temp_chunk") => {
+                let upload_id = request
+                    .payload
+                    .get("uploadId")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "缺少 uploadId".to_string())?;
+                let chunk_b64 = request
+                    .payload
+                    .get("chunkBase64")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "缺少 chunkBase64".to_string())?;
+                let append = request
+                    .payload
+                    .get("append")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let ext = request
+                    .payload
+                    .get("ext")
+                    .and_then(Value::as_str)
+                    .unwrap_or("png");
+                let path = write_temp_upload_chunk(upload_id, chunk_b64, append, ext)?;
+                Ok(json!({ "path": path }))
+            }
+            Some("choose_images") => {
+                let paths = pick_image_files()?;
+                Ok(json!(paths))
+            }
+            Some("export_document") => {
+                let mut req: doc_export::ExportDocumentRequest =
+                    serde_json::from_value(request.payload.clone())
+                        .map_err(|e| format!("文档导出参数无效：{e}"))?;
+                if req.save_directory.is_none() {
+                    let dir = self
+                        .settings
+                        .lock()
+                        .map_err(|_| "设置锁已损坏")?
+                        .resolved_save_directory();
+                    req.save_directory = Some(dir.to_string_lossy().into_owned());
+                }
+                let (path, width, height) = doc_export::export_document(&req)?;
+                history::record_item("edit", &path, width, height);
+                Ok(json!({
+                    "path": path,
+                    "width": width,
+                    "height": height
+                }))
             }
             Some("clear_ocr") => {
                 self.status.lock().map_err(|_| "状态锁已损坏")?.ocr_text = None;
@@ -419,7 +720,6 @@ impl Core {
             .map_err(|_| "OCR 凭据锁已损坏")? = Some(stored.into_credentials());
         Ok(())
     }
-
 }
 
 #[derive(serde::Deserialize)]
@@ -493,6 +793,265 @@ fn argument(args: &[String], name: &str) -> Result<String, String> {
         .ok_or_else(|| format!("缺少参数：{name}"))
 }
 
+/// Maximum base64 payload returned in a single `read_image_data_url` response
+/// so the JSON envelope stays safely below `sideweave_plugin_api::MAX_MESSAGE_BYTES` (256 KB).
+const SAFE_INLINE_B64_LIMIT: usize = 180 * 1024;
+
+struct CachedChunkImage {
+    key: String,
+    mime: String,
+    b64: String,
+    width: u32,
+    height: u32,
+}
+
+static CHUNK_IMAGE_CACHE: std::sync::OnceLock<Mutex<Option<CachedChunkImage>>> =
+    std::sync::OnceLock::new();
+
+fn encode_jpeg_bytes(img: &image::DynamicImage, quality: u8) -> Result<Vec<u8>, String> {
+    let rgb = img.to_rgb8();
+    let mut out = Vec::new();
+    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality);
+    encoder
+        .encode(
+            rgb.as_raw(),
+            rgb.width(),
+            rgb.height(),
+            image::ExtendedColorType::Rgb8,
+        )
+        .map_err(|e| format!("编码 JPEG 失败：{e}"))?;
+    Ok(out)
+}
+
+fn read_image_as_data_url(path: &str, max_dim: u32) -> Result<Value, String> {
+    let p = Path::new(path);
+    if !p.is_file() {
+        return Err("文件不存在".into());
+    }
+    // Fast disk-cached JPEG thumbnail path for history / preview cards
+    if max_dim > 0 && max_dim <= 480 {
+        let (jpeg, orig_w, orig_h) = history::read_or_build_thumbnail(p, max_dim)?;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&jpeg);
+        return Ok(json!({
+            "dataUrl": format!("data:image/jpeg;base64,{b64}"),
+            "width": orig_w,
+            "height": orig_h
+        }));
+    }
+
+    let img = image::open(p).map_err(|e| format!("读取图片失败：{e}"))?;
+    let (orig_w, orig_h) = img.dimensions();
+    let mut cur_dim = if max_dim > 0 { max_dim } else { 1280 };
+    let mut quality = 86u8;
+    for _ in 0..5 {
+        let target = if orig_w > cur_dim || orig_h > cur_dim {
+            img.thumbnail(cur_dim, cur_dim)
+        } else {
+            img.clone()
+        };
+        let bytes = encode_jpeg_bytes(&target, quality)?;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        if b64.len() <= SAFE_INLINE_B64_LIMIT || cur_dim <= 480 {
+            return Ok(json!({
+                "dataUrl": format!("data:image/jpeg;base64,{b64}"),
+                "width": orig_w,
+                "height": orig_h
+            }));
+        }
+        cur_dim = (cur_dim * 3 / 4).max(480);
+        quality = quality.saturating_sub(8).max(65);
+    }
+    Err("图片过大，无法内联传输".into())
+}
+
+fn read_image_chunk(
+    path: &str,
+    max_dim: u32,
+    chunk_index: usize,
+    chunk_size: usize,
+) -> Result<Value, String> {
+    let p = Path::new(path);
+    if !p.is_file() {
+        return Err("文件不存在".into());
+    }
+    let meta = std::fs::metadata(p).map_err(|e| format!("读取文件信息失败：{e}"))?;
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let cache_key = format!("{}|{}|{}|{}", path.to_ascii_lowercase(), meta.len(), mtime, max_dim);
+
+    let cache_lock = CHUNK_IMAGE_CACHE.get_or_init(|| Mutex::new(None));
+    let mut guard = cache_lock.lock().map_err(|_| "图片缓存锁已损坏")?;
+    let needs_load = guard.as_ref().is_none_or(|c| c.key != cache_key);
+    if needs_load {
+        let img = image::open(p).map_err(|e| format!("读取图片失败：{e}"))?;
+        let (orig_w, orig_h) = img.dimensions();
+        let target = if max_dim > 0 && (orig_w > max_dim || orig_h > max_dim) {
+            img.thumbnail(max_dim, max_dim)
+        } else {
+            img
+        };
+        let has_alpha = matches!(
+            target.color(),
+            image::ColorType::Rgba8
+                | image::ColorType::La8
+                | image::ColorType::Rgba16
+                | image::ColorType::La16
+                | image::ColorType::Rgba32F
+        );
+        let (mime, bytes) = if has_alpha {
+            let mut png_buf = Cursor::new(Vec::new());
+            if target.write_to(&mut png_buf, image::ImageFormat::Png).is_ok()
+                && png_buf.get_ref().len() <= 900 * 1024
+            {
+                ("image/png".to_string(), png_buf.into_inner())
+            } else {
+                ("image/jpeg".to_string(), encode_jpeg_bytes(&target, 90)?)
+            }
+        } else {
+            ("image/jpeg".to_string(), encode_jpeg_bytes(&target, 90)?)
+        };
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        *guard = Some(CachedChunkImage {
+            key: cache_key,
+            mime,
+            b64,
+            width: orig_w,
+            height: orig_h,
+        });
+    }
+
+    let entry = guard.as_ref().ok_or_else(|| "图片缓存为空".to_string())?;
+    let total_len = entry.b64.len();
+    let total_chunks = total_len.div_ceil(chunk_size).max(1);
+    let start = (chunk_index * chunk_size).min(total_len);
+    let end = (start + chunk_size).min(total_len);
+    let chunk = &entry.b64[start..end];
+    Ok(json!({
+        "chunk": chunk,
+        "chunkIndex": chunk_index,
+        "totalChunks": total_chunks,
+        "mime": entry.mime,
+        "width": entry.width,
+        "height": entry.height
+    }))
+}
+
+fn write_temp_upload_chunk(
+    upload_id: &str,
+    chunk_b64: &str,
+    append: bool,
+    ext: &str,
+) -> Result<String, String> {
+    let safe_id: String = upload_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .take(64)
+        .collect();
+    if safe_id.is_empty() {
+        return Err("无效的 uploadId".into());
+    }
+    let safe_ext = match ext.to_ascii_lowercase().as_str() {
+        "jpg" | "jpeg" => "jpg",
+        "webp" => "webp",
+        _ => "png",
+    };
+    let dir = env::temp_dir().join("SideWeave").join("studio-upload");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建临时目录失败：{e}"))?;
+    let file_path = dir.join(format!("{safe_id}.{safe_ext}"));
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(chunk_b64.trim())
+        .map_err(|e| format!("Base64 解码失败：{e}"))?;
+    use std::io::Write;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .append(append)
+        .truncate(!append)
+        .open(&file_path)
+        .map_err(|e| format!("写入临时图片失败：{e}"))?;
+    file.write_all(&bytes)
+        .map_err(|e| format!("写入临时图片数据失败：{e}"))?;
+    Ok(file_path.to_string_lossy().into_owned())
+}
+
+fn pick_image_files() -> Result<Vec<String>, String> {
+    #[cfg(windows)]
+    {
+        use std::mem::{size_of, zeroed};
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::UI::Controls::Dialogs::{
+            GetOpenFileNameW, OFN_ALLOWMULTISELECT, OFN_EXPLORER, OFN_FILEMUSTEXIST,
+            OFN_NOCHANGEDIR, OFN_PATHMUSTEXIST, OPENFILENAMEW,
+        };
+        use windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+
+        let title: Vec<u16> = std::ffi::OsStr::new("选择图片")
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
+        let filter: Vec<u16> =
+            std::ffi::OsStr::new("图片文件 (*.png;*.jpg;*.jpeg;*.webp;*.bmp)\0*.png;*.jpg;*.jpeg;*.webp;*.bmp\0所有文件 (*.*)\0*.*\0\0")
+                .encode_wide()
+                .collect();
+        let mut buffer = vec![0u16; 32 * 1024];
+        let mut ofn: OPENFILENAMEW = unsafe { zeroed() };
+        ofn.lStructSize = size_of::<OPENFILENAMEW>() as u32;
+        ofn.hwndOwner = unsafe { GetForegroundWindow() };
+        ofn.lpstrFilter = filter.as_ptr();
+        ofn.lpstrFile = buffer.as_mut_ptr();
+        ofn.nMaxFile = buffer.len() as u32;
+        ofn.lpstrTitle = title.as_ptr();
+        ofn.nFilterIndex = 1;
+        ofn.Flags = OFN_EXPLORER
+            | OFN_ALLOWMULTISELECT
+            | OFN_FILEMUSTEXIST
+            | OFN_PATHMUSTEXIST
+            | OFN_NOCHANGEDIR;
+
+        let ok = unsafe { GetOpenFileNameW(&mut ofn) };
+        if ok == 0 {
+            return Ok(Vec::new());
+        }
+
+        // Parse double-null terminated list:
+        // Single file: "C:\dir\file.png\0\0"
+        // Multi file:  "C:\dir\0file1.png\0file2.png\0\0"
+        let mut parts: Vec<String> = Vec::new();
+        let mut start = 0usize;
+        while start < buffer.len() {
+            let rel_end = buffer[start..]
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(buffer.len() - start);
+            if rel_end == 0 {
+                break;
+            }
+            parts.push(String::from_utf16_lossy(&buffer[start..start + rel_end]));
+            start += rel_end + 1;
+        }
+        if parts.is_empty() {
+            return Ok(Vec::new());
+        }
+        if parts.len() == 1 {
+            return Ok(parts);
+        }
+        let dir = Path::new(&parts[0]);
+        let paths = parts[1..]
+            .iter()
+            .map(|name| dir.join(name).to_string_lossy().into_owned())
+            .collect();
+        Ok(paths)
+    }
+    #[cfg(not(windows))]
+    {
+        Err("仅支持 Windows".into())
+    }
+}
+
 fn pick_directory() -> Result<Option<String>, String> {
     #[cfg(windows)]
     {
@@ -511,7 +1070,7 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
 "#;
         let output = Command::new("powershell")
             .creation_flags(CREATE_NO_WINDOW)
-            .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .args(["-STA", "-NoProfile", "-NonInteractive", "-Command", script])
             .output()
             .map_err(|e| format!("启动文件夹选择器失败: {e}"))?;
 
@@ -528,6 +1087,94 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
     #[cfg(not(windows))]
     {
         Err("仅支持 Windows".into())
+    }
+}
+
+fn open_or_reveal_file(path: &str, reveal: bool) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        if reveal {
+            std::process::Command::new("explorer")
+                .args(["/select,", path])
+                .spawn()
+                .map_err(|e| format!("定位文件失败: {e}"))?;
+        } else {
+            std::process::Command::new("explorer")
+                .arg(path)
+                .spawn()
+                .map_err(|e| format!("打开文件失败: {e}"))?;
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (path, reveal);
+        Err("仅支持 Windows".into())
+    }
+}
+
+#[cfg(test)]
+mod studio_ipc_tests {
+    use super::*;
+
+    #[test]
+    fn chunked_image_read_and_upload_stay_within_ipc_frame_budget() {
+        let dir = env::temp_dir().join("sideweave-studio-ipc-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let img_path = dir.join("sample_large.png");
+        // Create a noisy 900x600 image that would exceed 256KB as uncompressed PNG
+        let mut img = image::RgbaImage::new(900, 600);
+        let mut seed = 0x1234_5678u32;
+        for px in img.pixels_mut() {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            *px = image::Rgba([
+                (seed >> 16) as u8,
+                (seed >> 8) as u8,
+                seed as u8,
+                255,
+            ]);
+        }
+        img.save(&img_path).unwrap();
+
+        let path_str = img_path.to_string_lossy().into_owned();
+        // 1. Thumbnail cache read_image_as_data_url must stay well below 256 KB
+        let thumb = read_image_as_data_url(&path_str, 340).unwrap();
+        let thumb_json = serde_json::to_vec(&thumb).unwrap();
+        assert!(
+            thumb_json.len() < sideweave_plugin_api::MAX_MESSAGE_BYTES,
+            "thumbnail exceeded 256KB IPC limit: {} bytes",
+            thumb_json.len()
+        );
+
+        // 2. Chunked high-res read_image_chunk must reassemble into a valid image
+        let first = read_image_chunk(&path_str, 1600, 0, 120_000).unwrap();
+        let total = first["totalChunks"].as_u64().unwrap() as usize;
+        assert!(total >= 1);
+        let mut stitched = first["chunk"].as_str().unwrap().to_string();
+        for idx in 1..total {
+            let part = read_image_chunk(&path_str, 1600, idx, 120_000).unwrap();
+            let part_json = serde_json::to_vec(&part).unwrap();
+            assert!(part_json.len() < sideweave_plugin_api::MAX_MESSAGE_BYTES);
+            stitched.push_str(part["chunk"].as_str().unwrap());
+        }
+        let decoded_bytes = base64::engine::general_purpose::STANDARD
+            .decode(&stitched)
+            .unwrap();
+        let decoded_img = image::load_from_memory(&decoded_bytes).unwrap();
+        assert_eq!(decoded_img.dimensions(), (900, 600));
+
+        // 3. Chunked temp upload must reassemble identically on disk
+        let upload_id = format!("test_up_{}", std::process::id());
+        let mut uploaded_path = String::new();
+        for (i, chunk) in stitched.as_bytes().chunks(120_000).enumerate() {
+            let chunk_str = std::str::from_utf8(chunk).unwrap();
+            uploaded_path = write_temp_upload_chunk(&upload_id, chunk_str, i > 0, "jpg").unwrap();
+        }
+        let disk_bytes = std::fs::read(&uploaded_path).unwrap();
+        assert_eq!(disk_bytes, decoded_bytes);
+
+        let _ = std::fs::remove_file(&uploaded_path);
+        let _ = std::fs::remove_file(&img_path);
     }
 }
 

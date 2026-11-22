@@ -4,10 +4,9 @@ use super::scroll_ui::{
     destroy_scroll_border, destroy_scroll_masks, destroy_scroll_preview, destroy_scroll_tip,
     stop_scroll_input,
 };
-use super::toolbar_paint::toolbar_layout;
 use super::{clear_error, invalidate, set_error, update_status, wide, UiState, TIMER_SCROLL};
 use crate::capture::ScreenCapture;
-use crate::export::compose as compose_export;
+use crate::export::{compose_with_options, ComposeOptions};
 use crate::model::{Annotation, ScreenPoint, ScreenRect};
 use crate::session::CaptureSession;
 use crate::toolbar::Tool;
@@ -26,6 +25,45 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WS_EX_TOOLWINDOW, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU,
 };
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PlayerHit {
+    Video,
+    Timeline,
+    Play,
+    Quality(u8),
+    Fps(usize),
+    CopyFrame,
+    ExportWebp,
+    ExportGif,
+    ExportMp4,
+    CancelExport,
+    OpenFolder,
+}
+
+pub(super) struct PlayerMetrics {
+    pub(super) scale: f32,
+    pub(super) header_height: i32,
+    pub(super) footer_height: i32,
+    pub(super) side_pad: i32,
+    pub(super) timeline_y: i32,
+    pub(super) timeline_left: i32,
+    pub(super) timeline_right: i32,
+    pub(super) quality_group_rect: (i32, i32, i32, i32),
+    pub(super) quality_rects: [(i32, i32, i32, i32); 3],
+    pub(super) fps_group_rect: (i32, i32, i32, i32),
+    pub(super) fps_values: Vec<u32>,
+    pub(super) fps_rects: Vec<(i32, i32, i32, i32)>,
+    pub(super) play_rect: (i32, i32, i32, i32),
+    pub(super) open_folder_rect: Option<(i32, i32, i32, i32)>,
+    pub(super) copy_rect: (i32, i32, i32, i32),
+    pub(super) webp_rect: (i32, i32, i32, i32),
+    pub(super) gif_rect: (i32, i32, i32, i32),
+    pub(super) mp4_rect: (i32, i32, i32, i32),
+    pub(super) cancel_export_rect: (i32, i32, i32, i32),
+    pub(super) status_left: i32,
+    pub(super) status_right: i32,
+}
+
 pub(crate) struct EditorCanvas {
     pub(super) source_width: usize,
     pub(super) source_height: usize,
@@ -37,6 +75,9 @@ pub(crate) struct EditorCanvas {
     pub(super) frame_index: usize,
     pub(super) playback_started_at: Option<Instant>,
     pub(super) playback_start_frame: usize,
+    pub(super) export_quality_preset: u8,
+    pub(super) export_fps_preset: u32,
+    pub(super) player_hover: Option<PlayerHit>,
     pub(super) canvas_surface: Option<GdiSurface>,
     pub(super) back_buffer: Option<GdiSurface>,
 }
@@ -44,7 +85,6 @@ pub(crate) struct EditorCanvas {
 pub(super) const TIMER_RECORDING_PREVIEW: usize = 43;
 pub(super) const TIMER_RECORDING_EXPORT_STATUS: usize = 44;
 const RECORDING_PREVIEW_FPS: u32 = 15;
-pub(super) const RECORDING_PREVIEW_HEADER_HEIGHT: i32 = 64;
 
 pub(super) fn open_recording_editor(state: &mut UiState) {
     if state.editor.is_some() {
@@ -80,7 +120,12 @@ pub(super) fn open_recording_editor(state: &mut UiState) {
         pixels: bgra.clone(),
         dimmed_pixels: bgra,
     });
-    let mut capture = CaptureSession::new(rect, [255, 58, 72, 255], 18, false);
+    let settings = state
+        .settings
+        .lock()
+        .map(|s| s.clone())
+        .unwrap_or_default();
+    let mut capture = CaptureSession::new_with_settings(rect, &settings, false);
     capture.selection = Some(rect);
     state.capture = Some(capture);
     state.recording_editor_pending = true;
@@ -146,16 +191,24 @@ pub(super) fn open_editor(state: &mut UiState) {
     destroy_scroll_masks(state);
     destroy_scroll_border(state);
 
+    let dpi_scale = crate::theme::system_dpi_scale();
     let (window_width, window_height, window_x, window_y) = unsafe {
         let screen_width = GetSystemMetrics(0).max(800);
         let screen_height = GetSystemMetrics(1).max(600);
         let (min_width, max_width, min_height, max_height) = if recording_preview {
-            (760, 1000, 600, 800)
+            (
+                (920.0 * dpi_scale).round() as i32,
+                (1180.0 * dpi_scale).round() as i32,
+                (640.0 * dpi_scale).round() as i32,
+                (860.0 * dpi_scale).round() as i32,
+            )
         } else {
             (720, 1480, 560, 1000)
         };
-        let width = (screen_width - 64).clamp(min_width, max_width);
-        let height = (screen_height - 80).clamp(min_height, max_height);
+        let avail_w = (screen_width - 48).max(640);
+        let avail_h = (screen_height - 64).max(480);
+        let width = avail_w.min(max_width).max(min_width.min(avail_w));
+        let height = avail_h.min(max_height).max(min_height.min(avail_h));
         (
             width,
             height,
@@ -165,7 +218,7 @@ pub(super) fn open_editor(state: &mut UiState) {
     };
     unsafe {
         let class_name = wide("AgileTilesScreenshotCoreV2");
-        let title = wide(if recording_preview { "录制预览" } else { "图片编辑" });
+        let title = wide(if recording_preview { "录制预览与导出" } else { "图片编辑" });
         let instance = GetModuleHandleW(null());
         let extended_style = if recording_preview {
             WS_EX_APPWINDOW
@@ -197,6 +250,21 @@ pub(super) fn open_editor(state: &mut UiState) {
             return;
         }
 
+        let theme = state.current_theme();
+        {
+            use windows::Win32::Foundation::HWND as WinHwnd;
+            use windows::Win32::Graphics::Dwm::{
+                DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE,
+            };
+            let dark: i32 = if theme.is_dark { 1 } else { 0 };
+            let _ = DwmSetWindowAttribute(
+                WinHwnd(editor_hwnd as _),
+                DWMWA_USE_IMMERSIVE_DARK_MODE,
+                &dark as *const i32 as *const c_void,
+                std::mem::size_of::<i32>() as u32,
+            );
+        }
+
         state.overlay = editor_hwnd;
         let mut client: RECT = zeroed();
         GetClientRect(editor_hwnd, &mut client);
@@ -208,11 +276,18 @@ pub(super) fn open_editor(state: &mut UiState) {
             right: client_width,
             bottom: client_height,
         };
-        let layout = toolbar_layout(canvas_rect);
+        let layout = super::toolbar_paint::toolbar_layout_scaled(
+            capture.toolbar_button_count(),
+            canvas_rect,
+            capture.ui_scale,
+        );
+        let source_fps = state.recording.snapshot().fps.max(1);
+        let player_metrics = recording_preview.then(|| {
+            compute_player_metrics(client_width, client_height, source_fps, false)
+        });
         let toolbar_origin = if recording_preview {
-            let (_, export_rect, _) = recording_player_button_rects(client_width, client_height);
             ScreenPoint {
-                x: (export_rect.0 - 39).clamp(8, (client_width - 224).max(8)),
+                x: 8,
                 y: client_height - 78,
             }
         } else {
@@ -221,13 +296,21 @@ pub(super) fn open_editor(state: &mut UiState) {
                 y: 8,
             }
         };
-        let image_area_top = if recording_preview {
-            RECORDING_PREVIEW_HEADER_HEIGHT + 12
+        let image_area_top = if let Some(ref m) = player_metrics {
+            m.header_height + (16.0 * m.scale).round() as i32
         } else {
             toolbar_origin.y + layout.height + 22
         };
-        let image_area_width = (client_width - if recording_preview { 96 } else { 64 }).max(1);
-        let image_area_bottom_padding = if recording_preview { 104 } else { 32 };
+        let image_area_width = if let Some(ref m) = player_metrics {
+            (client_width - (64.0 * m.scale).round() as i32).max(1)
+        } else {
+            (client_width - 64).max(1)
+        };
+        let image_area_bottom_padding = if let Some(ref m) = player_metrics {
+            m.footer_height + (38.0 * m.scale).round() as i32
+        } else {
+            32
+        };
         let image_area_height = (client_height - image_area_top - image_area_bottom_padding).max(1);
         let scale = (image_area_width as f64 / source_width as f64)
             .min(image_area_height as f64 / source_height as f64)
@@ -266,10 +349,21 @@ pub(super) fn open_editor(state: &mut UiState) {
         let canvas_len = (client_width as usize)
             .saturating_mul(client_height as usize)
             .saturating_mul(4);
-        let canvas_color = if recording_preview { 0x1d } else { 0xf5 };
-        let mut canvas = vec![canvas_color; canvas_len];
-        for alpha in canvas[3..].iter_mut().step_by(4) {
-            *alpha = 255;
+        // Theme-aware studio backdrop in BGRA order
+        let bg_pixel: [u8; 4] = if recording_preview {
+            if theme.is_dark {
+                [0x17, 0x14, 0x14, 0xFF]
+            } else {
+                [0xF2, 0xEE, 0xEC, 0xFF]
+            }
+        } else if theme.is_dark {
+            [0x22, 0x1E, 0x1E, 0xFF]
+        } else {
+            [0xF5, 0xF5, 0xF5, 0xFF]
+        };
+        let mut canvas = vec![0u8; canvas_len];
+        for px in canvas.chunks_exact_mut(4) {
+            px.copy_from_slice(&bg_pixel);
         }
         for row in 0..display_height as usize {
             let source = row * display_width as usize * 4;
@@ -283,12 +377,13 @@ pub(super) fn open_editor(state: &mut UiState) {
 
         // Keep the existing CaptureSession and its annotation handlers as the
         // editor. Only replace its desktop background with a fitted image canvas.
-        let mut editor_capture = CaptureSession::new(
-            canvas_rect,
-            capture.annotation_color,
-            capture.text_size,
-            false,
-        );
+        let settings = state
+            .settings
+            .lock()
+            .map(|s| s.clone())
+            .unwrap_or_default();
+        let mut editor_capture = CaptureSession::new_with_settings(canvas_rect, &settings, false);
+        editor_capture.annotation_color = capture.annotation_color;
         editor_capture.selection = Some(display_rect);
         editor_capture.tool = if recording_preview {
             Tool::Select
@@ -300,6 +395,11 @@ pub(super) fn open_editor(state: &mut UiState) {
         editor_capture.brush_size = display_size(capture.brush_size);
         editor_capture.text_size = display_size(capture.text_size);
         editor_capture.stroke_style = capture.stroke_style;
+        editor_capture.corner_radius = capture.corner_radius;
+        editor_capture.drop_shadow = capture.drop_shadow;
+        editor_capture.shape_filled = capture.shape_filled;
+        editor_capture.shape_rounded = capture.shape_rounded;
+        editor_capture.watermark_text = capture.watermark_text.clone();
         if !scroll_mode {
             editor_capture.annotations = capture
                 .annotations
@@ -334,6 +434,7 @@ pub(super) fn open_editor(state: &mut UiState) {
         } else {
             (None, None)
         };
+        let default_fps_preset = default_export_fps_preset(source_fps);
         state.capture = Some(editor_capture);
         state.editor = Some(EditorCanvas {
             source_width,
@@ -346,6 +447,9 @@ pub(super) fn open_editor(state: &mut UiState) {
             frame_index: 0,
             playback_started_at: None,
             playback_start_frame: 0,
+            export_quality_preset: 1, // 推荐 720p
+            export_fps_preset: default_fps_preset,
+            player_hover: None,
             canvas_surface,
             back_buffer,
         });
@@ -478,6 +582,155 @@ pub(super) fn begin_recording_preview_seek(state: &mut UiState, point: ScreenPoi
     true
 }
 
+pub(super) fn recording_fps_presets(source_fps: u32) -> Vec<u32> {
+    let source = source_fps.max(1);
+    let mut presets: Vec<u32> = if source <= 10 {
+        vec![5, 8, source]
+    } else if source <= 15 {
+        vec![10, 12, source]
+    } else {
+        vec![10, 15, source]
+    };
+    presets.retain(|f| *f <= source && crate::model::RECORDING_FPS_OPTIONS.contains(f));
+    presets.sort_unstable();
+    presets.dedup();
+    if presets.is_empty() {
+        presets.push(source);
+    }
+    presets
+}
+
+fn default_export_fps_preset(source_fps: u32) -> u32 {
+    let presets = recording_fps_presets(source_fps);
+    // Prefer 12 fps (or 15 fps if source > 15) for fast & smooth GIF/WebP export
+    if presets.contains(&12) {
+        12
+    } else if presets.contains(&15) {
+        15
+    } else {
+        *presets.last().unwrap_or(&source_fps.max(1))
+    }
+}
+
+pub(super) fn compute_player_metrics(
+    width: i32,
+    height: i32,
+    source_fps: u32,
+    show_open_folder: bool,
+) -> PlayerMetrics {
+    let s = crate::theme::system_dpi_scale();
+    let px = |dp: f32| (dp * s).round() as i32;
+
+    let header_height = px(62.0);
+    let footer_height = px(74.0);
+    let side_pad = px(24.0);
+    let footer_top = height - footer_height;
+    let timeline_y = footer_top - px(16.0);
+    let timeline_left = side_pad;
+    let timeline_right = (width - side_pad).max(timeline_left + 1);
+
+    // Header right segmented controls: [ 540p | 720p | 1080p ]  [ 10fps | 12fps | 15fps ]
+    let pill_h = px(30.0);
+    let seg_pad = px(3.0);
+    let group_h = pill_h + seg_pad * 2;
+    let group_top = (header_height - group_h) / 2;
+    let group_bottom = group_top + group_h;
+
+    let fps_values = recording_fps_presets(source_fps);
+    let fps_item_w = px(52.0);
+    let fps_group_w = fps_item_w * fps_values.len() as i32 + seg_pad * 2;
+    let fps_group_right = width - side_pad;
+    let fps_group_left = (fps_group_right - fps_group_w).max(side_pad);
+    let fps_group_rect = (fps_group_left, group_top, fps_group_right, group_bottom);
+    let mut fps_rects = Vec::with_capacity(fps_values.len());
+    for i in 0..fps_values.len() {
+        let l = fps_group_left + seg_pad + i as i32 * fps_item_w;
+        fps_rects.push((l, group_top + seg_pad, l + fps_item_w, group_bottom - seg_pad));
+    }
+
+    let q_item_w = px(66.0);
+    let q_group_w = q_item_w * 3 + seg_pad * 2;
+    let q_group_right = fps_group_left - px(10.0);
+    let q_group_left = (q_group_right - q_group_w).max(side_pad);
+    let quality_group_rect = (q_group_left, group_top, q_group_right, group_bottom);
+    let quality_rects = [
+        (q_group_left + seg_pad, group_top + seg_pad, q_group_left + seg_pad + q_item_w, group_bottom - seg_pad),
+        (q_group_left + seg_pad + q_item_w, group_top + seg_pad, q_group_left + seg_pad + q_item_w * 2, group_bottom - seg_pad),
+        (q_group_left + seg_pad + q_item_w * 2, group_top + seg_pad, q_group_left + seg_pad + q_item_w * 3, group_bottom - seg_pad),
+    ];
+
+    // Footer action dock
+    let btn_h = px(40.0);
+    let btn_top = footer_top + (footer_height - btn_h) / 2;
+    let btn_bottom = btn_top + btn_h;
+    let btn_gap = px(10.0);
+
+    let play_size = btn_h;
+    let play_rect = (side_pad, btn_top, side_pad + play_size, btn_bottom);
+
+    let mp4_w = px(98.0);
+    let gif_w = px(90.0);
+    let webp_w = px(98.0);
+    let copy_w = px(78.0);
+    let cancel_w = px(100.0);
+
+    let mp4_right = width - side_pad;
+    let mp4_left = mp4_right - mp4_w;
+    let mp4_rect = (mp4_left, btn_top, mp4_right, btn_bottom);
+
+    let gif_right = mp4_left - btn_gap;
+    let gif_left = gif_right - gif_w;
+    let gif_rect = (gif_left, btn_top, gif_right, btn_bottom);
+
+    let webp_right = gif_left - btn_gap;
+    let webp_left = webp_right - webp_w;
+    let webp_rect = (webp_left, btn_top, webp_right, btn_bottom);
+
+    let copy_right = webp_left - btn_gap;
+    let copy_left = copy_right - copy_w;
+    let copy_rect = (copy_left, btn_top, copy_right, btn_bottom);
+
+    let cancel_export_rect = (width - side_pad - cancel_w, btn_top, width - side_pad, btn_bottom);
+
+    let status_left = play_rect.2 + px(14.0);
+    let open_folder_rect = if show_open_folder && (copy_left - status_left) > px(190.0) {
+        let f_w = px(82.0);
+        let f_h = px(28.0);
+        let f_top = footer_top + (footer_height - f_h) / 2;
+        let f_right = copy_left - px(14.0);
+        Some((f_right - f_w, f_top, f_right, f_top + f_h))
+    } else {
+        None
+    };
+    let status_right = open_folder_rect
+        .map(|r| r.0 - px(10.0))
+        .unwrap_or(copy_left - px(14.0));
+
+    PlayerMetrics {
+        scale: s,
+        header_height,
+        footer_height,
+        side_pad,
+        timeline_y,
+        timeline_left,
+        timeline_right,
+        quality_group_rect,
+        quality_rects,
+        fps_group_rect,
+        fps_values,
+        fps_rects,
+        play_rect,
+        open_folder_rect,
+        copy_rect,
+        webp_rect,
+        gif_rect,
+        mp4_rect,
+        cancel_export_rect,
+        status_left,
+        status_right,
+    }
+}
+
 pub(super) fn move_recording_preview_seek(
     state: &mut UiState,
     point: ScreenPoint,
@@ -490,7 +743,37 @@ pub(super) fn move_recording_preview_seek(
             .is_some_and(|editor| editor.recording_preview && editor.seeking)
     {
         seek_timeline_to_x(state, point.x);
+        return;
     }
+    update_recording_preview_hover(state, point);
+}
+
+pub(super) fn update_recording_preview_hover(state: &mut UiState, point: ScreenPoint) {
+    if !is_recording_preview(state) {
+        return;
+    }
+    let next_hover = hit_test_player(state, point);
+    let changed = state
+        .editor
+        .as_mut()
+        .is_some_and(|editor| {
+            if editor.player_hover != next_hover {
+                editor.player_hover = next_hover;
+                true
+            } else {
+                false
+            }
+        });
+    if changed {
+        super::invalidate(state);
+    }
+}
+
+pub(super) fn is_recording_preview_interactive_hover(state: &UiState) -> bool {
+    state
+        .editor
+        .as_ref()
+        .is_some_and(|e| e.recording_preview && e.player_hover.is_some())
 }
 
 pub(super) fn end_recording_preview_seek(state: &mut UiState, point: ScreenPoint) -> bool {
@@ -508,23 +791,84 @@ pub(super) fn end_recording_preview_seek(state: &mut UiState, point: ScreenPoint
     true
 }
 
-fn near_recording_timeline(state: &UiState, point: ScreenPoint) -> bool {
+fn hit_test_player(state: &UiState, point: ScreenPoint) -> Option<PlayerHit> {
+    let editor = state.editor.as_ref().filter(|e| e.recording_preview)?;
     let mut client: RECT = unsafe { zeroed() };
     unsafe { GetClientRect(state.overlay, &mut client) };
-    let footer_top = client.bottom - PLAYER_FOOTER_HEIGHT;
-    let timeline_y = footer_top - PLAYER_TIMELINE_GAP;
-    point.y >= timeline_y - 10
-        && point.y <= timeline_y + 10
-        && point.x >= PLAYER_SIDE_PADDING
-        && point.x <= client.right - PLAYER_SIDE_PADDING
+    let width = client.right - client.left;
+    let height = client.bottom - client.top;
+    let status = state.recording.snapshot();
+    let show_open_folder = status.phase != "exporting" && status.last_path.is_some();
+    let m = compute_player_metrics(width, height, status.fps.max(1), show_open_folder);
+
+    if status.phase == "exporting" {
+        if inside(point, m.cancel_export_rect) {
+            return Some(PlayerHit::CancelExport);
+        }
+        return None;
+    }
+
+    let tl_hit_half = (12.0 * m.scale).round() as i32;
+    if point.y >= m.timeline_y - tl_hit_half
+        && point.y <= m.timeline_y + tl_hit_half
+        && point.x >= m.timeline_left - 6
+        && point.x <= m.timeline_right + 6
+    {
+        return Some(PlayerHit::Timeline);
+    }
+
+    if inside(point, m.play_rect) {
+        return Some(PlayerHit::Play);
+    }
+    if inside(point, m.mp4_rect) {
+        return Some(PlayerHit::ExportMp4);
+    }
+    if inside(point, m.gif_rect) {
+        return Some(PlayerHit::ExportGif);
+    }
+    if inside(point, m.webp_rect) {
+        return Some(PlayerHit::ExportWebp);
+    }
+    if inside(point, m.copy_rect) {
+        return Some(PlayerHit::CopyFrame);
+    }
+    if let Some(folder_rect) = m.open_folder_rect {
+        if inside(point, folder_rect) {
+            return Some(PlayerHit::OpenFolder);
+        }
+    }
+    for (idx, &rect) in m.quality_rects.iter().enumerate() {
+        if inside(point, rect) {
+            return Some(PlayerHit::Quality(idx as u8));
+        }
+    }
+    for (idx, &rect) in m.fps_rects.iter().enumerate() {
+        if inside(point, rect) {
+            return Some(PlayerHit::Fps(idx));
+        }
+    }
+    if editor.display_rect.contains(point) {
+        return Some(PlayerHit::Video);
+    }
+    None
+}
+
+fn near_recording_timeline(state: &UiState, point: ScreenPoint) -> bool {
+    matches!(hit_test_player(state, point), Some(PlayerHit::Timeline))
 }
 
 fn seek_timeline_to_x(state: &mut UiState, x: i32) {
     let mut client: RECT = unsafe { zeroed() };
     unsafe { GetClientRect(state.overlay, &mut client) };
-    let left = PLAYER_SIDE_PADDING;
-    let right = (client.right - PLAYER_SIDE_PADDING).max(left + 1);
     let status = state.recording.snapshot();
+    let m = compute_player_metrics(
+        client.right - client.left,
+        client.bottom - client.top,
+        status.fps.max(1),
+        false,
+    );
+    let left = m.timeline_left;
+    let right = m.timeline_right.max(left + 1);
     let progress = (x.clamp(left, right) - left) as f64 / (right - left) as f64;
     let last_frame = status.timeline_frame_count().saturating_sub(1);
     seek_recording_preview(state, (progress * last_frame as f64).round() as usize);
@@ -534,110 +878,100 @@ pub(super) fn handle_recording_preview_click(state: &mut UiState, point: ScreenP
     if !is_recording_preview(state) {
         return false;
     }
-    if state.recording.snapshot().phase == "exporting" {
+    let Some(hit) = hit_test_player(state, point) else {
         return true;
-    }
-    let mut client: RECT = unsafe { zeroed() };
-    unsafe { GetClientRect(state.overlay, &mut client) };
-    let width = client.right - client.left;
-    let height = client.bottom - client.top;
-    let footer_top = height - PLAYER_FOOTER_HEIGHT;
-
-    let (play_rect, export_rect, copy_rect) = recording_player_button_rects(width, height);
-
-    let export_menu_open = state
-        .capture
-        .as_ref()
-        .is_some_and(|capture| capture.menu == Some(crate::toolbar::ToolbarMenu::RecordingExport));
-    if export_menu_open {
-        if let Some((menu, index)) = recording_export_menu_hit(state, point) {
-            if menu == crate::toolbar::ToolbarMenu::RecordingExport {
-                if let Some(capture) = state.capture.as_mut() {
-                    capture.close_menu();
+    };
+    let status = state.recording.snapshot();
+    match hit {
+        PlayerHit::CancelExport => {
+            state.recording.cancel_export();
+            super::invalidate(state);
+        }
+        PlayerHit::Timeline => {
+            seek_timeline_to_x(state, point.x);
+        }
+        PlayerHit::Play | PlayerHit::Video => {
+            toggle_recording_preview(state);
+        }
+        PlayerHit::Quality(q) => {
+            if let Some(editor) = state.editor.as_mut() {
+                editor.export_quality_preset = q.min(2);
+            }
+            super::invalidate(state);
+        }
+        PlayerHit::Fps(idx) => {
+            let presets = recording_fps_presets(status.fps.max(1));
+            if let Some(&fps) = presets.get(idx) {
+                if let Some(editor) = state.editor.as_mut() {
+                    editor.export_fps_preset = fps;
                 }
-                let format = match index {
-                    0 => crate::recorder::AnimationFormat::Mp4,
-                    1 => crate::recorder::AnimationFormat::Gif,
-                    _ => crate::recorder::AnimationFormat::Webp,
-                };
-                super::export_recording_from_editor(state, format);
-                return true;
+                super::invalidate(state);
             }
         }
-        if !inside(point, export_rect) {
-            if let Some(capture) = state.capture.as_mut() {
-                capture.close_menu();
-            }
-            super::invalidate(state);
-        } else {
-            if let Some(capture) = state.capture.as_mut() {
-                capture.close_menu();
-            }
-            super::invalidate(state);
-            return true;
+        PlayerHit::CopyFrame => {
+            copy_recording_preview_frame(state);
         }
-    }
-
-    if near_recording_timeline(state, point) {
-        seek_timeline_to_x(state, point.x);
-        return true;
-    }
-
-    if point.y < footer_top {
-        return true;
-    }
-
-    if inside(point, play_rect) {
-        toggle_recording_preview(state);
-    } else if inside(point, export_rect) {
-        if let Some(capture) = state.capture.as_mut() {
-            capture.open_menu(crate::toolbar::ToolbarMenu::RecordingExport);
+        PlayerHit::OpenFolder => {
+            if let Some(path) = status.last_path.as_deref() {
+                super::recording_ui::reveal_exported_file(path);
+            }
         }
-        super::invalidate(state);
-    } else if inside(point, copy_rect) {
-        copy_recording_preview_frame(state);
+        PlayerHit::ExportMp4 => {
+            super::recording_ui::export_recording_direct(
+                state,
+                crate::recorder::AnimationFormat::Mp4,
+                crate::recorder::GifExportQuality::Balanced,
+                crate::recorder::WebpExportSize::Balanced,
+                status.fps.max(1),
+            );
+        }
+        PlayerHit::ExportGif => {
+            let (q_preset, fps) = state
+                .editor
+                .as_ref()
+                .map(|e| (e.export_quality_preset, e.export_fps_preset))
+                .unwrap_or((1, status.fps.max(1)));
+            let gif_quality = match q_preset {
+                0 => crate::recorder::GifExportQuality::Small,
+                2 => crate::recorder::GifExportQuality::High,
+                _ => crate::recorder::GifExportQuality::Balanced,
+            };
+            super::recording_ui::export_recording_direct(
+                state,
+                crate::recorder::AnimationFormat::Gif,
+                gif_quality,
+                crate::recorder::WebpExportSize::Balanced,
+                fps,
+            );
+        }
+        PlayerHit::ExportWebp => {
+            let (q_preset, fps) = state
+                .editor
+                .as_ref()
+                .map(|e| (e.export_quality_preset, e.export_fps_preset))
+                .unwrap_or((1, status.fps.max(1)));
+            let webp_size = match q_preset {
+                0 => crate::recorder::WebpExportSize::Small,
+                2 => crate::recorder::WebpExportSize::High,
+                _ => crate::recorder::WebpExportSize::Balanced,
+            };
+            super::recording_ui::export_recording_direct(
+                state,
+                crate::recorder::AnimationFormat::Webp,
+                crate::recorder::GifExportQuality::Balanced,
+                webp_size,
+                fps,
+            );
+        }
     }
     true
-}
-
-pub(super) const PLAYER_FOOTER_HEIGHT: i32 = 66;
-pub(super) const PLAYER_TIMELINE_GAP: i32 = 13;
-pub(super) const PLAYER_SIDE_PADDING: i32 = 24;
-
-pub(super) fn recording_player_button_rects(
-    width: i32,
-    height: i32,
-) -> (
-    (i32, i32, i32, i32),
-    (i32, i32, i32, i32),
-    (i32, i32, i32, i32),
-) {
-    let footer_top = height - PLAYER_FOOTER_HEIGHT;
-    let button_top = footer_top + 12;
-    let button_bottom = height - 12;
-    let copy_width = 132;
-    let export_width = 138;
-    let button_gap = 12;
-    let copy_right = (width - PLAYER_SIDE_PADDING).max(PLAYER_SIDE_PADDING + copy_width);
-    let copy_left = copy_right - copy_width;
-    let export_right = copy_left - button_gap;
-    let export_left = export_right - export_width;
-    let play_rect = (
-        PLAYER_SIDE_PADDING,
-        button_top,
-        PLAYER_SIDE_PADDING + 44,
-        button_bottom,
-    );
-    let export_rect = (export_left, button_top, export_right, button_bottom);
-    let copy_rect = (copy_left, button_top, copy_right, button_bottom);
-    (play_rect, export_rect, copy_rect)
 }
 
 fn inside(point: ScreenPoint, rect: (i32, i32, i32, i32)) -> bool {
     point.x >= rect.0 && point.x < rect.2 && point.y >= rect.1 && point.y < rect.3
 }
 
-fn toggle_recording_preview(state: &mut UiState) {
+pub(super) fn toggle_recording_preview(state: &mut UiState) {
     let Some(playing) = state
         .editor
         .as_ref()
@@ -721,33 +1055,6 @@ fn seek_recording_preview(state: &mut UiState, frame_index: usize) {
         editor.frame_index = frame_index;
     }
     super::invalidate(state);
-}
-
-fn recording_export_menu_hit(
-    state: &UiState,
-    point: ScreenPoint,
-) -> Option<(crate::toolbar::ToolbarMenu, usize)> {
-    let capture = state.capture.as_ref()?;
-    let menu = capture.menu?;
-    let origin = super::input::toolbar_origin(capture);
-    let layout = crate::toolbar::menu_layout(
-        origin,
-        toolbar_layout(capture.screen_rect),
-        menu,
-        capture.tool,
-    );
-    let bounds = capture.screen_rect;
-    let left = layout.left.clamp(
-        bounds.left + 8,
-        (bounds.right - layout.width - 8).max(bounds.left + 8),
-    );
-    let top = layout.top.clamp(
-        bounds.top + 8,
-        (bounds.bottom - layout.height() - 8).max(bounds.top + 8),
-    );
-    let layout = crate::toolbar::ToolbarMenuLayout { left, top, ..layout };
-    let index = crate::toolbar::menu_hit_test(layout, (point.x, point.y))?;
-    Some((menu, index))
 }
 
 fn copy_recording_preview_frame(state: &mut UiState) {
@@ -864,19 +1171,97 @@ pub(super) fn map_annotation(
     let size_scale = ((sx + sy) / 2.0).max(0.01);
     let map_size = |value: u32| ((value as f64 * size_scale).round() as u32).max(1);
     match annotation {
-        Annotation::Rect(rect, color, size, style) => {
-            Annotation::Rect(map_rect(*rect), *color, map_size(*size), *style)
-        }
-        Annotation::Ellipse(rect, color, size, style) => {
-            Annotation::Ellipse(map_rect(*rect), *color, map_size(*size), *style)
-        }
-        Annotation::Arrow(start, end, color, size, style) => Annotation::Arrow(
-            map_point(*start),
-            map_point(*end),
-            *color,
-            map_size(*size),
-            *style,
-        ),
+        Annotation::Rect {
+            rect,
+            color,
+            width,
+            style,
+            filled,
+            rounded,
+        } => Annotation::Rect {
+            rect: map_rect(*rect),
+            color: *color,
+            width: map_size(*width),
+            style: *style,
+            filled: *filled,
+            rounded: *rounded,
+        },
+        Annotation::Ellipse {
+            rect,
+            color,
+            width,
+            style,
+            filled,
+        } => Annotation::Ellipse {
+            rect: map_rect(*rect),
+            color: *color,
+            width: map_size(*width),
+            style: *style,
+            filled: *filled,
+        },
+        Annotation::Triangle {
+            rect,
+            color,
+            width,
+            style,
+            filled,
+        } => Annotation::Triangle {
+            rect: map_rect(*rect),
+            color: *color,
+            width: map_size(*width),
+            style: *style,
+            filled: *filled,
+        },
+        Annotation::Star {
+            rect,
+            color,
+            width,
+            style,
+            filled,
+        } => Annotation::Star {
+            rect: map_rect(*rect),
+            color: *color,
+            width: map_size(*width),
+            style: *style,
+            filled: *filled,
+        },
+        Annotation::Bubble {
+            rect,
+            color,
+            width,
+            style,
+        } => Annotation::Bubble {
+            rect: map_rect(*rect),
+            color: *color,
+            width: map_size(*width),
+            style: *style,
+        },
+        Annotation::Burst {
+            rect,
+            color,
+            width,
+            style,
+        } => Annotation::Burst {
+            rect: map_rect(*rect),
+            color: *color,
+            width: map_size(*width),
+            style: *style,
+        },
+        Annotation::Arrow {
+            start,
+            end,
+            color,
+            width,
+            style,
+            variant,
+        } => Annotation::Arrow {
+            start: map_point(*start),
+            end: map_point(*end),
+            color: *color,
+            width: map_size(*width),
+            style: *style,
+            variant: *variant,
+        },
         Annotation::Line(start, end, color, size, style) => Annotation::Line(
             map_point(*start),
             map_point(*end),
@@ -884,6 +1269,39 @@ pub(super) fn map_annotation(
             map_size(*size),
             *style,
         ),
+        Annotation::Dimension {
+            start,
+            end,
+            color,
+            width,
+        } => Annotation::Dimension {
+            start: map_point(*start),
+            end: map_point(*end),
+            color: *color,
+            width: map_size(*width),
+        },
+        Annotation::Angle {
+            start,
+            end,
+            color,
+            width,
+        } => Annotation::Angle {
+            start: map_point(*start),
+            end: map_point(*end),
+            color: *color,
+            width: map_size(*width),
+        },
+        Annotation::Wave {
+            start,
+            end,
+            color,
+            width,
+        } => Annotation::Wave {
+            start: map_point(*start),
+            end: map_point(*end),
+            color: *color,
+            width: map_size(*width),
+        },
         Annotation::Highlight(start, end, color, size) => {
             Annotation::Highlight(map_point(*start), map_point(*end), *color, map_size(*size))
         }
@@ -894,10 +1312,30 @@ pub(super) fn map_annotation(
             map_size(*size),
             *style,
         ),
+        Annotation::FadePen {
+            points,
+            color,
+            width,
+            created_ms,
+        } => Annotation::FadePen {
+            points: points.iter().copied().map(map_point).collect(),
+            color: *color,
+            width: map_size(*width),
+            created_ms: *created_ms,
+        },
         Annotation::Mosaic(points, size) => Annotation::Mosaic(
             points.iter().copied().map(map_point).collect(),
             map_size(*size),
         ),
+        Annotation::Patina { rect, intensity } => Annotation::Patina {
+            rect: map_rect(*rect),
+            intensity: *intensity,
+        },
+        Annotation::Watermark { rect, text, color } => Annotation::Watermark {
+            rect: map_rect(*rect),
+            text: text.clone(),
+            color: *color,
+        },
         Annotation::Text(point, text, size, color) => {
             Annotation::Text(map_point(*point), text.clone(), map_size(*size), *color)
         }
@@ -932,15 +1370,19 @@ pub(super) fn finish_editor(
                 .lock()
                 .map(|settings| settings.clone())
                 .unwrap_or_default();
-            let pixels = compose_export(
+            let (out_w, out_h, pixels) = compose_with_options(
                 &settings,
                 editor.source_width,
                 editor.source_height,
                 editor.source_pixels.clone(),
                 annotations,
                 source_rect,
+                ComposeOptions {
+                    corner_radius: capture.corner_radius,
+                    drop_shadow: capture.drop_shadow,
+                },
             );
-            Some((settings, editor.source_width, editor.source_height, pixels))
+            Some((settings, out_w, out_h, pixels))
         });
         let Some((settings, width, height, pixels)) = export else {
             set_error(state, "无法准备图片保存内容".into());

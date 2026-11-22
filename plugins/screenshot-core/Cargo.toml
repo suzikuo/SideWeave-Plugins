@@ -1,6 +1,6 @@
 [package]
 name = "sideweave_plugin-screenshot-core"
-version = "0.3.14"
+version = "0.4.0"
 edition = "2021"
 description = "Native Windows screenshot core for SideWeave"
 
@@ -14,12 +14,14 @@ sideweave-plugin-api = { workspace = true }
 sideweave-plugin-sdk = { workspace = true }
 arboard = "3"
 base64 = "0.22"
+chrono = { workspace = true }
 encoding_rs = "0.8"
 hex = "0.4"
 hmac = "0.12"
+md-5 = { workspace = true }
 gif = "0.14"
 color_quant = "1.1"
-image = { version = "0.25", default-features = false, features = ["png", "webp"] }
+image = { version = "0.25", default-features = false, features = ["png", "webp", "jpeg"] }
 webp-rust = "0.3.2"
 quircs = "0.10"
 rxing = { version = "0.9", default-features = false, features = ["decoders", "qrcode", "encoding_rs"] }
@@ -36,6 +38,7 @@ windows-sys = { version = "0.59", features = [
     "Win32_Graphics_Gdi",
     "Win32_Graphics_GdiPlus",
     "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
     "Win32_System_SystemInformation",
     "Win32_System_SystemServices",
     "Win32_System_Threading",
@@ -48,10 +51,14 @@ windows-sys = { version = "0.59", features = [
 windows = { version = "0.61", features = [
     "Foundation",
     "Foundation_Collections",
+    "Globalization",
     "Graphics",
     "Graphics_Capture",
     "Graphics_DirectX",
     "Graphics_DirectX_Direct3D11",
+    "Graphics_Imaging",
+    "Media_Ocr",
+    "Storage_Streams",
     "System",
     "Wdk",
     "Wdk_System",
@@ -71,6 +78,7 @@ windows = { version = "0.61", features = [
     "Win32_System_Performance",
     "Win32_System_SystemInformation",
     "Win32_System_SystemServices",
+    "Win32_System_Threading",
     "Win32_System_Variant",
     "Win32_System_WinRT",
     "Win32_System_WinRT_Direct3D11",

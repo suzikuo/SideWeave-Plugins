@@ -11,11 +11,17 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
 
-use super::input::{VK_A, VK_ESCAPE_CODE};
+use super::input::{VK_A, VK_ESCAPE_CODE, VK_SPACE_CODE};
 use super::{clear_error, set_error, UiState, DOUBLE_TAP_F1};
+use crate::model::Settings;
 
 pub(super) const HOTKEY_ID: i32 = 41;
 pub(super) const SCROLL_ESCAPE_HOTKEY_ID: i32 = 43;
+pub(super) const SCROLL_SPACE_HOTKEY_ID: i32 = 44;
+pub(super) const RECORD_HOTKEY_ID: i32 = 45;
+pub(super) const DEMO_HOTKEY_ID: i32 = 46;
+pub(super) const SCROLL_HOTKEY_ID: i32 = 47;
+pub(super) const QUICK_PIN_HOTKEY_ID: i32 = 48;
 
 const DOUBLE_TAP_WINDOW_MS: u64 = 460;
 const MOD_ALT: u32 = 0x0001;
@@ -25,6 +31,7 @@ const MOD_WIN: u32 = 0x0008;
 const MOD_NOREPEAT: u32 = 0x4000;
 
 static DOUBLE_TAP_TARGET: AtomicIsize = AtomicIsize::new(0);
+static DOUBLE_TAP_ENABLED: AtomicBool = AtomicBool::new(true);
 static F1_IS_DOWN: AtomicBool = AtomicBool::new(false);
 static LAST_F1_DOWN_MS: AtomicU64 = AtomicU64::new(0);
 
@@ -80,12 +87,16 @@ pub(super) fn install_double_tap_f1_hook(hwnd: HWND) -> HHOOK {
     hook
 }
 
+pub(super) fn set_double_tap_f1_enabled(enabled: bool) {
+    DOUBLE_TAP_ENABLED.store(enabled, Ordering::SeqCst);
+}
+
 unsafe extern "system" fn double_tap_f1_hook_proc(
     code: i32,
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    if code >= 0 && lparam != 0 {
+    if code >= 0 && lparam != 0 && DOUBLE_TAP_ENABLED.load(Ordering::Relaxed) {
         let key = &*(lparam as *const KBDLLHOOKSTRUCT);
         if key.vkCode == 0x70
             && key.flags & (LLKHF_INJECTED | LLKHF_LOWER_IL_INJECTED) == 0
@@ -116,15 +127,84 @@ unsafe extern "system" fn double_tap_f1_hook_proc(
 fn parse_key(value: &str) -> Option<u32> {
     if value.len() == 1 {
         let byte = value.as_bytes()[0];
-        return byte
-            .is_ascii_alphanumeric()
-            .then_some(byte.to_ascii_uppercase() as u32);
+        if byte.is_ascii_alphanumeric() {
+            return Some(byte.to_ascii_uppercase() as u32);
+        }
+        return match byte {
+            b'-' => Some(0xBD),
+            b'=' => Some(0xBB),
+            b'[' => Some(0xDB),
+            b']' => Some(0xDD),
+            b'`' => Some(0xC0),
+            b',' => Some(0xBC),
+            b'.' => Some(0xBE),
+            b'/' => Some(0xBF),
+            b';' => Some(0xBA),
+            b'\'' => Some(0xDE),
+            b'\\' => Some(0xDC),
+            _ => None,
+        };
     }
-    value
-        .strip_prefix('f')
-        .and_then(|value| value.parse::<u32>().ok())
-        .filter(|value| (1..=12).contains(value))
-        .map(|value| 0x70 + value - 1)
+    match value {
+        "space" => Some(0x20),
+        "tab" => Some(0x09),
+        "enter" | "return" => Some(0x0D),
+        "esc" | "escape" => Some(0x1B),
+        "printscreen" | "prtsc" | "snapshot" => Some(0x2C),
+        "insert" | "ins" => Some(0x2D),
+        "delete" | "del" => Some(0x2E),
+        "home" => Some(0x24),
+        "end" => Some(0x23),
+        "pageup" | "pgup" => Some(0x21),
+        "pagedown" | "pgdn" => Some(0x22),
+        "up" => Some(0x26),
+        "down" => Some(0x28),
+        "left" => Some(0x25),
+        "right" => Some(0x27),
+        _ => value
+            .strip_prefix('f')
+            .and_then(|v| v.parse::<u32>().ok())
+            .filter(|v| (1..=12).contains(v))
+            .map(|v| 0x70 + v - 1),
+    }
+}
+
+pub(super) fn register_hotkey_id(hwnd: HWND, id: i32, hotkey: HotkeySpec) -> bool {
+    unsafe {
+        RegisterHotKey(
+            hwnd,
+            id,
+            hotkey.modifiers | MOD_NOREPEAT,
+            hotkey.key,
+        ) != 0
+    }
+}
+
+pub(super) fn register_hotkey(hwnd: HWND, hotkey: HotkeySpec) -> bool {
+    register_hotkey_id(hwnd, HOTKEY_ID, hotkey)
+}
+
+pub(super) fn register_all_hotkeys(state: &mut UiState, settings: &Settings) {
+    set_double_tap_f1_enabled(settings.double_tap_f1);
+    update_hotkey(state, &settings.hotkey);
+
+    let extra = [
+        (RECORD_HOTKEY_ID, settings.record_hotkey.as_str()),
+        (DEMO_HOTKEY_ID, settings.demo_hotkey.as_str()),
+        (SCROLL_HOTKEY_ID, settings.scroll_hotkey.as_str()),
+        (QUICK_PIN_HOTKEY_ID, settings.quick_pin_hotkey.as_str()),
+    ];
+    for (id, value) in extra {
+        unsafe {
+            UnregisterHotKey(state.hwnd, id);
+        }
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            if let Ok(spec) = parse_hotkey(trimmed) {
+                let _ = register_hotkey_id(state.hwnd, id, spec);
+            }
+        }
+    }
 }
 
 pub(super) fn update_hotkey(state: &mut UiState, value: &str) {
@@ -150,28 +230,24 @@ pub(super) fn update_hotkey(state: &mut UiState, value: &str) {
     }
 }
 
-pub(super) fn register_hotkey(hwnd: HWND, hotkey: HotkeySpec) -> bool {
-    unsafe {
-        RegisterHotKey(
-            hwnd,
-            HOTKEY_ID,
-            hotkey.modifiers | MOD_NOREPEAT,
-            hotkey.key,
-        ) != 0
-    }
-}
-
 pub(super) fn register_scroll_escape_hotkey(state: &mut UiState) -> bool {
     if state.scroll_escape_hotkey_registered {
         return true;
     }
     state.scroll_escape_hotkey_registered = unsafe {
-        RegisterHotKey(
+        let esc = RegisterHotKey(
             state.hwnd,
             SCROLL_ESCAPE_HOTKEY_ID,
             MOD_NOREPEAT,
             VK_ESCAPE_CODE,
-        ) != 0
+        ) != 0;
+        let _ = RegisterHotKey(
+            state.hwnd,
+            SCROLL_SPACE_HOTKEY_ID,
+            MOD_NOREPEAT,
+            VK_SPACE_CODE,
+        );
+        esc
     };
     state.scroll_escape_hotkey_registered
 }
@@ -180,6 +256,7 @@ pub(super) fn unregister_scroll_escape_hotkey(state: &mut UiState) {
     if state.scroll_escape_hotkey_registered {
         unsafe {
             UnregisterHotKey(state.hwnd, SCROLL_ESCAPE_HOTKEY_ID);
+            UnregisterHotKey(state.hwnd, SCROLL_SPACE_HOTKEY_ID);
         }
         state.scroll_escape_hotkey_registered = false;
     }
@@ -200,6 +277,16 @@ pub(super) fn shutdown(state: &mut UiState) {
             UnregisterHotKey(state.hwnd, HOTKEY_ID);
         }
         state.hotkey_registered = false;
+    }
+    for id in [
+        RECORD_HOTKEY_ID,
+        DEMO_HOTKEY_ID,
+        SCROLL_HOTKEY_ID,
+        QUICK_PIN_HOTKEY_ID,
+    ] {
+        unsafe {
+            UnregisterHotKey(state.hwnd, id);
+        }
     }
     unregister_scroll_escape_hotkey(state);
 }

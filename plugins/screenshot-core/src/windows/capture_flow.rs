@@ -1,30 +1,15 @@
 use super::*;
 
-fn current_color(state: &UiState) -> [u8; 4] {
-    state
-        .settings
-        .lock()
-        .map(|settings| settings.annotation_rgba())
-        .unwrap_or([255, 58, 72, 255])
-}
-
-fn text_size(state: &UiState) -> u32 {
-    state
-        .settings
-        .lock()
-        .map(|settings| settings.text_size)
-        .unwrap_or(18)
-}
-
 pub(super) fn begin_capture(state: &mut UiState, scrolling: bool) {
     if state.capture.is_some() {
         return;
     }
-    let hdr_mode = state
+    let settings = state
         .settings
         .lock()
-        .map(|settings| settings.hdr_capture_mode)
+        .map(|settings| settings.clone())
         .unwrap_or_default();
+    let hdr_mode = settings.hdr_capture_mode;
     let Some(screen) = ScreenCapture::grab_virtual_desktop(hdr_mode) else {
         if state.recording_requested_fps.is_some() {
             state.recording.fail(
@@ -42,10 +27,10 @@ pub(super) fn begin_capture(state: &mut UiState, scrolling: bool) {
         right: screen.x + screen.width,
         bottom: screen.y + screen.height,
     };
-    let initial_color = current_color(state);
-    let initial_text_size = text_size(state);
-    let capture = CaptureSession::new(screen_rect, initial_color, initial_text_size, scrolling);
+    let capture = CaptureSession::new_with_settings(screen_rect, &settings, scrolling);
     state.capture = Some(capture);
+    state.recording_show_cursor = settings.recording_show_cursor;
+    state.recording_passthrough = settings.recording_default_passthrough;
     state.scroll_target = target_window;
     state.last_hover_query = None;
     state.screen = Some(screen);
@@ -168,6 +153,8 @@ pub(super) fn start_recording_selected_region(state: &mut UiState) {
     }
     state.recording_auto_open_pending = true;
     state.recording_overlay = true;
+    state.recording_selection = Some(selection);
+    state.recording_passthrough = true;
     if let Some(capture) = state.capture.as_mut() {
         capture.close_menu();
         capture.toolbar_hover = None;
@@ -207,6 +194,8 @@ pub(super) fn start_recording_from_toolbar(state: &mut UiState, fps: u32) {
     }
     set_recording_capture_style(state.overlay, true);
     state.recording_overlay = true;
+    state.recording_selection = Some(selection);
+    state.recording_passthrough = true;
     if let Some(capture) = state.capture.as_mut() {
         capture.close_menu();
         capture.toolbar_hover = None;
@@ -258,12 +247,22 @@ pub(super) fn export_recording_from_editor(
 }
 
 pub(super) fn stop_recording(state: &mut UiState) {
+    if state.demo.as_ref().is_some_and(|d| d.recording_mode) {
+        super::demo::stop_demo(state);
+    }
+    state.recording_passthrough = true;
+    state.recording_selection = None;
     if let Err(error) = state.recording.request_stop() {
         set_error(state, error);
     }
 }
 
 pub(super) fn cancel(state: &mut UiState) {
+    if state.demo.as_ref().is_some_and(|d| d.recording_mode) {
+        super::demo::stop_demo(state);
+    }
+    state.recording_passthrough = true;
+    state.recording_selection = None;
     state.recording_auto_open_pending = false;
     ocr_ui::close_session_transients(state);
     state.recording_overlay = false;

@@ -1,23 +1,27 @@
-mod draw;
 mod capture_flow;
+mod demo;
+mod draw;
 mod editor;
 mod hotkeys;
 mod input;
 mod ocr_ui;
 mod output;
 mod paint;
+mod pin_menu;
 mod recording_ui;
 mod scroll_ui;
 mod toolbar_paint;
 
-use hotkeys::{
-    install_double_tap_f1_hook, register_hotkey, register_scroll_escape_hotkey,
-    unregister_scroll_escape_hotkey, update_hotkey, HotkeySpec, SCROLL_ESCAPE_HOTKEY_ID,
-};
 use capture_flow::{
-    begin_capture, cancel, export_recording_from_editor, open_recording_editor, request_cancel,
+    begin_capture, cancel, export_recording_from_editor, open_recording_editor,
     restore_recording_selection, start_recording_from_toolbar, start_recording_selected_region,
     start_recording_selection, stop_recording, trigger_capture_or_stop_recording,
+};
+use hotkeys::{
+    install_double_tap_f1_hook, register_all_hotkeys, register_scroll_escape_hotkey,
+    unregister_scroll_escape_hotkey, update_hotkey, HotkeySpec, DEMO_HOTKEY_ID,
+    QUICK_PIN_HOTKEY_ID, RECORD_HOTKEY_ID, SCROLL_ESCAPE_HOTKEY_ID, SCROLL_HOTKEY_ID,
+    SCROLL_SPACE_HOTKEY_ID,
 };
 
 use std::ffi::c_void;
@@ -28,7 +32,7 @@ use std::thread;
 use std::time::Instant;
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
-use windows_sys::Win32::Graphics::Gdi::{HFONT, InvalidateRect};
+use windows_sys::Win32::Graphics::Gdi::{InvalidateRect, HBRUSH, HFONT};
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
 use windows_sys::Win32::System::SystemServices::MK_LBUTTON;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
@@ -37,36 +41,37 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos,
     GetForegroundWindow, GetMessageW, GetWindowLongPtrW, KillTimer, LoadCursorW, PostMessageW,
-    PostQuitMessage, RegisterClassW, SetCursor, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos,
-    ShowWindow, TranslateMessage, CS_DBLCLKS, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, HHOOK,
-    IDC_ARROW, MSG, SW_HIDE,
-    SetLayeredWindowAttributes, SW_SHOW, WM_APP, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND,
-    WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-    WM_NCCREATE, WM_NCHITTEST, WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSW, WS_EX_LAYERED,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, GWL_EXSTYLE, LWA_ALPHA, SWP_FRAMECHANGED,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    PostQuitMessage, RegisterClassW, SetCursor, SetForegroundWindow, SetLayeredWindowAttributes,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, CS_DBLCLKS, CS_HREDRAW,
+    CS_VREDRAW, CW_USEDEFAULT, GWL_EXSTYLE, HHOOK, IDC_ARROW, IDC_HAND, LWA_ALPHA, MSG, SWP_FRAMECHANGED,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOW, WM_APP, WM_CHAR,
+    WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_NCHITTEST, WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR,
+    WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use crate::capture::ScreenCapture;
-use crate::model::{ScreenPoint, ScreenRect, Settings, StatusSnapshot};
+use crate::model::{OcrRegionBox, ScreenPoint, ScreenRect, Settings, StatusSnapshot};
+use crate::ocr::OcrOutput;
 use crate::recorder::{AnimationFormat, RecordingManager};
 use crate::scroll::ScrollMotionModel;
 use crate::scroll_input::{ScrollInputDelta, ScrollInputListener};
 use crate::session::CaptureSession;
 use crate::tencent_ocr::TencentCloudCredentials;
+use crate::theme::ThemePalette;
 
 use self::editor::EditorCanvas;
 use self::input::{
     char_input, key_down, mouse_down, mouse_move, mouse_up, screen_point_from_lparam,
     update_session_cursor, VK_ESCAPE_CODE,
 };
-use self::output::{pin_last, pin_wnd_proc};
+use self::output::{pin_image_from_file, pin_last, pin_wnd_proc, quick_pin};
 use self::paint::{create_overlay_render, paint, paint_editor, OverlayRender};
 use self::scroll_ui::{
     create_scroll_border, create_scroll_masks, destroy_scroll_border, destroy_scroll_masks,
     destroy_scroll_preview, scroll_border_wnd_proc, scroll_control_wnd_proc,
     scroll_mask_wnd_proc, scroll_preview_wnd_proc, scroll_tick, scroll_tip_wnd_proc,
-    scroll_tooltip_wnd_proc, stop_scroll_input,
+    scroll_tooltip_wnd_proc, stop_scroll_input, toggle_scroll_pause,
 };
 
 pub(crate) const DEFAULT_GUI_FONT: i32 = 17;
@@ -100,23 +105,31 @@ pub(crate) struct PinnedImageWindow {
     pub(crate) default_size: (i32, i32),
     pub(crate) restore_size: Option<(i32, i32)>,
     pub(crate) opacity: u8,
+    pub(crate) thumbnail_mode: bool,
+    pub(crate) topmost: bool,
+    pub(crate) show_border: bool,
 }
 
 pub(crate) struct UiState {
     pub(crate) hwnd: HWND,
     pub(crate) overlay: HWND,
     pub(crate) pinned_images: Vec<PinnedImageWindow>,
+    pub(crate) pin_menu: Option<pin_menu::PinMenuState>,
     pub(crate) scroll_control: HWND,
     pub(crate) scroll_tooltip: HWND,
     pub(crate) scroll_tooltip_text: Option<String>,
     pub(crate) scroll_toolbar_tracking_mouse: bool,
+    pub(crate) scroll_toolbar_drag: Option<(ScreenPoint, ScreenPoint)>,
     pub(crate) scroll_preview: HWND,
     pub(crate) scroll_preview_feedback: ScrollPreviewFeedback,
+    pub(crate) scroll_preview_drag: Option<(i32, i32)>,
+    pub(crate) scroll_preview_offset: i32,
     pub(crate) scroll_tip: HWND,
     pub(crate) scroll_tip_text: Option<String>,
     pub(crate) ocr_result_window: HWND,
     pub(crate) ocr_result_edit: HWND,
     pub(crate) ocr_result_font: HFONT,
+    pub(crate) ocr_edit_brush: HBRUSH,
     pub(crate) ocr_result_copied: bool,
     pub(crate) ocr_result_title: &'static str,
     pub(crate) ocr_result_original_text: Option<String>,
@@ -138,6 +151,7 @@ pub(crate) struct UiState {
     pub(crate) render: Option<OverlayRender>,
     pub(crate) capture: Option<CaptureSession>,
     pub(crate) editor: Option<EditorCanvas>,
+    pub(crate) demo: Option<demo::DemoState>,
     pub(crate) last_path: Option<String>,
     pub(crate) last_size: Option<(usize, usize)>,
     pub(crate) last_image: Option<(usize, usize, Vec<u8>)>,
@@ -153,8 +167,12 @@ pub(crate) struct UiState {
     pub(crate) recording: RecordingManager,
     pub(crate) recording_requested_fps: Option<u32>,
     pub(crate) recording_show_cursor: bool,
+    pub(crate) recording_passthrough: bool,
+    pub(crate) recording_selection: Option<ScreenRect>,
     pub(crate) recording_toolbar: HWND,
     pub(crate) recording_toolbar_drag: Option<(ScreenPoint, ScreenPoint)>,
+    pub(crate) recording_toolbar_hover: Option<usize>,
+    pub(crate) recording_toolbar_tracking: bool,
     pub(crate) recording_toolbar_signature: Option<String>,
     pub(crate) recording_toolbar_static_signature: Option<String>,
     pub(crate) recording_editor_pending: bool,
@@ -164,15 +182,23 @@ pub(crate) struct UiState {
     pub(crate) recording_error_dialog_message: Option<String>,
 }
 
-pub(crate) fn configured_recording_fps(
-    settings: &Arc<Mutex<Settings>>,
-) -> u32 {
-    settings.lock().map(|settings| settings.recording_fps).unwrap_or(15)
+impl UiState {
+    pub(crate) fn current_theme(&self) -> ThemePalette {
+        self.settings
+            .lock()
+            .map(|s| ThemePalette::from_settings(&s))
+            .unwrap_or_else(|_| ThemePalette::dark())
+    }
 }
 
-pub(crate) fn configured_recording_options(
-    settings: &Arc<Mutex<Settings>>,
-) -> (u32, u32) {
+pub(crate) fn configured_recording_fps(settings: &Arc<Mutex<Settings>>) -> u32 {
+    settings
+        .lock()
+        .map(|settings| settings.recording_fps)
+        .unwrap_or(15)
+}
+
+pub(crate) fn configured_recording_options(settings: &Arc<Mutex<Settings>>) -> (u32, u32) {
     let Ok(settings) = settings.lock() else {
         return (1080, 16);
     };
@@ -182,9 +208,7 @@ pub(crate) fn configured_recording_options(
     )
 }
 
-pub(crate) fn configured_animation_export_options(
-    settings: &Arc<Mutex<Settings>>,
-) -> (u16, u8) {
+pub(crate) fn configured_animation_export_options(settings: &Arc<Mutex<Settings>>) -> (u16, u8) {
     let Ok(settings) = settings.lock() else {
         return (128, 90);
     };
@@ -193,6 +217,7 @@ pub(crate) fn configured_animation_export_options(
 
 enum Command {
     Start(bool),
+    StartDemo,
     StartRecording(u32),
     StopRecording,
     CancelRecording,
@@ -203,7 +228,7 @@ enum Command {
     Shutdown,
     OcrFinished {
         generation: u64,
-        result: Result<String, String>,
+        result: Result<OcrOutput, String>,
     },
     QrFinished {
         generation: u64,
@@ -213,8 +238,15 @@ enum Command {
         generation: u64,
         result: Result<String, String>,
     },
+    InPlaceTranslationFinished {
+        generation: u64,
+        result: Result<(usize, usize, Vec<u8>, Vec<OcrRegionBox>, String), String>,
+    },
     Hotkey(String),
+    UpdateHotkeys(Settings),
     Pin,
+    QuickPin,
+    PinFile(String),
 }
 
 pub struct UiBridge {
@@ -226,6 +258,10 @@ pub struct UiBridge {
 impl UiBridge {
     pub fn start(&self, scroll: bool) {
         self.send(Command::Start(scroll));
+    }
+
+    pub fn start_demo(&self) {
+        self.send(Command::StartDemo);
     }
 
     pub fn start_recording(&self, fps: u32) {
@@ -261,12 +297,25 @@ impl UiBridge {
         }
     }
 
+    #[allow(dead_code)]
     pub fn update_hotkey(&self, value: &str) {
         self.send(Command::Hotkey(value.to_string()));
     }
 
+    pub fn update_hotkeys(&self, settings: Settings) {
+        self.send(Command::UpdateHotkeys(settings));
+    }
+
     pub fn pin_last(&self) {
         self.send(Command::Pin);
+    }
+
+    pub fn quick_pin(&self) {
+        self.send(Command::QuickPin);
+    }
+
+    pub fn pin_file(&self, path: String) {
+        self.send(Command::PinFile(path));
     }
 
     fn send(&self, command: Command) {
@@ -378,21 +427,27 @@ fn ui_thread(
         };
         RegisterClassW(&class);
 
+        let initial_settings = settings.lock().map(|s| s.clone()).unwrap_or_default();
         let state = Box::new(UiState {
             hwnd: null_mut(),
             overlay: null_mut(),
             pinned_images: Vec::new(),
+            pin_menu: None,
             scroll_control: null_mut(),
             scroll_tooltip: null_mut(),
             scroll_tooltip_text: None,
             scroll_toolbar_tracking_mouse: false,
+            scroll_toolbar_drag: None,
             scroll_preview: null_mut(),
             scroll_preview_feedback: ScrollPreviewFeedback::Waiting,
+            scroll_preview_drag: None,
+            scroll_preview_offset: 0,
             scroll_tip: null_mut(),
             scroll_tip_text: None,
             ocr_result_window: null_mut(),
             ocr_result_edit: null_mut(),
             ocr_result_font: null_mut(),
+            ocr_edit_brush: null_mut(),
             ocr_result_copied: false,
             ocr_result_title: "文字提取结果",
             ocr_result_original_text: None,
@@ -414,6 +469,7 @@ fn ui_thread(
             render: None,
             capture: None,
             editor: None,
+            demo: None,
             last_path: None,
             last_size: None,
             last_image: None,
@@ -428,9 +484,13 @@ fn ui_thread(
             scroll_motion_model: ScrollMotionModel::default(),
             recording,
             recording_requested_fps: None,
-            recording_show_cursor: true,
+            recording_show_cursor: initial_settings.recording_show_cursor,
+            recording_passthrough: initial_settings.recording_default_passthrough,
+            recording_selection: None,
             recording_toolbar: null_mut(),
             recording_toolbar_drag: None,
+            recording_toolbar_hover: None,
+            recording_toolbar_tracking: false,
             recording_toolbar_signature: None,
             recording_toolbar_static_signature: None,
             recording_editor_pending: false,
@@ -463,15 +523,7 @@ fn ui_thread(
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = hwnd as isize;
 
-        if let Some(spec) = state
-            .settings
-            .lock()
-            .ok()
-            .and_then(|value| hotkeys::parse_hotkey(&value.hotkey).ok())
-        {
-            state.hotkey = spec;
-        }
-        state.hotkey_registered = register_hotkey(hwnd, state.hotkey);
+        register_all_hotkeys(state, &initial_settings);
         let _ = init_tx.send(());
         update_status(state, false);
 
@@ -499,6 +551,7 @@ fn ui_thread(
         }
 
         hotkeys::shutdown(state);
+        demo::stop_demo(state);
 
         *shared_hwnd
             .lock()
@@ -535,6 +588,7 @@ fn ui_thread(
         if !state.scroll_border.is_null() {
             DestroyWindow(state.scroll_border);
         }
+        pin_menu::destroy_pin_menu(state);
         recording_ui::destroy_control_toolbar(state);
         drop(Box::from_raw(state_ptr));
     }
@@ -543,6 +597,7 @@ fn ui_thread(
 fn handle_command(state: &mut UiState, command: Command) {
     match command {
         Command::Start(scroll) => begin_capture(state, scroll),
+        Command::StartDemo => demo::start_demo(state),
         Command::StartRecording(_) => start_recording_selection(state),
         Command::StopRecording => stop_recording(state),
         Command::CancelRecording => {
@@ -558,6 +613,7 @@ fn handle_command(state: &mut UiState, command: Command) {
         }
         Command::Cancel => cancel(state),
         Command::Shutdown => {
+            demo::stop_demo(state);
             cancel(state);
             unsafe {
                 PostQuitMessage(0);
@@ -572,14 +628,21 @@ fn handle_command(state: &mut UiState, command: Command) {
         Command::TranslationFinished { generation, result } => {
             ocr_ui::finish_translation(state, generation, result)
         }
+        Command::InPlaceTranslationFinished { generation, result } => {
+            ocr_ui::finish_in_place_translation(state, generation, result)
+        }
         Command::Hotkey(value) => update_hotkey(state, &value),
+        Command::UpdateHotkeys(settings) => register_all_hotkeys(state, &settings),
         Command::Pin => pin_last(state),
+        Command::QuickPin => quick_pin(state),
+        Command::PinFile(path) => pin_image_from_file(state, &path),
     }
 }
 
 pub(crate) fn update_status(state: &UiState, active: bool) {
     if let Ok(mut status) = state.status.lock() {
         status.active = active;
+        status.demo_active = state.demo.is_some();
         status.last_path = state.last_path.clone();
         status.last_size = state.last_size;
     }
@@ -641,15 +704,43 @@ unsafe extern "system" fn wnd_proc(
         return 0;
     }
     if message == WM_HOTKEY && hwnd == state.hwnd {
-        if wparam == SCROLL_ESCAPE_HOTKEY_ID as usize {
-            if state.scroll_escape_hotkey_registered {
-                cancel(state);
+        let id = wparam as i32;
+        match id {
+            SCROLL_ESCAPE_HOTKEY_ID => {
+                if state.scroll_escape_hotkey_registered {
+                    cancel(state);
+                }
             }
-            return 0;
+            SCROLL_SPACE_HOTKEY_ID => {
+                if state.scroll_escape_hotkey_registered {
+                    toggle_scroll_pause(state);
+                }
+            }
+            RECORD_HOTKEY_ID => {
+                if state.recording.snapshot().phase == "recording" {
+                    stop_recording(state);
+                } else {
+                    start_recording_selection(state);
+                }
+            }
+            DEMO_HOTKEY_ID => demo::start_demo(state),
+            SCROLL_HOTKEY_ID => begin_capture(state, true),
+            QUICK_PIN_HOTKEY_ID => quick_pin(state),
+            _ => trigger_capture_or_stop_recording(state),
         }
-        trigger_capture_or_stop_recording(state);
         return 0;
     }
+
+    // Route Demo / Presentation Mode windows first
+    if let Some(demo_state) = state.demo.as_ref() {
+        if !demo_state.canvas_hwnd.is_null() && hwnd == demo_state.canvas_hwnd {
+            return demo::demo_canvas_wnd_proc(hwnd, message, wparam, lparam, state);
+        }
+        if !demo_state.toolbar_hwnd.is_null() && hwnd == demo_state.toolbar_hwnd {
+            return demo::demo_toolbar_wnd_proc(hwnd, message, wparam, lparam, state);
+        }
+    }
+
     if hwnd == state.scroll_tooltip {
         return scroll_tooltip_wnd_proc(hwnd, message, wparam, lparam, state);
     }
@@ -671,6 +762,13 @@ unsafe extern "system" fn wnd_proc(
     if hwnd == state.ocr_result_window {
         return ocr_ui::result_window_wnd_proc(hwnd, message, wparam, lparam, state);
     }
+    if state
+        .pin_menu
+        .as_ref()
+        .is_some_and(|menu| menu.hwnd == hwnd)
+    {
+        return pin_menu::pin_menu_wnd_proc(hwnd, message, wparam, lparam, state);
+    }
     if state.pinned_images.iter().any(|pin| pin.hwnd == hwnd) {
         return pin_wnd_proc(hwnd, message, wparam, lparam, state);
     }
@@ -682,8 +780,6 @@ unsafe extern "system" fn wnd_proc(
     }
     if state.recording_overlay {
         match message {
-            // The full-screen capture overlay sits over the recording controls.
-            // Pass hit-testing through so the floating toolbar can receive clicks.
             WM_NCHITTEST => return -1,
             WM_KEYDOWN if wparam as u32 == 0x1b => {
                 state.recording.cancel();
@@ -739,13 +835,41 @@ unsafe extern "system" fn wnd_proc(
             {
                 return 0;
             }
-            if !state
-                .capture
-                .as_ref()
-                .is_some_and(|capture| capture.selection.is_some() || capture.drag.is_some())
-            {
-                cancel(state);
+            if let Some(capture) = state.capture.as_mut() {
+                // 1. Close open dropdown menu first
+                if capture.menu.is_some() {
+                    capture.close_menu();
+                    invalidate(state);
+                    return 0;
+                }
+                // 2. Finish active inline text annotation
+                if capture.editing_text.is_some() {
+                    capture.finish_text_editing();
+                    invalidate(state);
+                    return 0;
+                }
+                // 3. In region capture: undo last annotation, or clear selection to re-select
+                if capture.selection.is_some() && state.editor.is_none() {
+                    if !capture.annotations.is_empty() {
+                        capture.undo();
+                    } else {
+                        capture.selection = None;
+                        capture.toolbar_origin = None;
+                        capture.drag = None;
+                    }
+                    invalidate(state);
+                    return 0;
+                }
+                // 4. In static image editor: undo last annotation
+                if state.editor.is_some() {
+                    if !capture.annotations.is_empty() {
+                        capture.undo();
+                        invalidate(state);
+                    }
+                    return 0;
+                }
             }
+            cancel(state);
             0
         }
         WM_LBUTTONDOWN => {
@@ -772,11 +896,7 @@ unsafe extern "system" fn wnd_proc(
                 return 0;
             }
             let point = screen_point_from_lparam(hwnd, lparam, state.editor.is_some());
-            mouse_move(
-                state,
-                point,
-                wparam & MK_LBUTTON as usize != 0,
-            );
+            mouse_move(state, point, wparam & MK_LBUTTON as usize != 0);
             0
         }
         WM_LBUTTONUP => {
@@ -818,11 +938,20 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_SETCURSOR => {
             if editor::is_recording_preview(state) {
-                let cursor = LoadCursorW(null_mut(), IDC_ARROW);
-                if !cursor.is_null() {
-                    SetCursor(cursor);
+                let ht = (lparam & 0xffff) as u16;
+                if ht == 1 {
+                    let cursor_id = if editor::is_recording_preview_interactive_hover(state) {
+                        IDC_HAND
+                    } else {
+                        IDC_ARROW
+                    };
+                    let cursor = LoadCursorW(null_mut(), cursor_id);
+                    if !cursor.is_null() {
+                        SetCursor(cursor);
+                    }
+                    return 1;
                 }
-                return 1;
+                return DefWindowProcW(hwnd, message, wparam, lparam);
             }
             let ht = (lparam & 0xffff) as u16;
             if ht == 1 {
@@ -850,7 +979,7 @@ unsafe extern "system" fn wnd_proc(
 mod layout_tests {
     use super::paint::rgba_preview_bgra;
     use super::scroll_ui::{scroll_preview_position, selection_fits_capture_bounds};
-    use super::toolbar_paint::{toolbar_layout, toolbar_position};
+    use super::toolbar_paint::{toolbar_layout, toolbar_position_for_layout};
     use super::*;
 
     #[test]
@@ -907,8 +1036,8 @@ mod layout_tests {
             right: 500,
             bottom: 700,
         };
-        let (x, y) = toolbar_position(selection, screen);
-        let layout = toolbar_layout(screen);
+        let layout = toolbar_layout(18, screen);
+        let (x, y) = toolbar_position_for_layout(selection, screen, layout);
         assert!(x >= screen.left + 8);
         assert!(x + layout.width <= screen.right - 8);
         assert!(y >= screen.top + 8);
@@ -977,8 +1106,8 @@ mod layout_tests {
         ];
 
         for (screen, selection) in cases {
-            let (toolbar_x, toolbar_y) = toolbar_position(selection, screen);
-            let toolbar = toolbar_layout(screen);
+            let toolbar = toolbar_layout(18, screen);
+            let (toolbar_x, toolbar_y) = toolbar_position_for_layout(selection, screen, toolbar);
             assert!(toolbar_x >= screen.left + 8);
             assert!(toolbar_y >= screen.top + 8);
             assert!(toolbar_x + toolbar.width <= screen.right - 8);
@@ -1017,8 +1146,8 @@ mod layout_tests {
                 right: 1200 * scale / 100,
                 bottom: 800 * scale / 100,
             };
-            let (toolbar_x, toolbar_y) = toolbar_position(selection, screen);
-            let toolbar = toolbar_layout(screen);
+            let toolbar = toolbar_layout(18, screen);
+            let (toolbar_x, toolbar_y) = toolbar_position_for_layout(selection, screen, toolbar);
             assert!(toolbar_x >= screen.left + 8);
             assert!(toolbar_y >= screen.top + 8);
             assert!(toolbar_x + toolbar.width <= screen.right - 8);

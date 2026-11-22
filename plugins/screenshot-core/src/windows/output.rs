@@ -7,15 +7,20 @@ use super::scroll_ui::{
 use super::{
     clear_error, set_error, update_status, wide, PinnedImageWindow, UiState, TIMER_SCROLL,
 };
-use crate::export::{compose as compose_export, copy_to_clipboard, save_png, save_png_to_path};
+use crate::export::{
+    compose_with_options, copy_to_clipboard, expand_filename_template, render_text_pin_card,
+    save_image_to_path, save_png, ComposeOptions,
+};
 use crate::model::Settings;
 
+use arboard::Clipboard;
 use std::ffi::c_void;
 use std::mem::{size_of, zeroed};
+use std::path::Path;
 use std::ptr::{null, null_mut};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, FrameRect, PAINTSTRUCT,
+    BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, FrameRect, InvalidateRect, PAINTSTRUCT,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::SystemServices::MK_CONTROL;
@@ -25,8 +30,9 @@ use windows_sys::Win32::UI::Controls::Dialogs::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetCursorPos, GetSystemMetrics,
     GetWindowRect, IsWindowVisible, KillTimer, SetLayeredWindowAttributes, SetWindowPos,
-    ShowWindow, HTCAPTION, LWA_ALPHA, SWP_NOACTIVATE, SW_HIDE, SW_SHOW, WM_DESTROY, WM_KEYDOWN,
-    WM_MBUTTONUP, WM_MOUSEWHEEL, WM_NCHITTEST, WM_NCMBUTTONUP, WM_NCRBUTTONUP, WM_PAINT,
+    ShowWindow, HTCAPTION, HWND_NOTOPMOST, HWND_TOPMOST, LWA_ALPHA, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSIZE, SW_HIDE, SW_SHOW, WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_MBUTTONUP,
+    WM_MOUSEWHEEL, WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCMBUTTONUP, WM_NCRBUTTONUP, WM_PAINT,
     WM_RBUTTONUP, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
@@ -58,15 +64,25 @@ pub(super) fn save_png_with_dialog(
     width: usize,
     height: usize,
 ) -> Result<Option<String>, String> {
-    let filter = wide("PNG image (*.png)\0*.png\0");
-    let title = wide("Save screenshot");
-    let extension = wide("png");
+    let filter = wide(
+        "PNG 图片 (*.png)\0*.png\0JPEG 图片 (*.jpg)\0*.jpg\0WebP 图片 (*.webp)\0*.webp\0",
+    );
+    let title = wide("保存截图");
+    let default_ext = match settings.save_format.as_str() {
+        "jpg" => "jpg",
+        "webp" => "webp",
+        _ => "png",
+    };
+    let extension = wide(default_ext);
     let mut file = vec![0u16; 512];
-    let default_name = wide("AgileTiles.png");
+    let stem = expand_filename_template(&settings.file_name_template);
+    let default_name = wide(&format!("{stem}.{default_ext}"));
     let copy_len = default_name.len().min(file.len() - 1);
     file[..copy_len].copy_from_slice(&default_name[..copy_len]);
-    let initial_dir = settings.save_directory.trim();
-    let initial_dir_buffer = (!initial_dir.is_empty()).then(|| wide(initial_dir));
+    let initial_dir = settings.resolved_save_directory();
+    let _ = std::fs::create_dir_all(&initial_dir);
+    let initial_dir_str = initial_dir.to_string_lossy().into_owned();
+    let initial_dir_buffer = (!initial_dir_str.is_empty()).then(|| wide(&initial_dir_str));
     let initial_dir_ptr = initial_dir_buffer
         .as_ref()
         .map(|value| value.as_ptr())
@@ -75,6 +91,11 @@ pub(super) fn save_png_with_dialog(
     dialog.lStructSize = size_of::<OPENFILENAMEW>() as u32;
     dialog.hwndOwner = owner;
     dialog.lpstrFilter = filter.as_ptr();
+    dialog.nFilterIndex = match default_ext {
+        "jpg" => 2,
+        "webp" => 3,
+        _ => 1,
+    };
     dialog.lpstrFile = file.as_mut_ptr();
     dialog.nMaxFile = file.len() as u32;
     dialog.lpstrInitialDir = initial_dir_ptr;
@@ -94,9 +115,9 @@ pub(super) fn save_png_with_dialog(
     }
     let mut path = std::path::PathBuf::from(selected);
     if path.extension().is_none() {
-        path.set_extension("png");
+        path.set_extension(default_ext);
     }
-    save_png_to_path(&path, pixels, width, height)?;
+    save_image_to_path(&path, pixels, width, height)?;
     Ok(Some(path.to_string_lossy().into_owned()))
 }
 
@@ -127,32 +148,47 @@ pub(super) fn finish_inner(
         let export = state.capture.as_ref().and_then(|capture| {
             let selection = capture.selection?;
             let screen = state.screen.as_ref()?;
-            let (width, height, pixels) = capture
-                .scroll
-                .as_ref()
-                .and_then(|scroll| scroll.assembled.as_ref())
-                .map(|(width, height, pixels)| (*width, *height, pixels.clone()))
-                .unwrap_or_else(|| {
-                    (
-                        selection.width(),
-                        selection.height(),
-                        screen.crop(selection),
-                    )
-                });
+            let (width, height, pixels) = if capture.show_translated_overlay {
+                capture
+                    .translated_image
+                    .as_ref()
+                    .map(|(w, h, p)| (*w, *h, p.clone()))
+            } else {
+                None
+            }
+            .or_else(|| {
+                capture
+                    .scroll
+                    .as_ref()
+                    .and_then(|scroll| scroll.assembled.as_ref())
+                    .map(|(w, h, p)| (*w, *h, p.clone()))
+            })
+            .unwrap_or_else(|| {
+                (
+                    selection.width(),
+                    selection.height(),
+                    screen.crop(selection),
+                )
+            });
             let settings = state
                 .settings
                 .lock()
                 .map(|settings| settings.clone())
                 .unwrap_or_default();
-            let pixels = compose_export(
+            let options = ComposeOptions {
+                corner_radius: capture.corner_radius,
+                drop_shadow: capture.drop_shadow,
+            };
+            let (out_w, out_h, pixels) = compose_with_options(
                 &settings,
                 width,
                 height,
                 pixels,
                 capture.annotations.clone(),
                 selection,
+                options,
             );
-            Some((settings, width, height, pixels))
+            Some((settings, out_w, out_h, pixels))
         });
         if let Some((settings, width, height, pixels)) = export {
             hide_capture_windows(state);
@@ -175,6 +211,7 @@ pub(super) fn finish_inner(
     let Some(mut capture) = state.capture.take() else {
         return;
     };
+    let is_scroll = capture.scroll.is_some();
     if let Some(scroll) = capture.scroll.as_mut() {
         scroll.finish();
     }
@@ -208,49 +245,74 @@ pub(super) fn finish_inner(
         .lock()
         .map(|settings| settings.clone())
         .unwrap_or_default();
-    let (width, height, pixels) = capture
-        .scroll
-        .and_then(|scroll| scroll.assembled)
-        .unwrap_or_else(|| {
-            (
-                selection.width(),
-                selection.height(),
-                screen
-                    .as_ref()
-                    .map(|value| value.crop(selection))
-                    .unwrap_or_default(),
-            )
-        });
-    let pixels = compose_export(
+    let (width, height, pixels) = if capture.show_translated_overlay {
+        capture.translated_image.take()
+    } else {
+        None
+    }
+    .or_else(|| capture.scroll.and_then(|scroll| scroll.assembled))
+    .unwrap_or_else(|| {
+        (
+            selection.width(),
+            selection.height(),
+            screen
+                .as_ref()
+                .map(|value| value.crop(selection))
+                .unwrap_or_default(),
+        )
+    });
+    let options = ComposeOptions {
+        corner_radius: capture.corner_radius,
+        drop_shadow: capture.drop_shadow,
+    };
+    let (width, height, pixels) = compose_with_options(
         &settings,
         width,
         height,
         pixels,
         capture.annotations,
         selection,
+        options,
     );
-    let path_result = if copy_only {
-        Ok(None)
-    } else if let Some(path) = saved_path {
-        Ok(Some(path))
+
+    let finish_mode = settings.finish_action.as_str();
+    let should_save = if copy_only {
+        false
+    } else if saved_path.is_some() || show_save_dialog {
+        true
     } else {
-        Ok(save_png(&settings, &pixels, width, height))
+        finish_mode != "copy_only" || settings.auto_save
     };
-    let path = match path_result {
-        Ok(path) => path,
-        Err(error) => {
-            set_error(state, error);
-            None
-        }
+
+    let path = if !should_save {
+        None
+    } else if let Some(path) = saved_path {
+        Some(path)
+    } else {
+        save_png(&settings, &pixels, width, height)
     };
-    if path.is_some() {
+
+    if let Some(ref p) = path {
+        crate::history::record_item(
+            if is_scroll { "scroll" } else { "screenshot" },
+            p,
+            width,
+            height,
+        );
         if let Ok(mut status) = state.status.lock() {
             status.error = None;
         }
-    } else if !show_save_dialog && !copy_only {
-        set_error(state, "PNG 保存失败，请检查保存目录".into());
+    } else if should_save && !show_save_dialog && !copy_only {
+        set_error(state, "图片保存失败，请检查保存目录".into());
     }
-    let should_copy = copy_only || settings.auto_copy;
+
+    let should_copy = if copy_only {
+        true
+    } else if finish_mode == "save_only" {
+        false
+    } else {
+        settings.auto_copy || finish_mode == "copy_only" || finish_mode == "copy_and_save"
+    };
     if should_copy {
         if let Err(error) = copy_to_clipboard(width, height, &pixels) {
             set_error(state, format!("复制截图失败：{error}"));
@@ -298,20 +360,31 @@ pub(super) fn pin_wnd_proc(
                         (rect.right - rect.left).max(1),
                         (rect.bottom - rect.top).max(1),
                     );
-                    let black = CreateSolidBrush(0x0000_0000);
-                    if !black.is_null() {
-                        FrameRect(dc, &rect, black);
-                        DeleteObject(black);
-                    }
-                    rect.left += 1;
-                    rect.top += 1;
-                    rect.right -= 1;
-                    rect.bottom -= 1;
-                    if rect.right > rect.left && rect.bottom > rect.top {
-                        let white = CreateSolidBrush(0x00ff_ffff);
-                        if !white.is_null() {
-                            FrameRect(dc, &rect, white);
-                            DeleteObject(white);
+                    if pin.show_border || pin.thumbnail_mode {
+                        let border_col = if pin.thumbnail_mode {
+                            0x0059_C734 // SnowAir green highlight for thumbnail
+                        } else {
+                            0x0038_383C
+                        };
+                        let outer = CreateSolidBrush(border_col);
+                        if !outer.is_null() {
+                            FrameRect(dc, &rect, outer);
+                            DeleteObject(outer);
+                        }
+                        rect.left += 1;
+                        rect.top += 1;
+                        rect.right -= 1;
+                        rect.bottom -= 1;
+                        if rect.right > rect.left && rect.bottom > rect.top {
+                            let inner = CreateSolidBrush(if pin.thumbnail_mode {
+                                0x0059_C734
+                            } else {
+                                0x00FF_FFFF
+                            });
+                            if !inner.is_null() {
+                                FrameRect(dc, &rect, inner);
+                                DeleteObject(inner);
+                            }
                         }
                     }
                 }
@@ -319,6 +392,26 @@ pub(super) fn pin_wnd_proc(
                 0
             }
             WM_NCHITTEST => HTCAPTION as LRESULT,
+            WM_LBUTTONDBLCLK | WM_NCLBUTTONDBLCLK => {
+                let action = state
+                    .settings
+                    .lock()
+                    .map(|s| s.pin_double_click.clone())
+                    .unwrap_or_else(|_| "thumbnail".into());
+                match action.as_str() {
+                    "close" => {
+                        DestroyWindow(hwnd);
+                    }
+                    "copy" => {
+                        let (w, h, px) = state.pinned_images[pin_index].image.clone();
+                        let _ = copy_to_clipboard(w, h, &px);
+                    }
+                    _ => {
+                        toggle_pin_thumbnail(state, pin_index);
+                    }
+                }
+                0
+            }
             WM_MOUSEWHEEL => {
                 let delta = ((wparam >> 16) as i16) as f32 / 120.0;
                 if delta == 0.0 {
@@ -342,6 +435,7 @@ pub(super) fn pin_wnd_proc(
                     let image = &state.pinned_images[pin_index].image;
                     (image.0, image.1)
                 };
+                state.pinned_images[pin_index].thumbnail_mode = false;
                 let max_width = GetSystemMetrics(0).max(640) * 2;
                 let max_height = GetSystemMetrics(1).max(480) * 2;
                 let min_scale = 80.0 / image_width.max(image_height).max(1) as f64;
@@ -352,17 +446,32 @@ pub(super) fn pin_wnd_proc(
                     .clamp(min_scale, max_scale.max(min_scale));
                 let new_width = (image_width as f64 * scale).round() as i32;
                 let new_height = (image_height as f64 * scale).round() as i32;
-                let mut cursor: POINT = zeroed();
-                GetCursorPos(&mut cursor);
-                let x = cursor.x
-                    - (((cursor.x - rect.left) as f64 * new_width as f64 / old_width as f64).round()
-                        as i32);
-                let y = cursor.y
-                    - (((cursor.y - rect.top) as f64 * new_height as f64 / old_height as f64).round()
-                        as i32);
+                let cursor_zoom = state
+                    .settings
+                    .lock()
+                    .map(|s| s.pin_cursor_zoom)
+                    .unwrap_or(true);
+                let (x, y) = if cursor_zoom {
+                    let mut cursor: POINT = zeroed();
+                    GetCursorPos(&mut cursor);
+                    (
+                        cursor.x
+                            - (((cursor.x - rect.left) as f64 * new_width as f64
+                                / old_width as f64)
+                                .round() as i32),
+                        cursor.y
+                            - (((cursor.y - rect.top) as f64 * new_height as f64
+                                / old_height as f64)
+                                .round() as i32),
+                    )
+                } else {
+                    let cx = rect.left + old_width / 2;
+                    let cy = rect.top + old_height / 2;
+                    (cx - new_width / 2, cy - new_height / 2)
+                };
                 SetWindowPos(
                     hwnd,
-                    std::ptr::null_mut(),
+                    null_mut(),
                     x,
                     y,
                     new_width,
@@ -381,6 +490,7 @@ pub(super) fn pin_wnd_proc(
                     (rect.bottom - rect.top).max(1),
                 );
                 let pin = &mut state.pinned_images[pin_index];
+                pin.thumbnail_mode = false;
                 if current == pin.default_size && pin.opacity == 255 {
                     if let Some(restore_size) = pin.restore_size.take() {
                         pin.restore_size = Some(pin.default_size);
@@ -392,17 +502,26 @@ pub(super) fn pin_wnd_proc(
                 }
                 pin.opacity = 255;
                 SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA);
+                InvalidateRect(hwnd, null(), 0);
                 0
             }
             WM_RBUTTONUP | WM_NCRBUTTONUP => {
-                DestroyWindow(hwnd);
+                super::pin_menu::open_pin_menu(state, pin_index);
                 0
             }
             WM_KEYDOWN if wparam as u32 == VK_ESCAPE_CODE => {
+                super::pin_menu::destroy_pin_menu(state);
                 DestroyWindow(hwnd);
                 0
             }
             WM_DESTROY => {
+                if state
+                    .pin_menu
+                    .as_ref()
+                    .is_some_and(|m| m.target_pin_hwnd == hwnd)
+                {
+                    super::pin_menu::destroy_pin_menu(state);
+                }
                 state.pinned_images.retain(|pin| pin.hwnd != hwnd);
                 if let Ok(mut status) = state.status.lock() {
                     status.pinned = !state.pinned_images.is_empty();
@@ -414,6 +533,180 @@ pub(super) fn pin_wnd_proc(
     }
 }
 
+unsafe fn toggle_pin_thumbnail(state: &mut UiState, pin_index: usize) {
+    let Some(pin) = state.pinned_images.get_mut(pin_index) else {
+        return;
+    };
+    let hwnd = pin.hwnd;
+    let mut rect: RECT = zeroed();
+    if GetWindowRect(hwnd, &mut rect) == 0 {
+        return;
+    }
+    if pin.thumbnail_mode {
+        pin.thumbnail_mode = false;
+        let target = pin.restore_size.take().unwrap_or(pin.default_size);
+        resize_pin_around_center(hwnd, rect, target);
+    } else {
+        pin.thumbnail_mode = true;
+        pin.restore_size = Some((
+            (rect.right - rect.left).max(1),
+            (rect.bottom - rect.top).max(1),
+        ));
+        let (iw, ih) = (pin.image.0.max(1) as f64, pin.image.1.max(1) as f64);
+        let scale = (96.0 / iw).min(96.0 / ih).min(1.0);
+        let tw = (iw * scale).round().max(56.0) as i32;
+        let th = (ih * scale).round().max(56.0) as i32;
+        resize_pin_around_center(hwnd, rect, (tw, th));
+    }
+    InvalidateRect(hwnd, null(), 0);
+}
+
+fn rotate_rgba_90_cw(w: usize, h: usize, pixels: &[u8]) -> (usize, usize, Vec<u8>) {
+    let new_w = h;
+    let new_h = w;
+    let mut out = vec![0u8; new_w * new_h * 4];
+    for y in 0..h {
+        for x in 0..w {
+            let src = (y * w + x) * 4;
+            let nx = h - 1 - y;
+            let ny = x;
+            let dst = (ny * new_w + nx) * 4;
+            out[dst..dst + 4].copy_from_slice(&pixels[src..src + 4]);
+        }
+    }
+    (new_w, new_h, out)
+}
+
+fn flip_rgba_horizontal(w: usize, h: usize, pixels: &[u8]) -> Vec<u8> {
+    let mut out = vec![0u8; w * h * 4];
+    for y in 0..h {
+        for x in 0..w {
+            let src = (y * w + x) * 4;
+            let dst = (y * w + (w - 1 - x)) * 4;
+            out[dst..dst + 4].copy_from_slice(&pixels[src..src + 4]);
+        }
+    }
+    out
+}
+
+fn flip_rgba_vertical(w: usize, h: usize, pixels: &[u8]) -> Vec<u8> {
+    let mut out = vec![0u8; w * h * 4];
+    let row_bytes = w * 4;
+    for y in 0..h {
+        let src = y * row_bytes;
+        let dst = (h - 1 - y) * row_bytes;
+        out[dst..dst + row_bytes].copy_from_slice(&pixels[src..src + row_bytes]);
+    }
+    out
+}
+
+pub(super) unsafe fn execute_pin_menu_action(
+    state: &mut UiState,
+    pin_hwnd: HWND,
+    action: super::pin_menu::PinMenuAction,
+) {
+    use super::pin_menu::PinMenuAction;
+    let Some(pin_index) = state.pinned_images.iter().position(|p| p.hwnd == pin_hwnd) else {
+        return;
+    };
+    match action {
+        PinMenuAction::Copy => {
+            if let Some(pin) = state.pinned_images.get(pin_index) {
+                let (w, h, px) = &pin.image;
+                let _ = copy_to_clipboard(*w, *h, px);
+            }
+        }
+        PinMenuAction::Save => {
+            if let Some(pin) = state.pinned_images.get(pin_index) {
+                let (w, h, px) = pin.image.clone();
+                let settings = state
+                    .settings
+                    .lock()
+                    .map(|s| s.clone())
+                    .unwrap_or_default();
+                if let Ok(Some(path)) = save_png_with_dialog(pin_hwnd, &settings, &px, w, h) {
+                    crate::history::record_item("screenshot", &path, w, h);
+                }
+            }
+        }
+        PinMenuAction::Ocr => {
+            if let Some(pin) = state.pinned_images.get(pin_index) {
+                let (w, h, px) = pin.image.clone();
+                super::ocr_ui::start_ocr_for_rgba(state, w, h, px);
+            }
+        }
+        PinMenuAction::Rotate90 => {
+            if let Some(pin) = state.pinned_images.get_mut(pin_index) {
+                let (nw, nh, npx) = rotate_rgba_90_cw(pin.image.0, pin.image.1, &pin.image.2);
+                pin.image = (nw, nh, npx);
+                pin.default_size = (pin.default_size.1, pin.default_size.0);
+                pin.thumbnail_mode = false;
+                let mut rect: RECT = zeroed();
+                if GetWindowRect(pin_hwnd, &mut rect) != 0 {
+                    let old_w = (rect.right - rect.left).max(1);
+                    let old_h = (rect.bottom - rect.top).max(1);
+                    resize_pin_around_center(pin_hwnd, rect, (old_h, old_w));
+                }
+                InvalidateRect(pin_hwnd, null(), 0);
+            }
+        }
+        PinMenuAction::FlipH => {
+            if let Some(pin) = state.pinned_images.get_mut(pin_index) {
+                pin.image.2 = flip_rgba_horizontal(pin.image.0, pin.image.1, &pin.image.2);
+                InvalidateRect(pin_hwnd, null(), 0);
+            }
+        }
+        PinMenuAction::FlipV => {
+            if let Some(pin) = state.pinned_images.get_mut(pin_index) {
+                pin.image.2 = flip_rgba_vertical(pin.image.0, pin.image.1, &pin.image.2);
+                InvalidateRect(pin_hwnd, null(), 0);
+            }
+        }
+        PinMenuAction::ToggleThumbnail => {
+            toggle_pin_thumbnail(state, pin_index);
+        }
+        PinMenuAction::ToggleTopmost => {
+            if let Some(pin) = state.pinned_images.get_mut(pin_index) {
+                pin.topmost = !pin.topmost;
+                let z = if pin.topmost {
+                    HWND_TOPMOST
+                } else {
+                    HWND_NOTOPMOST
+                };
+                SetWindowPos(pin_hwnd, z, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            }
+        }
+        PinMenuAction::ToggleBorder => {
+            if let Some(pin) = state.pinned_images.get_mut(pin_index) {
+                pin.show_border = !pin.show_border;
+                InvalidateRect(pin_hwnd, null(), 0);
+            }
+        }
+        PinMenuAction::Opacity(alpha) => {
+            if let Some(pin) = state.pinned_images.get_mut(pin_index) {
+                pin.opacity = alpha.max(32);
+                SetLayeredWindowAttributes(pin_hwnd, 0, pin.opacity, LWA_ALPHA);
+            }
+        }
+        PinMenuAction::Scale(pct) => {
+            if let Some(pin) = state.pinned_images.get_mut(pin_index) {
+                pin.thumbnail_mode = false;
+                let factor = f64::from(pct) / 100.0;
+                let mut rect: RECT = zeroed();
+                if GetWindowRect(pin_hwnd, &mut rect) != 0 {
+                    let tw = ((pin.image.0 as f64) * factor).round().max(80.0) as i32;
+                    let th = ((pin.image.1 as f64) * factor).round().max(60.0) as i32;
+                    resize_pin_around_center(pin_hwnd, rect, (tw, th));
+                    InvalidateRect(pin_hwnd, null(), 0);
+                }
+            }
+        }
+        PinMenuAction::Close => {
+            DestroyWindow(pin_hwnd);
+        }
+    }
+}
+
 unsafe fn resize_pin_around_center(hwnd: HWND, rect: RECT, size: (i32, i32)) {
     let old_width = (rect.right - rect.left).max(1);
     let old_height = (rect.bottom - rect.top).max(1);
@@ -421,7 +714,7 @@ unsafe fn resize_pin_around_center(hwnd: HWND, rect: RECT, size: (i32, i32)) {
     let center_y = rect.top + old_height / 2;
     SetWindowPos(
         hwnd,
-        std::ptr::null_mut(),
+        null_mut(),
         center_x - size.0 / 2,
         center_y - size.1 / 2,
         size.0,
@@ -430,11 +723,11 @@ unsafe fn resize_pin_around_center(hwnd: HWND, rect: RECT, size: (i32, i32)) {
     );
 }
 
-pub(super) fn pin_last(state: &mut UiState) {
-    let Some((width, height, pixels)) = state.last_image.clone() else {
-        set_error(state, "没有可贴图的截图".into());
+pub(super) fn pin_image_rgba(state: &mut UiState, width: usize, height: usize, pixels: Vec<u8>) {
+    if width == 0 || height == 0 || pixels.len() < width * height * 4 {
+        set_error(state, "无法创建贴图：图像数据无效".into());
         return;
-    };
+    }
     unsafe {
         let screen_left = GetSystemMetrics(76);
         let screen_top = GetSystemMetrics(77);
@@ -486,6 +779,9 @@ pub(super) fn pin_last(state: &mut UiState) {
             default_size: (target_width, target_height),
             restore_size: None,
             opacity: 255,
+            thumbnail_mode: false,
+            topmost: true,
+            show_border: true,
         });
         SetLayeredWindowAttributes(window, 0, 255, LWA_ALPHA);
         ShowWindow(window, SW_SHOW);
@@ -494,4 +790,49 @@ pub(super) fn pin_last(state: &mut UiState) {
             status.error = None;
         }
     }
+}
+
+pub(super) fn pin_last(state: &mut UiState) {
+    let Some((width, height, pixels)) = state.last_image.clone() else {
+        set_error(state, "没有可贴图的截图".into());
+        return;
+    };
+    pin_image_rgba(state, width, height, pixels);
+}
+
+pub(super) fn pin_image_from_file(state: &mut UiState, path: &str) {
+    let p = Path::new(path);
+    match image::open(p) {
+        Ok(img) => {
+            let rgba = img.to_rgba8();
+            let (w, h) = rgba.dimensions();
+            pin_image_rgba(state, w as usize, h as usize, rgba.into_raw());
+        }
+        Err(e) => {
+            set_error(state, format!("加载贴图文件失败：{e}"));
+        }
+    }
+}
+
+/// SnowAir-style Quick Pin: pins clipboard image if present, else renders clipboard text as a floating card,
+/// else falls back to pinning the last captured screenshot.
+pub(super) fn quick_pin(state: &mut UiState) {
+    if let Ok(mut cb) = Clipboard::new() {
+        if let Ok(img) = cb.get_image() {
+            if img.width > 0 && img.height > 0 {
+                pin_image_rgba(state, img.width, img.height, img.bytes.into_owned());
+                return;
+            }
+        }
+        if let Ok(text) = cb.get_text() {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                let dark = state.current_theme().is_dark;
+                let (w, h, px) = render_text_pin_card(trimmed, dark);
+                pin_image_rgba(state, w, h, px);
+                return;
+            }
+        }
+    }
+    pin_last(state);
 }

@@ -1,43 +1,207 @@
-use super::{set_error, wide, UiState, DEFAULT_GUI_FONT};
+use super::toolbar_paint::{argb, create_ui_font, draw_round_rect_gdip, ensure_gdiplus};
+use super::{set_error, wide, UiState};
 use crate::model::{ScreenPoint, ScreenRect, RECORDING_FPS_OPTIONS};
 use crate::recorder::{AnimationFormat, GifExportQuality, WebpExportSize};
+use crate::theme::ThemePalette;
+use crate::toolbar::Tool;
 use std::ffi::c_void;
 use std::mem::{size_of, zeroed};
 use std::path::PathBuf;
+use std::ptr::null_mut;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    BeginPaint, CreatePen, CreateSolidBrush, DeleteObject, DrawTextW,
-    Ellipse, EndPaint, FillRect, GetStockObject, InvalidateRect, Polygon, RoundRect, SelectObject,
-    SetBkMode, SetTextColor, PAINTSTRUCT,
+    BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateRoundRectRgn,
+    CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, EndPaint, FillRect, InvalidateRect,
+    SelectObject, SetBkMode, SetTextColor, SetWindowRgn, HGDIOBJ, PAINTSTRUCT, SRCCOPY,
+};
+use windows_sys::Win32::Graphics::GdiPlus::{
+    DashCapRound, GdipCreateFromHDC, GdipCreatePen1, GdipCreateSolidFill, GdipDeleteBrush,
+    GdipDeleteGraphics, GdipDeletePen, GdipDrawArc, GdipDrawLine, GdipFillEllipse,
+    GdipSetPenLineCap197819, GdipSetPenLineJoin, GdipSetPixelOffsetMode, GdipSetSmoothingMode,
+    GpBrush, GpGraphics, GpPen, GpSolidFill, LineCapRound, LineJoinRound, PixelOffsetModeHalf,
+    SmoothingModeAntiAlias8x8, UnitPixel,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::SystemServices::MK_LBUTTON;
-use windows_sys::Win32::UI::Controls::{
-    TaskDialogIndirect, TASKDIALOG_BUTTON, TASKDIALOGCONFIG, TDCBF_CANCEL_BUTTON,
-    TDCBF_OK_BUTTON, TDF_ALLOW_DIALOG_CANCELLATION,
-};
 use windows_sys::Win32::UI::Controls::Dialogs::{
     GetSaveFileNameW, OFN_EXPLORER, OFN_OVERWRITEPROMPT, OFN_PATHMUSTEXIST, OPENFILENAMEW,
 };
-use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DestroyWindow, GetCursorPos, GetWindowRect, KillTimer,
-    MessageBoxW, SetLayeredWindowAttributes, SetTimer, SetWindowPos, ShowWindow, LWA_ALPHA,
-    LWA_COLORKEY, MB_ICONERROR, MB_OK, SWP_NOACTIVATE, SWP_NOZORDER, SWP_NOSIZE,
-    SW_SHOWNOACTIVATE, WM_CAPTURECHANGED, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_TIMER, WS_EX_LAYERED,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, IDOK, WS_POPUP,
+use windows_sys::Win32::UI::Controls::{
+    TaskDialogIndirect, TASKDIALOGCONFIG, TASKDIALOG_BUTTON, TDCBF_CANCEL_BUTTON, TDCBF_OK_BUTTON,
+    TDF_ALLOW_DIALOG_CANCELLATION, WM_MOUSELEAVE,
 };
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
+};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    CreateWindowExW, DestroyWindow, GetClientRect, GetCursorPos, GetWindowRect, KillTimer,
+    MessageBoxW, SetTimer, SetWindowPos, ShowWindow, IDOK, MB_ICONERROR, MB_OK, SWP_NOACTIVATE,
+    SWP_NOSIZE, SWP_NOZORDER, SW_SHOWNOACTIVATE, WM_CAPTURECHANGED, WM_CLOSE, WM_DESTROY,
+    WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_TIMER,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+};
 
 const CONTROL_TIMER: usize = 0x5243;
-const CONTROL_WIDTH: i32 = 448;
-const CONTROL_HEIGHT: i32 = 64;
-const TIMER_TEXT_RECT: RECT = RECT { left: 48, top: 2, right: 314, bottom: 62 };
-const PAUSE_BUTTON: (i32, i32, i32, i32) = (48, 10, 92, 54);
-const STOP_BUTTON: (i32, i32, i32, i32) = (326, 9, 436, 55);
-const CANCEL_BUTTON: (i32, i32, i32, i32) = (326, 9, 436, 55);
-const CLEAR_BUTTON: (i32, i32, i32, i32) = (176, 14, 232, 50);
-const EDIT_BUTTON: (i32, i32, i32, i32) = (242, 14, 426, 50);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RecAction {
+    Pause,
+    ToggleAnnotate,
+    ToolFadePen,
+    ToolPen,
+    ToolRect,
+    ToolArrow,
+    Undo,
+    Clear,
+    Stop,
+    Cancel,
+    ClearPreview,
+    OpenPreview,
+}
+
+#[derive(Clone, Copy)]
+struct RecButton {
+    id: usize,
+    action: RecAction,
+    rect: (i32, i32, i32, i32),
+}
+
+struct RecBarMetrics {
+    scale: f32,
+    width: i32,
+    height: i32,
+    expanded: bool,
+    buttons: Vec<RecButton>,
+    dividers_x: Vec<i32>,
+}
+
+fn bar_scale(state: &UiState) -> f32 {
+    state
+        .settings
+        .lock()
+        .map(|s| crate::theme::ui_scale_for_settings(&s))
+        .unwrap_or_else(|_| crate::theme::system_dpi_scale())
+}
+
+fn compute_metrics(state: &UiState, phase: &str) -> RecBarMetrics {
+    let s = bar_scale(state);
+    let px = |dp: f32| (dp * s).round() as i32;
+    let height = px(52.0);
+    let expanded = phase == "recording" && !state.recording_passthrough;
+    let mut buttons = Vec::new();
+    let mut dividers_x = Vec::new();
+    let by0 = px(8.0);
+    let by1 = height - px(8.0);
+
+    let width = match phase {
+        "recording" => {
+            dividers_x.push(px(116.0));
+            buttons.push(RecButton {
+                id: 0,
+                action: RecAction::Pause,
+                rect: (px(124.0), by0, px(162.0), by1),
+            });
+            buttons.push(RecButton {
+                id: 1,
+                action: RecAction::ToggleAnnotate,
+                rect: (px(168.0), by0, px(248.0), by1),
+            });
+            if expanded {
+                dividers_x.push(px(256.0));
+                let tools = [
+                    (2, RecAction::ToolFadePen),
+                    (3, RecAction::ToolPen),
+                    (4, RecAction::ToolRect),
+                    (5, RecAction::ToolArrow),
+                    (6, RecAction::Undo),
+                    (7, RecAction::Clear),
+                ];
+                let mut x = 264.0f32;
+                for (id, action) in tools {
+                    buttons.push(RecButton {
+                        id,
+                        action,
+                        rect: (px(x), by0, px(x + 36.0), by1),
+                    });
+                    x += 40.0;
+                }
+                dividers_x.push(px(x + 2.0));
+                let sx = x + 10.0;
+                buttons.push(RecButton {
+                    id: 8,
+                    action: RecAction::Stop,
+                    rect: (px(sx), by0, px(sx + 84.0), by1),
+                });
+                buttons.push(RecButton {
+                    id: 9,
+                    action: RecAction::Cancel,
+                    rect: (px(sx + 90.0), by0, px(sx + 124.0), by1),
+                });
+                px(sx + 134.0)
+            } else {
+                dividers_x.push(px(256.0));
+                buttons.push(RecButton {
+                    id: 8,
+                    action: RecAction::Stop,
+                    rect: (px(264.0), by0, px(348.0), by1),
+                });
+                buttons.push(RecButton {
+                    id: 9,
+                    action: RecAction::Cancel,
+                    rect: (px(354.0), by0, px(388.0), by1),
+                });
+                px(398.0)
+            }
+        }
+        "preview" => {
+            buttons.push(RecButton {
+                id: 10,
+                action: RecAction::ClearPreview,
+                rect: (px(254.0), by0, px(318.0), by1),
+            });
+            buttons.push(RecButton {
+                id: 11,
+                action: RecAction::OpenPreview,
+                rect: (px(326.0), by0, px(444.0), by1),
+            });
+            px(456.0)
+        }
+        "exporting" | "cancelling" => {
+            buttons.push(RecButton {
+                id: 9,
+                action: RecAction::Cancel,
+                rect: (px(368.0), by0, px(444.0), by1),
+            });
+            px(456.0)
+        }
+        "processing" => px(320.0),
+        _ => {
+            buttons.push(RecButton {
+                id: 9,
+                action: RecAction::Cancel,
+                rect: (px(368.0), by0, px(444.0), by1),
+            });
+            px(456.0)
+        }
+    };
+
+    RecBarMetrics {
+        scale: s,
+        width,
+        height,
+        expanded,
+        buttons,
+        dividers_x,
+    }
+}
+
+unsafe fn apply_round_window_region(hwnd: HWND, width: i32, height: i32, scale: f32) {
+    let r = (24.0 * scale).round() as i32;
+    let rgn = CreateRoundRectRgn(0, 0, width + 1, height + 1, r, r);
+    if !rgn.is_null() && SetWindowRgn(hwnd, rgn, 1) == 0 {
+        DeleteObject(rgn as HGDIOBJ);
+    }
+}
 
 pub(super) fn create_control_toolbar(
     state: &mut UiState,
@@ -46,38 +210,84 @@ pub(super) fn create_control_toolbar(
 ) -> Result<(), String> {
     destroy_control_toolbar(state);
     state.recording_error_dialog_message = None;
-    let (x, y) = control_position(selection, screen);
+    state.recording_toolbar_hover = None;
+    state.recording_toolbar_tracking = false;
+    let status = state.recording.snapshot();
+    let metrics = compute_metrics(state, status.phase.as_str());
+    let (x, y) = control_position(selection, screen, metrics.width, metrics.height, metrics.scale);
     let class_name = wide("AgileTilesScreenshotCoreV2");
     let hwnd = unsafe {
         CreateWindowExW(
-            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_NOACTIVATE,
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
             class_name.as_ptr(),
             class_name.as_ptr(),
             WS_POPUP,
             x,
             y,
-            CONTROL_WIDTH,
-            CONTROL_HEIGHT,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
+            metrics.width,
+            metrics.height,
+            null_mut(),
+            null_mut(),
             GetModuleHandleW(std::ptr::null()),
             state as *mut UiState as *const c_void,
         )
     };
     if hwnd.is_null() {
-        return Err(
-            "\u{65e0}\u{6cd5}\u{521b}\u{5efa}\u{5f55}\u{5236}\u{5de5}\u{5177}\u{680f}".into(),
-        );
+        return Err("无法创建录制工具栏".into());
     }
     state.recording_toolbar = hwnd;
     state.recording_toolbar_signature = None;
     state.recording_toolbar_static_signature = None;
     unsafe {
-        SetLayeredWindowAttributes(hwnd, 0x00030201, 248, LWA_ALPHA | LWA_COLORKEY);
+        apply_round_window_region(hwnd, metrics.width, metrics.height, metrics.scale);
         SetTimer(hwnd, CONTROL_TIMER, 250, None);
         ShowWindow(hwnd, SW_SHOWNOACTIVATE);
     }
     Ok(())
+}
+
+/// Smoothly resize and recenter the unified recording bar when toggling inline annotation tools!
+pub(crate) fn sync_toolbar_layout(state: &mut UiState) {
+    let hwnd = state.recording_toolbar;
+    if hwnd.is_null() {
+        return;
+    }
+    let status = state.recording.snapshot();
+    let metrics = compute_metrics(state, status.phase.as_str());
+    unsafe {
+        let mut rc: RECT = zeroed();
+        if GetWindowRect(hwnd, &mut rc) != 0 {
+            let old_w = rc.right - rc.left;
+            let old_h = rc.bottom - rc.top;
+            if old_w != metrics.width || old_h != metrics.height {
+                let cx = (rc.left + rc.right) / 2;
+                let mut nx = cx - metrics.width / 2;
+                let mut ny = rc.top;
+                if let Some(screen) = state.screen.as_ref().map(super::ScreenCapture::bounds) {
+                    nx = nx.clamp(
+                        screen.left + 8,
+                        (screen.right - metrics.width - 8).max(screen.left + 8),
+                    );
+                    ny = ny.clamp(
+                        screen.top + 8,
+                        (screen.bottom - metrics.height - 8).max(screen.top + 8),
+                    );
+                }
+                SetWindowPos(
+                    hwnd,
+                    (-1isize) as HWND,
+                    nx,
+                    ny,
+                    metrics.width,
+                    metrics.height,
+                    SWP_NOACTIVATE,
+                );
+                apply_round_window_region(hwnd, metrics.width, metrics.height, metrics.scale);
+            }
+        }
+        state.recording_toolbar_hover = None;
+        InvalidateRect(hwnd, std::ptr::null(), 0);
+    }
 }
 
 pub(super) fn destroy_control_toolbar(state: &mut UiState) {
@@ -88,8 +298,10 @@ pub(super) fn destroy_control_toolbar(state: &mut UiState) {
         KillTimer(state.recording_toolbar, CONTROL_TIMER);
         DestroyWindow(state.recording_toolbar);
     }
-    state.recording_toolbar = std::ptr::null_mut();
+    state.recording_toolbar = null_mut();
     state.recording_toolbar_drag = None;
+    state.recording_toolbar_hover = None;
+    state.recording_toolbar_tracking = false;
     state.recording_toolbar_signature = None;
     state.recording_toolbar_static_signature = None;
 }
@@ -117,21 +329,27 @@ pub(super) unsafe fn control_wnd_proc(
             {
                 super::queue_open_recording_editor(state);
             } else if state.recording_toolbar_static_signature.as_deref()
-                != Some(recording_toolbar_static_signature(&status).as_str()) {
-                InvalidateRect(hwnd, std::ptr::null(), 0);
+                != Some(recording_toolbar_static_signature(state, &status).as_str())
+            {
+                sync_toolbar_layout(state);
             } else if state.recording_toolbar_signature.as_deref()
-                != Some(recording_toolbar_signature(&status).as_str()) {
-                InvalidateRect(hwnd, &TIMER_TEXT_RECT, 0);
+                != Some(recording_toolbar_signature(state, &status).as_str())
+            {
+                InvalidateRect(hwnd, std::ptr::null(), 0);
             }
             0
         }
         WM_LBUTTONDOWN => {
-            let point = (
+            let pt = (
                 (lparam & 0xffff) as i16 as i32,
                 ((lparam >> 16) & 0xffff) as i16 as i32,
             );
-            let x = point.0;
-            if (0..40).contains(&x) {
+            let status = state.recording.snapshot();
+            let metrics = compute_metrics(state, status.phase.as_str());
+            if let Some(btn) = metrics.buttons.iter().find(|b| inside(pt, b.rect)) {
+                handle_control_action(state, btn.action);
+            } else {
+                // Drag smoothly from anywhere on the bar background / grip / timer!
                 let mut cursor: POINT = zeroed();
                 let mut rect: RECT = zeroed();
                 if GetCursorPos(&mut cursor) != 0 && GetWindowRect(hwnd, &mut rect) != 0 {
@@ -141,25 +359,69 @@ pub(super) unsafe fn control_wnd_proc(
                     ));
                     SetCapture(hwnd);
                 }
-            } else {
-                // This non-activating layered popup may not receive the matching
-                // mouse-up reliably, so dispatch controls as soon as they're pressed.
-                handle_control_click(state, point);
             }
             0
         }
-        WM_MOUSEMOVE if wparam & MK_LBUTTON as usize != 0 => {
-            if let Some((start, origin)) = state.recording_toolbar_drag {
-                let mut cursor: POINT = zeroed();
-                if GetCursorPos(&mut cursor) != 0 {
-                    let mut x = origin.x + cursor.x - start.x;
-                    let mut y = origin.y + cursor.y - start.y;
-                    if let Some(screen) = state.screen.as_ref().map(super::ScreenCapture::bounds) {
-                        x = x.clamp(screen.left + 4, (screen.right - CONTROL_WIDTH - 4).max(screen.left + 4));
-                        y = y.clamp(screen.top + 4, (screen.bottom - CONTROL_HEIGHT - 4).max(screen.top + 4));
+        WM_MOUSEMOVE => {
+            if wparam & MK_LBUTTON as usize != 0 {
+                if let Some((start, origin)) = state.recording_toolbar_drag {
+                    let mut cursor: POINT = zeroed();
+                    let mut rc: RECT = zeroed();
+                    if GetCursorPos(&mut cursor) != 0 && GetWindowRect(hwnd, &mut rc) != 0 {
+                        let w = rc.right - rc.left;
+                        let h = rc.bottom - rc.top;
+                        let mut x = origin.x + cursor.x - start.x;
+                        let mut y = origin.y + cursor.y - start.y;
+                        if let Some(screen) = state.screen.as_ref().map(super::ScreenCapture::bounds)
+                        {
+                            x = x.clamp(screen.left + 4, (screen.right - w - 4).max(screen.left + 4));
+                            y = y.clamp(screen.top + 4, (screen.bottom - h - 4).max(screen.top + 4));
+                        }
+                        SetWindowPos(
+                            hwnd,
+                            null_mut(),
+                            x,
+                            y,
+                            0,
+                            0,
+                            SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOSIZE,
+                        );
                     }
-                    SetWindowPos(hwnd, std::ptr::null_mut(), x, y, 0, 0, SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOSIZE);
+                    return 0;
                 }
+            }
+            if !state.recording_toolbar_tracking {
+                let mut tme = TRACKMOUSEEVENT {
+                    cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
+                    dwFlags: TME_LEAVE,
+                    hwndTrack: hwnd,
+                    dwHoverTime: 0,
+                };
+                if TrackMouseEvent(&mut tme) != 0 {
+                    state.recording_toolbar_tracking = true;
+                }
+            }
+            let pt = (
+                (lparam & 0xffff) as i16 as i32,
+                ((lparam >> 16) & 0xffff) as i16 as i32,
+            );
+            let status = state.recording.snapshot();
+            let metrics = compute_metrics(state, status.phase.as_str());
+            let next_hover = metrics
+                .buttons
+                .iter()
+                .find(|b| inside(pt, b.rect))
+                .map(|b| b.id);
+            if state.recording_toolbar_hover != next_hover {
+                state.recording_toolbar_hover = next_hover;
+                InvalidateRect(hwnd, std::ptr::null(), 0);
+            }
+            0
+        }
+        WM_MOUSELEAVE => {
+            state.recording_toolbar_tracking = false;
+            if state.recording_toolbar_hover.take().is_some() {
+                InvalidateRect(hwnd, std::ptr::null(), 0);
             }
             0
         }
@@ -174,6 +436,7 @@ pub(super) unsafe fn control_wnd_proc(
             0
         }
         WM_CLOSE => {
+            super::demo::stop_demo(state);
             state.recording.cancel();
             destroy_control_toolbar(state);
             super::cancel(state);
@@ -187,142 +450,466 @@ pub(super) unsafe fn control_wnd_proc(
     }
 }
 
-fn control_position(selection: ScreenRect, screen: ScreenRect) -> (i32, i32) {
-    let margin = 8;
+fn control_position(
+    selection: ScreenRect,
+    screen: ScreenRect,
+    width: i32,
+    height: i32,
+    scale: f32,
+) -> (i32, i32) {
+    let margin = (10.0 * scale).round() as i32;
     let selection_width = selection.right - selection.left;
-    let desired_x = selection.left + (selection_width - CONTROL_WIDTH) / 2;
+    let desired_x = selection.left + (selection_width - width) / 2;
     let x = desired_x.clamp(
         screen.left + margin,
-        (screen.right - CONTROL_WIDTH - margin).max(screen.left + margin),
+        (screen.right - width - margin).max(screen.left + margin),
     );
-    let above = selection.top - CONTROL_HEIGHT - margin;
+    let above = selection.top - height - margin;
     let below = selection.bottom + margin;
     let y = if above >= screen.top + margin {
         above
-    } else if below + CONTROL_HEIGHT <= screen.bottom - margin {
+    } else if below + height <= screen.bottom - margin {
         below
     } else {
-        (screen.top + margin).min(screen.bottom - CONTROL_HEIGHT - margin)
+        (screen.top + margin).min(screen.bottom - height - margin)
     };
     (x, y)
 }
 
 unsafe fn paint_control_toolbar(hwnd: HWND, state: &mut UiState) {
     let mut paint: PAINTSTRUCT = zeroed();
-    let dc = BeginPaint(hwnd, &mut paint);
-    let background = CreateSolidBrush(0x00030201);
-    let rect = RECT {
-        left: 0,
-        top: 0,
-        right: CONTROL_WIDTH,
-        bottom: CONTROL_HEIGHT,
+    let target_dc = BeginPaint(hwnd, &mut paint);
+    let mut client: RECT = zeroed();
+    GetClientRect(hwnd, &mut client);
+    let w = (client.right - client.left).max(1);
+    let h = (client.bottom - client.top).max(1);
+
+    let mem_dc = CreateCompatibleDC(target_dc);
+    let bmp = CreateCompatibleBitmap(target_dc, w, h);
+    let use_buf = !mem_dc.is_null() && !bmp.is_null();
+    let old_bmp = if use_buf {
+        SelectObject(mem_dc, bmp as HGDIOBJ)
+    } else {
+        null_mut()
     };
-    FillRect(dc, &rect, background);
-    DeleteObject(background as _);
+    let dc = if use_buf { mem_dc } else { target_dc };
 
-    let shadow = CreateSolidBrush(0x00cbd3dd);
-    let shadow_old_brush = SelectObject(dc, shadow as _);
-    let shadow_old_pen = SelectObject(
-        dc,
-        GetStockObject(windows_sys::Win32::Graphics::Gdi::NULL_PEN as i32),
-    );
-    RoundRect(dc, 2, 3, CONTROL_WIDTH - 2, CONTROL_HEIGHT - 1, 22, 22);
-    SelectObject(dc, shadow_old_pen);
-    SelectObject(dc, shadow_old_brush);
-    DeleteObject(shadow as _);
+    paint_control_toolbar_to_dc(dc, w, h, state);
 
-    let border = CreatePen(0, 1, 0x00d8dee7);
-    let white = CreateSolidBrush(0x00ffffff);
-    let old_border = SelectObject(dc, border as _);
-    let old_white = SelectObject(dc, white as _);
-    RoundRect(dc, 1, 1, CONTROL_WIDTH - 1, CONTROL_HEIGHT - 1, 22, 22);
-    SelectObject(dc, old_border);
-    SelectObject(dc, old_white);
-    DeleteObject(border as _);
-    DeleteObject(white as _);
-
-    let grip = CreateSolidBrush(0x0097a0ac);
-    let old_grip = SelectObject(dc, grip as _);
-    for row in 0..3 {
-        for column in 0..2 {
-            let left = 17 + column * 6;
-            let top = 20 + row * 7;
-            Ellipse(dc, left, top, left + 3, top + 3);
+    if use_buf {
+        BitBlt(target_dc, 0, 0, w, h, mem_dc, 0, 0, SRCCOPY);
+        SelectObject(mem_dc, old_bmp);
+        DeleteObject(bmp as HGDIOBJ);
+        DeleteDC(mem_dc);
+    } else {
+        if !bmp.is_null() {
+            DeleteObject(bmp as HGDIOBJ);
         }
-    }
-    SelectObject(dc, old_grip);
-    DeleteObject(grip as _);
-
-    let status = state.recording.snapshot();
-    state.recording_toolbar_signature = Some(recording_toolbar_signature(&status));
-    state.recording_toolbar_static_signature = Some(recording_toolbar_static_signature(&status));
-    let label = control_status_text(&status);
-    match status.phase.as_str() {
-        "recording" => {
-            draw_pause_toggle(dc, PAUSE_BUTTON, status.paused);
-            draw_status_dot(dc, 111, 32, 0x00454af5);
-            draw_control_text(dc, 126, 6, 314, 31, "正在录制", 0x0076818f);
-            draw_control_text(dc, 126, 28, 314, 57, &recording_time_text(&status), 0x00343a45);
-            draw_control_button(dc, STOP_BUTTON, "结束录制", 0x00454af5, true);
-        }
-        "processing" => {
-            draw_control_text(dc, 48, 10, 436, 54, &label, 0x004a5666);
-        }
-        "exporting" | "cancelling" => {
-            draw_control_text(dc, 48, 3, 314, 40, &label, 0x004a5666);
-            if status.phase == "exporting" {
-                draw_control_progress_bar(dc, 48, 47, 314, 55, status.progress_percent);
-            }
-            draw_control_button(dc, CANCEL_BUTTON, "取消", 0x00f3f5f8, false);
-        }
-        "preview" => {
-            draw_control_text(dc, 48, 18, 164, 54, &label, 0x004a5666);
-            draw_control_button(dc, CLEAR_BUTTON, "清除", 0x00f3f5f8, false);
-            draw_control_button(dc, EDIT_BUTTON, "打开预览", 0x00f76f16, true);
-        }
-        _ => {
-            draw_control_text(dc, 48, 10, 314, 54, &label, 0x004a5666);
-            draw_control_button(dc, CANCEL_BUTTON, "返回", 0x00f3f5f8, false);
+        if !mem_dc.is_null() {
+            DeleteDC(mem_dc);
         }
     }
     EndPaint(hwnd, &paint);
 }
 
-unsafe fn draw_pause_toggle(
+unsafe fn paint_control_toolbar_to_dc(
     dc: windows_sys::Win32::Graphics::Gdi::HDC,
-    rect: (i32, i32, i32, i32),
-    paused: bool,
+    w: i32,
+    h: i32,
+    state: &mut UiState,
 ) {
-    let brush = CreateSolidBrush(0x00f3f5f8);
-    let pen = CreatePen(0, 1, 0x00e2e7ef);
-    let old_brush = SelectObject(dc, brush as _);
-    let old_pen = SelectObject(dc, pen as _);
-    RoundRect(dc, rect.0, rect.1, rect.2, rect.3, 10, 10);
-    SelectObject(dc, old_brush);
-    SelectObject(dc, old_pen);
-    DeleteObject(brush as _);
-    DeleteObject(pen as _);
+    let theme = state.current_theme();
+    let status = state.recording.snapshot();
+    state.recording_toolbar_signature = Some(recording_toolbar_signature(state, &status));
+    state.recording_toolbar_static_signature =
+        Some(recording_toolbar_static_signature(state, &status));
+    let metrics = compute_metrics(state, status.phase.as_str());
+    let s = metrics.scale;
+    let px = |dp: f32| (dp * s).round() as i32;
 
-    let icon = CreateSolidBrush(0x00343a45);
-    let old_icon = SelectObject(dc, icon as _);
-    if paused {
-        let points = [
-            POINT { x: rect.0 + 16, y: rect.1 + 12 },
-            POINT { x: rect.0 + 16, y: rect.3 - 12 },
-            POINT { x: rect.2 - 13, y: (rect.1 + rect.3) / 2 },
-        ];
-        Polygon(dc, points.as_ptr(), points.len() as i32);
-    } else {
-        let left_bar = RECT { left: rect.0 + 15, top: rect.1 + 12, right: rect.0 + 21, bottom: rect.3 - 12 };
-        let right_bar = RECT { left: rect.0 + 25, top: rect.1 + 12, right: rect.0 + 31, bottom: rect.3 - 12 };
-        FillRect(dc, &left_bar, icon);
-        FillRect(dc, &right_bar, icon);
+    // Solid bg fill first so corners match window rgn cleanly
+    let bg_br = CreateSolidBrush(ThemePalette::colorref(theme.bg));
+    let full = RECT { left: 0, top: 0, right: w, bottom: h };
+    FillRect(dc, &full, bg_br);
+    DeleteObject(bg_br as _);
+
+    ensure_gdiplus();
+    let mut g: *mut GpGraphics = null_mut();
+    if GdipCreateFromHDC(dc, &mut g) == 0 && !g.is_null() {
+        GdipSetSmoothingMode(g, SmoothingModeAntiAlias8x8);
+        GdipSetPixelOffsetMode(g, PixelOffsetModeHalf);
+
+        // Crisp 1px rounded inner border
+        draw_round_rect_gdip(
+            g,
+            0.5,
+            0.5,
+            w as f32 - 1.0,
+            h as f32 - 1.0,
+            12.0 * s,
+            Some(argb(theme.bg, Some(0xFF))),
+            Some((argb(theme.icon, Some(0x2E)), (1.0 * s).max(1.0))),
+        );
+
+        // 6-dot drag grip
+        let mut grip_br: *mut GpSolidFill = null_mut();
+        if GdipCreateSolidFill(argb(theme.icon, Some(0x70)), &mut grip_br) == 0 && !grip_br.is_null()
+        {
+            let r = 1.45 * s;
+            for row in [-5.5f32, 0.0, 5.5] {
+                for col in [-2.6f32, 2.6] {
+                    let gx = 18.0 * s + col * s;
+                    let gy = h as f32 * 0.5 + row * s;
+                    GdipFillEllipse(g, grip_br as *mut GpBrush, gx - r, gy - r, r * 2.0, r * 2.0);
+                }
+            }
+            GdipDeleteBrush(grip_br as *mut GpBrush);
+        }
+
+        // Group dividers
+        let mut div_pen: *mut GpPen = null_mut();
+        if GdipCreatePen1(argb(theme.icon, Some(0x28)), (1.0 * s).max(1.0), UnitPixel, &mut div_pen)
+            == 0
+            && !div_pen.is_null()
+        {
+            for &dx in &metrics.dividers_x {
+                GdipDrawLine(
+                    g,
+                    div_pen,
+                    dx as f32,
+                    h as f32 * 0.5 - 11.0 * s,
+                    dx as f32,
+                    h as f32 * 0.5 + 11.0 * s,
+                );
+            }
+            GdipDeletePen(div_pen);
+        }
+
+        let icon_col = argb(theme.icon, Some(0xFF));
+        let accent_col = argb(theme.accent, Some(0xFF));
+        let danger_col = argb(theme.danger, Some(0xFF));
+        let hover_col = argb(theme.hover, Some(0xFF));
+        let active_bg = argb(theme.accent, Some(if theme.is_dark { 0x2A } else { 0x20 }));
+        let active_tool = super::demo::recording_canvas_tool(state);
+        let has_ann = super::demo::recording_canvas_has_annotations(state);
+
+        if status.phase == "recording" {
+            // Recording status pulse dot
+            let dot_col = if status.paused {
+                0xFF_F59E0B // Amber when paused
+            } else {
+                danger_col // Red live dot
+            };
+            let mut dot_br: *mut GpSolidFill = null_mut();
+            if GdipCreateSolidFill(dot_col, &mut dot_br) == 0 && !dot_br.is_null() {
+                let dr = 4.6 * s;
+                let dx = 37.0 * s;
+                let dy = h as f32 * 0.5;
+                GdipFillEllipse(g, dot_br as *mut GpBrush, dx - dr, dy - dr, dr * 2.0, dr * 2.0);
+                GdipDeleteBrush(dot_br as *mut GpBrush);
+            }
+        } else if status.phase == "exporting" {
+            // SnowAir green progress bar
+            let pl = 36.0 * s;
+            let pr = 354.0 * s;
+            let py = h as f32 - 12.0 * s;
+            let ph = 5.0 * s;
+            draw_round_rect_gdip(
+                g,
+                pl,
+                py,
+                pr - pl,
+                ph,
+                ph * 0.5,
+                Some(argb(theme.slider_track, Some(0xFF))),
+                None,
+            );
+            let fill_w = (pr - pl) * (f32::from(status.progress_percent.min(100)) / 100.0);
+            if fill_w > 2.0 {
+                draw_round_rect_gdip(g, pl, py, fill_w, ph, ph * 0.5, Some(accent_col), None);
+            }
+        }
+
+        // Draw all buttons (background + crisp GDI+ icons)
+        for btn in &metrics.buttons {
+            let hovered = state.recording_toolbar_hover == Some(btn.id);
+            let (l, t, r, b) = btn.rect;
+            let bw = (r - l) as f32;
+            let bh = (b - t) as f32;
+            let cx = (l + r) as f32 * 0.5;
+            let cy = (t + b) as f32 * 0.5;
+
+            let is_selected_tool = match btn.action {
+                RecAction::ToolFadePen => active_tool == Tool::FadePen,
+                RecAction::ToolPen => active_tool == Tool::Pen,
+                RecAction::ToolRect => active_tool == Tool::Rectangle,
+                RecAction::ToolArrow => active_tool == Tool::Arrow,
+                _ => false,
+            };
+
+            match btn.action {
+                RecAction::Stop => {
+                    let fill = if hovered { 0xFF_DC2626 } else { danger_col };
+                    draw_round_rect_gdip(g, l as f32, t as f32, bw, bh, 9.0 * s, Some(fill), None);
+                }
+                RecAction::OpenPreview => {
+                    draw_round_rect_gdip(
+                        g,
+                        l as f32,
+                        t as f32,
+                        bw,
+                        bh,
+                        9.0 * s,
+                        Some(accent_col),
+                        None,
+                    );
+                }
+                RecAction::ToggleAnnotate => {
+                    let annotating = !state.recording_passthrough;
+                    let fill = if annotating {
+                        accent_col
+                    } else if hovered {
+                        hover_col
+                    } else {
+                        argb(theme.hover, Some(0xAA))
+                    };
+                    draw_round_rect_gdip(
+                        g,
+                        l as f32,
+                        t as f32,
+                        bw,
+                        bh,
+                        9.0 * s,
+                        Some(fill),
+                        (!annotating).then_some((argb(theme.icon, Some(0x22)), 1.0)),
+                    );
+                }
+                _ => {
+                    if is_selected_tool {
+                        draw_round_rect_gdip(
+                            g,
+                            l as f32,
+                            t as f32,
+                            bw,
+                            bh,
+                            8.0 * s,
+                            Some(active_bg),
+                            None,
+                        );
+                    } else if hovered {
+                        draw_round_rect_gdip(
+                            g,
+                            l as f32,
+                            t as f32,
+                            bw,
+                            bh,
+                            8.0 * s,
+                            Some(hover_col),
+                            None,
+                        );
+                    }
+                }
+            }
+
+            // Vector icons for icon-only buttons
+            let stroke_col = match btn.action {
+                RecAction::Undo | RecAction::Clear if !has_ann => argb(theme.icon_disabled, Some(0x88)),
+                RecAction::Cancel if hovered => danger_col,
+                _ if is_selected_tool => accent_col,
+                _ => icon_col,
+            };
+            draw_rec_button_icon(g, btn.action, cx, cy, s, stroke_col, status.paused);
+        }
+
+        GdipDeleteGraphics(g);
     }
-    SelectObject(dc, old_icon);
-    DeleteObject(icon as _);
+
+    // Crisp ClearType Microsoft YaHei UI text labels
+    let text_c = ThemePalette::colorref(theme.info_text);
+    let muted_c = ThemePalette::colorref(theme.info_muted);
+    match status.phase.as_str() {
+        "recording" => {
+            draw_rec_text(
+                dc,
+                px(47.0),
+                0,
+                px(114.0),
+                h,
+                &format_elapsed(status.elapsed_ms),
+                if status.paused { muted_c } else { text_c },
+                14.5,
+                s,
+                true,
+                false,
+            );
+            for btn in &metrics.buttons {
+                match btn.action {
+                    RecAction::ToggleAnnotate => {
+                        let annotating = !state.recording_passthrough;
+                        draw_rec_text(
+                            dc,
+                            btn.rect.0,
+                            btn.rect.1,
+                            btn.rect.2,
+                            btn.rect.3,
+                            if annotating { "↖ 操作" } else { "✎ 标注" },
+                            if annotating { 0x00FF_FFFF } else { text_c },
+                            12.5,
+                            s,
+                            true,
+                            true,
+                        );
+                    }
+                    RecAction::Stop => {
+                        draw_rec_text(
+                            dc,
+                            btn.rect.0,
+                            btn.rect.1,
+                            btn.rect.2,
+                            btn.rect.3,
+                            "■ 结束",
+                            0x00FF_FFFF,
+                            12.5,
+                            s,
+                            true,
+                            true,
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
+        "processing" => {
+            draw_rec_text(dc, px(36.0), 0, w - px(16.0), h, "正在完成录制…", text_c, 13.0, s, true, false);
+        }
+        "exporting" | "cancelling" => {
+            let label = control_status_text(&status);
+            draw_rec_text(dc, px(36.0), px(4.0), px(356.0), px(34.0), &label, text_c, 12.5, s, true, false);
+            if let Some(btn) = metrics.buttons.first() {
+                draw_rec_text(dc, btn.rect.0, btn.rect.1, btn.rect.2, btn.rect.3, "取消", text_c, 12.5, s, true, true);
+            }
+        }
+        "preview" => {
+            let label = control_status_text(&status);
+            draw_rec_text(dc, px(36.0), 0, px(246.0), h, &label, text_c, 12.5, s, true, false);
+            for btn in &metrics.buttons {
+                let (lbl, col) = match btn.action {
+                    RecAction::ClearPreview => ("丢弃", text_c),
+                    RecAction::OpenPreview => ("预览与导出", 0x00FF_FFFF),
+                    _ => continue,
+                };
+                draw_rec_text(dc, btn.rect.0, btn.rect.1, btn.rect.2, btn.rect.3, lbl, col, 12.5, s, true, true);
+            }
+        }
+        _ => {
+            let label = control_status_text(&status);
+            draw_rec_text(dc, px(36.0), 0, px(358.0), h, &label, text_c, 12.5, s, false, false);
+            if let Some(btn) = metrics.buttons.first() {
+                draw_rec_text(dc, btn.rect.0, btn.rect.1, btn.rect.2, btn.rect.3, "返回", text_c, 12.5, s, true, true);
+            }
+        }
+    }
 }
 
-unsafe fn draw_control_text(
+unsafe fn draw_rec_button_icon(
+    g: *mut GpGraphics,
+    action: RecAction,
+    cx: f32,
+    cy: f32,
+    s: f32,
+    color: u32,
+    paused: bool,
+) {
+    let mut pen: *mut GpPen = null_mut();
+    let mut fill: *mut GpSolidFill = null_mut();
+    let sw = (1.8 * s).max(1.4);
+    GdipCreatePen1(color, sw, UnitPixel, &mut pen);
+    GdipCreateSolidFill(color, &mut fill);
+    if !pen.is_null() {
+        GdipSetPenLineCap197819(pen, LineCapRound, LineCapRound, DashCapRound);
+        GdipSetPenLineJoin(pen, LineJoinRound);
+    }
+    let line = |x1: f32, y1: f32, x2: f32, y2: f32| {
+        GdipDrawLine(g, pen, cx + x1 * s, cy + y1 * s, cx + x2 * s, cy + y2 * s);
+    };
+
+    match action {
+        RecAction::Pause => {
+            if paused {
+                line(-3.5, -5.5, 5.5, 0.0);
+                line(5.5, 0.0, -3.5, 5.5);
+                line(-3.5, 5.5, -3.5, -5.5);
+            } else {
+                line(-3.2, -5.5, -3.2, 5.5);
+                line(3.2, -5.5, 3.2, 5.5);
+            }
+        }
+        RecAction::ToolFadePen => {
+            line(1.5, -7.2, -5.0, 0.8);
+            line(-5.0, 0.8, 0.5, 0.8);
+            line(0.5, 0.8, -1.5, 7.2);
+            line(-1.5, 7.2, 5.0, -0.8);
+            line(5.0, -0.8, -0.5, -0.8);
+            line(-0.5, -0.8, 1.5, -7.2);
+        }
+        RecAction::ToolPen => {
+            line(-6.0, 6.2, -4.0, 1.6);
+            line(-4.0, 1.6, 3.8, -6.2);
+            line(3.8, -6.2, 6.4, -3.6);
+            line(6.4, -3.6, -1.4, 4.2);
+            line(-1.4, 4.2, -6.0, 6.2);
+        }
+        RecAction::ToolRect => {
+            draw_round_rect_gdip(
+                g,
+                cx - 6.8 * s,
+                cy - 5.6 * s,
+                13.6 * s,
+                11.2 * s,
+                2.4 * s,
+                None,
+                Some((color, sw)),
+            );
+        }
+        RecAction::ToolArrow => {
+            line(-5.8, 5.8, 5.8, -5.8);
+            line(0.8, -5.8, 5.8, -5.8);
+            line(5.8, -5.8, 5.8, -0.8);
+        }
+        RecAction::Undo => {
+            line(-6.0, -2.2, -2.4, -5.8);
+            line(-6.0, -2.2, -2.4, 1.4);
+            line(-6.0, -2.2, 2.0, -2.2);
+            GdipDrawArc(g, pen, cx - 2.0 * s, cy - 2.2 * s, 8.4 * s, 8.4 * s, -90.0, 180.0);
+            line(-2.0, 6.2, 2.2, 6.2);
+        }
+        RecAction::Clear => {
+            // Trash / clear bin icon
+            line(-6.0, -4.2, 6.0, -4.2);
+            line(-2.2, -6.8, 2.2, -6.8);
+            line(-4.6, -4.2, -3.8, 6.4);
+            line(4.6, -4.2, 3.8, 6.4);
+            line(-3.8, 6.4, 3.8, 6.4);
+            line(-1.6, -1.2, -1.6, 3.6);
+            line(1.6, -1.2, 1.6, 3.6);
+        }
+        RecAction::Cancel => {
+            line(-4.8, -4.8, 4.8, 4.8);
+            line(4.8, -4.8, -4.8, 4.8);
+        }
+        _ => {}
+    }
+
+    if !fill.is_null() {
+        GdipDeleteBrush(fill as *mut GpBrush);
+    }
+    if !pen.is_null() {
+        GdipDeletePen(pen);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn draw_rec_text(
     dc: windows_sys::Win32::Graphics::Gdi::HDC,
     left: i32,
     top: i32,
@@ -330,83 +917,34 @@ unsafe fn draw_control_text(
     bottom: i32,
     value: &str,
     color: u32,
+    dp_size: f32,
+    scale: f32,
+    medium: bool,
+    centered: bool,
 ) {
-    let font = GetStockObject(DEFAULT_GUI_FONT);
-    let old_font = SelectObject(dc, font);
+    let font = create_ui_font(dp_size, scale, medium);
+    let old_font = if !font.is_null() {
+        SelectObject(dc, font as HGDIOBJ)
+    } else {
+        null_mut()
+    };
     SetBkMode(dc, 1);
     SetTextColor(dc, color);
     let text = wide(value);
-    let mut rect = RECT {
-        left,
-        top,
-        right,
-        bottom,
-    };
-    DrawTextW(dc, text.as_ptr(), -1, &mut rect, 1 | 4 | 0x20);
-    SelectObject(dc, old_font);
-}
-
-unsafe fn draw_control_button(
-    dc: windows_sys::Win32::Graphics::Gdi::HDC,
-    rect: (i32, i32, i32, i32),
-    label: &str,
-    color: u32,
-    primary: bool,
-) {
-    let brush = CreateSolidBrush(if primary { color } else { 0x00f3f5f8 });
-    let pen = CreatePen(0, 1, if primary { color } else { 0x00e2e7ef });
-    let old_brush = SelectObject(dc, brush as _);
-    let old_pen = SelectObject(dc, pen as _);
-    RoundRect(dc, rect.0, rect.1, rect.2, rect.3, 12, 12);
-    SelectObject(dc, old_brush);
-    SelectObject(dc, old_pen);
-    DeleteObject(brush as _);
-    DeleteObject(pen as _);
-    let text_color = if primary { 0x00ffffff } else { 0x00343a45 };
-    draw_control_text(dc, rect.0 + 3, rect.1 + 2, rect.2 - 3, rect.3 - 2, label, text_color);
-}
-
-unsafe fn draw_status_dot(dc: windows_sys::Win32::Graphics::Gdi::HDC, x: i32, y: i32, color: u32) {
-    let brush = CreateSolidBrush(color);
-    let old = SelectObject(dc, brush as _);
-    Ellipse(dc, x - 5, y - 5, x + 5, y + 5);
-    SelectObject(dc, old);
-    DeleteObject(brush as _);
-}
-
-unsafe fn draw_control_progress_bar(
-    dc: windows_sys::Win32::Graphics::Gdi::HDC,
-    left: i32,
-    top: i32,
-    right: i32,
-    bottom: i32,
-    percent: u8,
-) {
-    let track_brush = CreateSolidBrush(0x00dce2e9);
-    let old_brush = SelectObject(dc, track_brush as _);
-    let old_pen = SelectObject(
+    let mut rect = RECT { left, top, right, bottom };
+    DrawTextW(
         dc,
-        GetStockObject(windows_sys::Win32::Graphics::Gdi::NULL_PEN as i32),
+        text.as_ptr(),
+        -1,
+        &mut rect,
+        if centered { 1 | 4 | 0x20 } else { 4 | 0x20 },
     );
-    RoundRect(dc, left, top, right, bottom, bottom - top, bottom - top);
-    SelectObject(dc, old_pen);
-    SelectObject(dc, old_brush);
-    DeleteObject(track_brush as _);
-
-    let filled_right = left + ((right - left) * i32::from(percent.min(100)) / 100);
-    if filled_right <= left {
-        return;
+    if !old_font.is_null() {
+        SelectObject(dc, old_font);
     }
-    let progress_brush = CreateSolidBrush(0x00f76f16);
-    let old_brush = SelectObject(dc, progress_brush as _);
-    let old_pen = SelectObject(
-        dc,
-        GetStockObject(windows_sys::Win32::Graphics::Gdi::NULL_PEN as i32),
-    );
-    RoundRect(dc, left, top, filled_right, bottom, bottom - top, bottom - top);
-    SelectObject(dc, old_pen);
-    SelectObject(dc, old_brush);
-    DeleteObject(progress_brush as _);
+    if !font.is_null() {
+        DeleteObject(font as HGDIOBJ);
+    }
 }
 
 fn control_status_text(status: &crate::recorder::RecordingStatus) -> String {
@@ -422,7 +960,7 @@ fn control_status_text(status: &crate::recorder::RecordingStatus) -> String {
         "preview" => match status.message.as_deref() {
             Some(message) if message.starts_with("导出失败：") => "导出失败，打开预览".into(),
             Some(message) if message.starts_with("导出完成：") => "导出完成".into(),
-            _ => format!("预览就绪 · {} 帧", status.frame_count),
+            _ => format!("录制完成 · {} 帧", status.frame_count),
         },
         "error" => status.message.clone().unwrap_or_else(|| "录制失败".into()),
         "cancelled" => "录制已取消".into(),
@@ -430,12 +968,16 @@ fn control_status_text(status: &crate::recorder::RecordingStatus) -> String {
     }
 }
 
-fn recording_toolbar_signature(status: &crate::recorder::RecordingStatus) -> String {
+fn recording_toolbar_signature(
+    state: &UiState,
+    status: &crate::recorder::RecordingStatus,
+) -> String {
     let recording = status.phase == "recording";
     format!(
-        "{}|{}|{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}|{}|{}",
         status.phase,
         status.paused,
+        state.recording_passthrough,
         if recording { status.elapsed_ms / 1000 } else { 0 },
         if recording { 0 } else { status.frame_count },
         if status.phase == "exporting" {
@@ -447,31 +989,23 @@ fn recording_toolbar_signature(status: &crate::recorder::RecordingStatus) -> Str
     )
 }
 
-fn recording_toolbar_static_signature(status: &crate::recorder::RecordingStatus) -> String {
+fn recording_toolbar_static_signature(
+    state: &UiState,
+    status: &crate::recorder::RecordingStatus,
+) -> String {
     let frame_count = if status.phase == "recording" {
         0
     } else {
         status.frame_count
     };
     format!(
-        "{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}",
         status.phase,
         status.paused,
+        state.recording_passthrough,
         frame_count,
         status.message.as_deref().unwrap_or_default()
     )
-}
-
-fn recording_time_text(status: &crate::recorder::RecordingStatus) -> String {
-    if status.max_duration_ms == 0 {
-        format!("{} / ∞", format_elapsed(status.elapsed_ms))
-    } else {
-        format!(
-            "{} / {}",
-            format_elapsed(status.elapsed_ms),
-            format_elapsed(status.max_duration_ms)
-        )
-    }
 }
 
 fn format_elapsed(ms: u64) -> String {
@@ -479,38 +1013,148 @@ fn format_elapsed(ms: u64) -> String {
     format!("{:02}:{:02}", seconds / 60, seconds % 60)
 }
 
-fn handle_control_click(state: &mut UiState, point: (i32, i32)) {
-    let status = state.recording.snapshot();
-    match status.phase.as_str() {
-        "recording" if inside(point, PAUSE_BUTTON) => {
+fn handle_control_action(state: &mut UiState, action: RecAction) {
+    match action {
+        RecAction::Pause => {
             if let Err(error) = state.recording.toggle_pause() {
                 set_error(state, error);
             }
+            if !state.recording_toolbar.is_null() {
+                unsafe { InvalidateRect(state.recording_toolbar, std::ptr::null(), 0) };
+            }
         }
-        "recording" if inside(point, STOP_BUTTON) => super::stop_recording(state),
-        "exporting" if inside(point, CANCEL_BUTTON) => {
-            state.recording.cancel();
-            destroy_control_toolbar(state);
-            super::restore_recording_selection(state);
+        RecAction::ToggleAnnotate => {
+            let next_pt = !state.recording_passthrough;
+            super::demo::set_recording_canvas_passthrough(state, next_pt);
+            sync_toolbar_layout(state);
         }
-        "preview" if inside(point, EDIT_BUTTON) => {
+        RecAction::ToolFadePen => {
+            super::demo::set_recording_tool(state, Tool::FadePen);
+            if !state.recording_toolbar.is_null() {
+                unsafe { InvalidateRect(state.recording_toolbar, std::ptr::null(), 0) };
+            }
+        }
+        RecAction::ToolPen => {
+            super::demo::set_recording_tool(state, Tool::Pen);
+            if !state.recording_toolbar.is_null() {
+                unsafe { InvalidateRect(state.recording_toolbar, std::ptr::null(), 0) };
+            }
+        }
+        RecAction::ToolRect => {
+            super::demo::set_recording_tool(state, Tool::Rectangle);
+            if !state.recording_toolbar.is_null() {
+                unsafe { InvalidateRect(state.recording_toolbar, std::ptr::null(), 0) };
+            }
+        }
+        RecAction::ToolArrow => {
+            super::demo::set_recording_tool(state, Tool::Arrow);
+            if !state.recording_toolbar.is_null() {
+                unsafe { InvalidateRect(state.recording_toolbar, std::ptr::null(), 0) };
+            }
+        }
+        RecAction::Undo => {
+            super::demo::undo_recording_annotation(state);
+            if !state.recording_toolbar.is_null() {
+                unsafe { InvalidateRect(state.recording_toolbar, std::ptr::null(), 0) };
+            }
+        }
+        RecAction::Clear => {
+            super::demo::clear_recording_annotations(state);
+            if !state.recording_toolbar.is_null() {
+                unsafe { InvalidateRect(state.recording_toolbar, std::ptr::null(), 0) };
+            }
+        }
+        RecAction::Stop => {
+            super::stop_recording(state);
+        }
+        RecAction::Cancel => {
+            let phase = state.recording.snapshot().phase;
+            super::demo::stop_demo(state);
+            if phase == "recording" || phase == "exporting" {
+                state.recording.cancel();
+                destroy_control_toolbar(state);
+                super::cancel(state);
+            } else {
+                destroy_control_toolbar(state);
+                super::restore_recording_selection(state);
+            }
+        }
+        RecAction::OpenPreview => {
             super::queue_open_recording_editor(state);
         }
-        "preview" if inside(point, CLEAR_BUTTON) => {
+        RecAction::ClearPreview => {
             state.recording.cancel();
             destroy_control_toolbar(state);
             super::cancel(state);
         }
-        "error" | "cancelled" if inside(point, CANCEL_BUTTON) => {
-            destroy_control_toolbar(state);
-            super::restore_recording_selection(state);
-        }
-        _ => {}
     }
 }
 
 fn inside(point: (i32, i32), rect: (i32, i32, i32, i32)) -> bool {
     point.0 >= rect.0 && point.0 < rect.2 && point.1 >= rect.1 && point.1 < rect.3
+}
+
+pub(super) fn export_recording_direct(
+    state: &mut UiState,
+    format: AnimationFormat,
+    gif_export_quality: GifExportQuality,
+    webp_export_size: WebpExportSize,
+    output_fps: u32,
+) {
+    state.recording_auto_open_pending = false;
+    state.recording_error_dialog_message = None;
+    let initial_dir = state
+        .settings
+        .lock()
+        .map(|settings| settings.resolved_save_directory().to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let owner = if state.editor.is_some() {
+        state.overlay
+    } else if !state.recording_toolbar.is_null() {
+        state.recording_toolbar
+    } else {
+        state.hwnd
+    };
+    state.recording_export_dialog_open = true;
+    let path = match save_animation_path_only(owner, format, &initial_dir) {
+        Ok(path) => path,
+        Err(error) => {
+            state.recording_export_dialog_open = false;
+            set_error(state, error);
+            return;
+        }
+    };
+    state.recording_export_dialog_open = false;
+    if let Some(toolbar) = (!state.recording_toolbar.is_null()).then_some(state.recording_toolbar) {
+        unsafe { SetTimer(toolbar, CONTROL_TIMER, 250, None) };
+    }
+    let Some(path) = path else {
+        return;
+    };
+    let source_fps = state.recording.snapshot().fps.max(1);
+    let effective_fps = if format == AnimationFormat::Mp4 {
+        source_fps
+    } else {
+        output_fps.min(source_fps).max(1)
+    };
+    start_recording_export(
+        state,
+        format,
+        gif_export_quality,
+        webp_export_size,
+        path,
+        effective_fps,
+    );
+}
+
+pub(super) fn reveal_exported_file(path: &str) {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    let _ = std::process::Command::new("explorer.exe")
+        .arg(format!("/select,{trimmed}"))
+        .spawn();
 }
 
 pub(super) fn export_recording(state: &mut UiState, format: AnimationFormat) {
@@ -521,7 +1165,7 @@ pub(super) fn export_recording(state: &mut UiState, format: AnimationFormat) {
     let initial_dir = state
         .settings
         .lock()
-        .map(|settings| settings.save_directory.clone())
+        .map(|settings| settings.resolved_save_directory().to_string_lossy().into_owned())
         .unwrap_or_default();
     let owner = if state.editor.is_some() {
         state.overlay
@@ -547,10 +1191,29 @@ pub(super) fn export_recording(state: &mut UiState, format: AnimationFormat) {
     let Some((path, gif_export_quality, webp_export_size, output_fps)) = path else {
         return;
     };
+    start_recording_export(
+        state,
+        format,
+        gif_export_quality,
+        webp_export_size,
+        path,
+        output_fps,
+    );
+}
+
+fn start_recording_export(
+    state: &mut UiState,
+    format: AnimationFormat,
+    gif_export_quality: GifExportQuality,
+    webp_export_size: WebpExportSize,
+    path: PathBuf,
+    output_fps: u32,
+) {
     let (_, recording_bitrate_mbps) =
         super::configured_recording_options(&state.settings);
     let (gif_colors, webp_quality) =
         super::configured_animation_export_options(&state.settings);
+    let exported_path_str = path.to_string_lossy().into_owned();
     if let Err(error) = state
         .recording
         .export(
@@ -565,19 +1228,22 @@ pub(super) fn export_recording(state: &mut UiState, format: AnimationFormat) {
         )
     {
         set_error(state, error);
-    } else if state.editor.is_some() {
-        if let Some(editor) = state.editor.as_mut() {
-            editor.playing = false;
-        }
-        unsafe {
-            KillTimer(state.overlay, super::editor::TIMER_RECORDING_PREVIEW);
-            SetTimer(
-                state.overlay,
-                super::editor::TIMER_RECORDING_EXPORT_STATUS,
-                250,
-                None,
-            );
-            InvalidateRect(state.overlay, std::ptr::null(), 0);
+    } else {
+        crate::history::record_item("recording", &exported_path_str, 0, 0);
+        if state.editor.is_some() {
+            if let Some(editor) = state.editor.as_mut() {
+                editor.playing = false;
+            }
+            unsafe {
+                KillTimer(state.overlay, super::editor::TIMER_RECORDING_PREVIEW);
+                SetTimer(
+                    state.overlay,
+                    super::editor::TIMER_RECORDING_EXPORT_STATUS,
+                    200,
+                    None,
+                );
+                InvalidateRect(state.overlay, std::ptr::null(), 0);
+            }
         }
     }
 }
@@ -644,6 +1310,62 @@ pub(super) fn show_error_details_if_needed(
             )
         };
     }
+}
+
+fn default_recording_filename(format: AnimationFormat) -> String {
+    let now = chrono::Local::now();
+    format!(
+        "SideWeave_{}.{}",
+        now.format("%Y%m%d_%H%M%S"),
+        format.extension()
+    )
+}
+
+fn save_animation_path_only(
+    owner: windows_sys::Win32::Foundation::HWND,
+    format: AnimationFormat,
+    initial_dir: &str,
+) -> Result<Option<PathBuf>, String> {
+    let (title, filter) = match format {
+        AnimationFormat::Webp => ("导出 WebP 动图", wide("WebP 动图 (*.webp)\0*.webp\0")),
+        AnimationFormat::Gif => ("导出 GIF 动图", wide("GIF 动图 (*.gif)\0*.gif\0")),
+        AnimationFormat::Mp4 => ("导出 MP4 视频", wide("MP4 视频 (*.mp4)\0*.mp4\0")),
+    };
+    let default_name = default_recording_filename(format);
+    let title = wide(title);
+    let extension = wide(format.extension());
+    let initial_dir = (!initial_dir.trim().is_empty()).then(|| wide(initial_dir));
+    let initial_dir_ptr = initial_dir.as_ref().map(|value| value.as_ptr());
+    let mut file = vec![0u16; 512];
+    let default_name_w = wide(&default_name);
+    let copy_len = default_name_w.len().min(file.len() - 1);
+    file[..copy_len].copy_from_slice(&default_name_w[..copy_len]);
+    let mut dialog: OPENFILENAMEW = unsafe { zeroed() };
+    dialog.lStructSize = size_of::<OPENFILENAMEW>() as u32;
+    dialog.hwndOwner = owner;
+    dialog.lpstrFilter = filter.as_ptr();
+    dialog.lpstrFile = file.as_mut_ptr();
+    dialog.nMaxFile = file.len() as u32;
+    dialog.lpstrInitialDir = initial_dir_ptr.unwrap_or(std::ptr::null());
+    dialog.lpstrTitle = title.as_ptr();
+    dialog.lpstrDefExt = extension.as_ptr();
+    dialog.nFilterIndex = 1;
+    dialog.Flags = OFN_EXPLORER | OFN_PATHMUSTEXIST | OFN_OVERWRITEPROMPT;
+    if unsafe { GetSaveFileNameW(&mut dialog) } == 0 {
+        return Ok(None);
+    }
+    let end = file
+        .iter()
+        .position(|value| *value == 0)
+        .unwrap_or(file.len());
+    let selected = String::from_utf16(&file[..end])
+        .map_err(|_| "无法读取导出文件名".to_string())?;
+    if selected.trim().is_empty() {
+        return Ok(None);
+    }
+    let mut path = PathBuf::from(selected);
+    path.set_extension(format.extension());
+    Ok(Some(path))
 }
 
 fn save_animation_with_dialog(

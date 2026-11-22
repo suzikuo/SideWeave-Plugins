@@ -1,309 +1,872 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { getCurrentWindow } from '../../../ui-sdk/runtime'
 import {
+  DEFAULT_SETTINGS,
   getSettings,
+  quickPin,
   setSettings,
-  chooseSaveDirectory,
-  openSaveDirectory,
+  startCapture,
+  startDemo,
+  startRecording,
   type ScreenshotSettings,
+  type TencentCredentialsUpdate,
 } from './api'
+import AppearancePanel from './components/AppearancePanel.vue'
+import FeaturesPanel from './components/FeaturesPanel.vue'
+import HistoryPanel from './components/HistoryPanel.vue'
+import HotkeysPanel from './components/HotkeysPanel.vue'
+import ImageEditorPanel from './components/ImageEditorPanel.vue'
+import QuickTranslatePanel from './components/QuickTranslatePanel.vue'
 
-const settings = ref<ScreenshotSettings>({
-  hotkey: 'ctrl+shift+a',
-  saveDirectory: '',
-  autoCopy: true,
-  scrollStep: 640,
-  hdrCaptureMode: 'auto',
-  watermarkText: '',
-  annotationColor: '#ff3a48',
-  textSize: 18,
-  ocrRegion: '',
-  ocrSelectModel: 0,
-  tencentOcrConfigured: false,
-  recordingFps: 15,
-  recordingMaxHeight: 1080,
-  recordingBitrateMbps: 16,
-  recordingGifColors: 128,
-  recordingWebpQuality: 90,
+type NavId = 'hotkeys' | 'translate' | 'appearance' | 'features' | 'history' | 'editor'
+
+const navItems: { id: NavId; label: string }[] = [
+  { id: 'hotkeys', label: '全局热键' },
+  { id: 'translate', label: '快捷翻译' },
+  { id: 'appearance', label: '外观设置' },
+  { id: 'features', label: '功能设置' },
+  { id: 'history', label: '历史记录' },
+  { id: 'editor', label: '自由画布' },
+]
+
+const activeNav = ref<NavId>('hotkeys')
+const settings = ref<ScreenshotSettings>({ ...DEFAULT_SETTINGS })
+const tencentForm = ref<TencentCredentialsUpdate>({
+  secretId: '',
+  secretKey: '',
+  token: '',
+  clear: false,
 })
-const recordingFpsOptions = [5, 8, 10, 12, 15, 20, 24, 30]
-const message = ref('')
+const dirty = ref(false)
 const saving = ref(false)
-const secretId = ref('')
-const secretKey = ref('')
-const token = ref('')
-const clearTencentCredentials = ref(false)
-const editingTencentCredentials = ref(false)
-function showMessage(value: string) {
-  message.value = value
-  window.setTimeout(() => {
-    if (message.value === value) message.value = ''
-  }, 2600)
+const toast = ref('')
+const incomingEditorPath = ref<string | null>(null)
+const isStandalone = window.parent === window
+
+let toastTimer: number | null = null
+function showToast(msg: string) {
+  toast.value = msg
+  if (toastTimer !== null) window.clearTimeout(toastTimer)
+  toastTimer = window.setTimeout(() => {
+    toast.value = ''
+    toastTimer = null
+  }, 2800)
 }
 
-async function refresh() {
+const resolvedTheme = computed<'dark' | 'light'>(() => {
+  if (settings.value.themeMode === 'dark') return 'dark'
+  if (settings.value.themeMode === 'light') return 'light'
+  if (typeof settings.value.systemPrefersLight === 'boolean') {
+    return settings.value.systemPrefersLight ? 'light' : 'dark'
+  }
+  const hostTheme = document.documentElement.dataset.theme
+  if (hostTheme === 'light' || hostTheme === 'dark') return hostTheme
+  return window.matchMedia?.('(prefers-color-scheme: light)').matches ? 'light' : 'dark'
+})
+
+async function loadSettings() {
   try {
-    settings.value = await getSettings()
-    editingTencentCredentials.value = !settings.value.tencentOcrConfigured
-  } catch (error) {
-    showMessage(String(error))
+    const loaded = await getSettings()
+    settings.value = { ...DEFAULT_SETTINGS, ...loaded }
+    dirty.value = false
+  } catch (err) {
+    showToast(`加载设置失败：${String(err)}`)
   }
 }
 
-async function saveSettings() {
+async function saveAll() {
+  if (saving.value) return
   saving.value = true
   try {
-    const enteredCredentials = Boolean(
-      secretId.value.trim() || secretKey.value.trim() || token.value.trim(),
+    const enteredCreds = Boolean(
+      tencentForm.value.secretId.trim() ||
+        tencentForm.value.secretKey.trim() ||
+        tencentForm.value.token.trim(),
     )
-    await setSettings(settings.value, {
-      secretId: secretId.value,
-      secretKey: secretKey.value,
-      token: token.value,
-      clear: clearTencentCredentials.value && !enteredCredentials,
-    })
-    const savedSettings = await getSettings()
-    settings.value = savedSettings
-    if (enteredCredentials && !clearTencentCredentials.value && !savedSettings.tencentOcrConfigured) {
-      throw new Error('腾讯云凭据未能从宿主密钥库读回，请检查后端存储状态。')
-    }
-    secretId.value = ''
-    secretKey.value = ''
-    token.value = ''
-    clearTencentCredentials.value = false
-    editingTencentCredentials.value = !savedSettings.tencentOcrConfigured
-    showMessage('设置已保存')
-  } catch (error) {
-    showMessage(String(error))
+    const credsPayload: TencentCredentialsUpdate | undefined =
+      enteredCreds || tencentForm.value.clear
+        ? {
+            secretId: tencentForm.value.secretId,
+            secretKey: tencentForm.value.secretKey,
+            token: tencentForm.value.token,
+            clear: tencentForm.value.clear && !enteredCreds,
+          }
+        : undefined
+    await setSettings(settings.value, credsPayload)
+    const refreshed = await getSettings()
+    settings.value = { ...DEFAULT_SETTINGS, ...refreshed }
+    tencentForm.value = { secretId: '', secretKey: '', token: '', clear: false }
+    dirty.value = false
+    showToast('设置已保存并立即生效')
+  } catch (err) {
+    showToast(`保存失败：${String(err)}`)
   } finally {
     saving.value = false
   }
 }
 
-async function onChooseDirectory() {
+async function triggerAction(kind: 'region' | 'scroll' | 'record' | 'demo' | 'quick_pin') {
   try {
-    const dir = await chooseSaveDirectory()
-    if (dir) {
-      settings.value.saveDirectory = dir
-      showMessage('已选择保存目录')
-    }
-  } catch (error) {
-    showMessage(String(error))
+    if (kind === 'region') await startCapture('region')
+    else if (kind === 'scroll') await startCapture('scroll')
+    else if (kind === 'record') await startRecording(settings.value.recordingFps || 15)
+    else if (kind === 'demo') await startDemo()
+    else if (kind === 'quick_pin') await quickPin()
+  } catch (err) {
+    showToast(String(err))
   }
 }
 
-async function onOpenDirectory() {
+function onSendToEditor(path: string) {
+  incomingEditorPath.value = path
+  activeNav.value = 'editor'
+  showToast('已将图片发送到自由画布')
+}
+
+function onGlobalKeyDown(e: KeyboardEvent) {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+    e.preventDefault()
+    void saveAll()
+  }
+}
+
+function onShellContextMenu(e: MouseEvent) {
+  if (e.defaultPrevented) return
+  const target = e.target as HTMLElement | null
+  if (target) {
+    const tag = target.tagName
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || target.isContentEditable) {
+      return
+    }
+  }
+  e.preventDefault()
+}
+
+function closeStandalone() {
   try {
-    await openSaveDirectory(settings.value.saveDirectory)
-  } catch (error) {
-    showMessage(String(error))
+    void getCurrentWindow().close()
+  } catch {
+    // ignore
   }
 }
 
 onMounted(() => {
-  void refresh()
+  void loadSettings()
+  window.addEventListener('keydown', onGlobalKeyDown)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('keydown', onGlobalKeyDown)
 })
 </script>
 
 <template>
-  <main class="page">
-    <header class="hero">
-      <div>
-        <div class="eyebrow">SCREENSHOT CORE</div>
-        <h1>截图设置</h1>
-        <p>配置快捷键、截图选项、识别与翻译服务。</p>
+  <div class="sn-shell" :data-sn-theme="resolvedTheme" @contextmenu="onShellContextMenu">
+    <!-- Left Sidebar -->
+    <aside class="sn-sidebar">
+      <div class="sn-brand" data-tauri-drag-region>
+        <div class="sn-logo">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none">
+            <path d="M4 9V6a2 2 0 0 1 2-2h3" stroke="#fff" stroke-width="2.4" stroke-linecap="round" />
+            <path d="M15 4h3a2 2 0 0 1 2 2v3" stroke="#fff" stroke-width="2.4" stroke-linecap="round" />
+            <path d="M20 15v3a2 2 0 0 1-2 2h-3" stroke="#fff" stroke-width="2.4" stroke-linecap="round" />
+            <path d="M9 20H6a2 2 0 0 1-2-2v-3" stroke="#fff" stroke-width="2.4" stroke-linecap="round" />
+            <circle cx="12" cy="12" r="2.6" fill="#fff" />
+          </svg>
+        </div>
+        <div class="sn-brand-text" data-tauri-drag-region>
+          <div class="sn-brand-name">快捷截图</div>
+          <div class="sn-brand-ver">SnowAir Edition · v0.4</div>
+        </div>
       </div>
-      <button class="primary save-top" :disabled="saving" @click="saveSettings">
-        {{ saving ? '保存中…' : '保存设置' }}
-      </button>
-    </header>
 
-    <section class="card">
-      <h2>截图与输出</h2>
-      <div class="grid">
-        <label>全局快捷键<input v-model="settings.hotkey" spellcheck="false" /></label>
-        <label>滚动步长<input v-model.number="settings.scrollStep" type="number" min="120" max="1600" step="40" /></label>
+      <!-- Quick Launch Grid -->
+      <div class="sn-quick-grid">
+        <button type="button" class="sn-quick-btn primary" @click="triggerAction('region')">
+          区域截图
+        </button>
+        <button type="button" class="sn-quick-btn" @click="triggerAction('scroll')">
+          长截图
+        </button>
+        <button type="button" class="sn-quick-btn" @click="triggerAction('record')">
+          区域录屏
+        </button>
+        <button type="button" class="sn-quick-btn" @click="triggerAction('demo')">
+          演示标注
+        </button>
+        <button type="button" class="sn-quick-btn full" @click="triggerAction('quick_pin')">
+          快速贴图（剪贴板图片 / 文本）
+        </button>
       </div>
-      <p class="hint hotkey-hint">也可以快速连按两次 F1 开始截图；单按 F1 仍会传给当前应用。</p>
-      <label>
-        HDR 采集模式
-        <select v-model="settings.hdrCaptureMode">
-          <option value="auto">自动（根据显示器状态判断）</option>
-          <option value="force_on">手动：开启 HDR</option>
-          <option value="force_off">手动：关闭 HDR</option>
-        </select>
-      </label>
-      <p class="hint">如果自动模式在某台电脑上出现黑屏或发白，可在这里手动切换；HDR 采集失败时仍会回退到普通截图。</p>
-      <div class="dir-row">
-        <span class="dir-label">保存目录</span>
-        <div class="dir-control">
-          <input
-            :value="settings.saveDirectory"
-            readonly
-            class="dir-input"
-            placeholder="默认：图片/SideWeave/Screenshots"
-            @click="onChooseDirectory"
-          />
-          <button type="button" class="btn-action" title="浏览并选择保存目录" @click="onChooseDirectory">
-            选择目录
-          </button>
-          <button type="button" class="btn-action" title="在文件管理器中打开保存目录" @click="onOpenDirectory">
-            打开目录
+
+      <!-- Navigation -->
+      <nav class="sn-nav">
+        <button
+          v-for="item in navItems"
+          :key="item.id"
+          type="button"
+          class="sn-nav-item"
+          :class="{ active: activeNav === item.id }"
+          @click="activeNav = item.id"
+        >
+          <span class="sn-nav-icon">
+            <svg v-if="item.id === 'hotkeys'" viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7">
+              <rect x="2.5" y="4.5" width="15" height="11" rx="2.2" />
+              <path d="M5.5 8.5h1M9 8.5h2M13.5 8.5h1M6.5 12h7" stroke-linecap="round" />
+            </svg>
+            <svg v-else-if="item.id === 'translate'" viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7">
+              <path d="M3.5 5.5h8M7.5 3.5v2M5 5.5c.6 3 2.5 5 5 6M9.5 5.5c-.6 2.7-2.4 4.8-5 6" stroke-linecap="round" />
+              <path d="M11 16.5l3-7.5 3 7.5M12 14h4" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+            <svg v-else-if="item.id === 'appearance'" viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7">
+              <circle cx="10" cy="10" r="7" />
+              <path d="M10 3v14" />
+              <path d="M10 6.5a3.5 3.5 0 0 1 0 7" fill="currentColor" />
+            </svg>
+            <svg v-else-if="item.id === 'features'" viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7">
+              <path d="M4 6h12M4 10h12M4 14h12" stroke-linecap="round" />
+              <circle cx="7.5" cy="6" r="1.7" fill="currentColor" />
+              <circle cx="13" cy="10" r="1.7" fill="currentColor" />
+              <circle cx="9" cy="14" r="1.7" fill="currentColor" />
+            </svg>
+            <svg v-else-if="item.id === 'history'" viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7">
+              <circle cx="10" cy="10" r="7" />
+              <path d="M10 6v4.2l2.8 1.8" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+            <svg v-else viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7">
+              <rect x="3" y="3" width="6" height="6" rx="1.2" />
+              <rect x="11" y="3" width="6" height="6" rx="1.2" />
+              <rect x="3" y="11" width="6" height="6" rx="1.2" />
+              <rect x="11" y="11" width="6" height="6" rx="1.2" />
+            </svg>
+          </span>
+          <span>{{ item.label }}</span>
+        </button>
+      </nav>
+
+      <div class="sn-sidebar-foot">
+        <button
+          type="button"
+          class="sn-save-bar"
+          :class="{ dirty }"
+          :disabled="saving"
+          @click="saveAll"
+        >
+          <span class="sn-dot" :class="{ active: dirty }" />
+          <span>{{ saving ? '保存中…' : dirty ? '保存更改 (Ctrl+S)' : '设置已同步' }}</span>
+        </button>
+      </div>
+    </aside>
+
+    <!-- Main Floating Content Card -->
+    <main class="sn-main">
+      <div class="sn-topbar" data-tauri-drag-region>
+        <div class="sn-topbar-left" data-tauri-drag-region>
+          <span v-if="dirty" class="sn-dirty-pill">有未保存更改</span>
+        </div>
+        <div class="sn-topbar-right">
+          <button
+            v-if="dirty"
+            type="button"
+            class="sn-primary-btn sm"
+            :disabled="saving"
+            @click="saveAll"
+          >
+            {{ saving ? '保存中…' : '保存设置' }}
           </button>
           <button
-            v-if="settings.saveDirectory"
+            v-if="isStandalone"
             type="button"
-            class="btn-reset"
-            title="恢复默认存储位置"
-            @click="settings.saveDirectory = ''"
+            class="sn-win-close"
+            title="关闭窗口"
+            @click="closeStandalone"
           >
-            重置
+            ×
           </button>
         </div>
       </div>
-      <label>水印文字<input v-model="settings.watermarkText" placeholder="可选，导出时绘制在右下角" /></label>
-      <label class="check"><input v-model="settings.autoCopy" type="checkbox" />完成后自动复制到图片剪贴板</label>
-    </section>
 
-    <section class="card">
-      <h2>翻译接口设置</h2>
-      <p class="hint">OCR 识别结果可在结果窗口中手动翻译成中文。</p>
-      <div class="translation-endpoint">
-        <span>接口</span>
-        <code>https://translate.googleapis.com/translate_a/single</code>
+      <div class="sn-scroll" :class="{ 'canvas-host': activeNav === 'editor' }">
+        <HotkeysPanel
+          v-if="activeNav === 'hotkeys'"
+          :settings="settings"
+          @change="dirty = true"
+          @action="triggerAction"
+        />
+        <QuickTranslatePanel
+          v-else-if="activeNav === 'translate'"
+          :settings="settings"
+          @toast="showToast"
+        />
+        <AppearancePanel
+          v-else-if="activeNav === 'appearance'"
+          :settings="settings"
+          @change="dirty = true"
+        />
+        <FeaturesPanel
+          v-else-if="activeNav === 'features'"
+          :settings="settings"
+          :tencent-form="tencentForm"
+          @change="dirty = true"
+          @toast="showToast"
+        />
+        <HistoryPanel
+          v-else-if="activeNav === 'history'"
+          @toast="showToast"
+          @send-to-editor="onSendToEditor"
+        />
+        <ImageEditorPanel
+          v-else
+          :settings="settings"
+          :incoming-path="incomingEditorPath"
+          @consumed-incoming="incomingEditorPath = null"
+          @toast="showToast"
+        />
       </div>
-      <p class="hint">Google 公共翻译接口，自动识别原文并翻译成简体中文，无需密钥。只有点击结果窗口中的“翻译成中文”时，识别文字才会通过 HTTPS 发送到该接口。</p>
-    </section>
+    </main>
 
-    <section class="card">
-      <h2>腾讯云 OCR 配置</h2>
-      <p class="hint">点击截图工具栏或编辑器中的“提取文字”时，当前截图会通过 HTTPS 发送给腾讯云 RecognizeAgent。详情页只配置参数，不会发起识别。</p>
-      <p class="credential-status" :class="{ ready: settings.tencentOcrConfigured }">
-        {{ settings.tencentOcrConfigured ? '凭据已安全保存' : '尚未配置 SecretId 和 SecretKey' }}
-      </p>
-      <div v-if="settings.tencentOcrConfigured && !editingTencentCredentials" class="saved-credentials">
-        <span>腾讯云密钥保存在此设备，可直接识别，无需重复输入。</span>
-        <button
-          type="button"
-          class="btn-action"
-          @click="editingTencentCredentials = true; clearTencentCredentials = false"
-        >更换密钥</button>
-      </div>
-      <template v-if="!settings.tencentOcrConfigured || editingTencentCredentials">
-        <label>SecretId<input v-model="secretId" autocomplete="off" placeholder="腾讯云 SecretId" /></label>
-        <label>SecretKey<input v-model="secretKey" type="password" autocomplete="new-password" placeholder="腾讯云 SecretKey" /></label>
-        <label>临时 Token<input v-model="token" type="password" autocomplete="new-password" placeholder="可选；临时密钥需要填写" /></label>
-        <p class="hint">凭据保存在宿主的加密密钥库，不会写入截图设置文件。更换密钥时请同时填写 SecretId 和 SecretKey。</p>
-      </template>
-      <div class="grid">
-        <label>地域<input v-model="settings.ocrRegion" placeholder="可选，例如 ap-guangzhou" /></label>
-        <label>
-          识别模型
-          <select v-model.number="settings.ocrSelectModel">
-            <option :value="0">推理模型（默认）</option>
-            <option :value="1">识别、推理模型</option>
-          </select>
-        </label>
-      </div>
-      <label v-if="settings.tencentOcrConfigured && !editingTencentCredentials" class="check"><input v-model="clearTencentCredentials" type="checkbox" />清除已保存的腾讯云凭据</label>
-    </section>
-
-    <section class="card">
-      <h2>录制与导出</h2>
-      <p class="hint">MP4、GIF 和 WebP 共用录制参数。结束后在预览页选择导出格式；所有格式最长录制 10 分钟。</p>
-      <div class="grid">
-        <label>
-          录制帧率
-          <select v-model.number="settings.recordingFps">
-            <option v-for="fps in recordingFpsOptions" :key="fps" :value="fps">{{ fps }} FPS</option>
-          </select>
-        </label>
-        <label>
-          分辨率上限
-          <select v-model.number="settings.recordingMaxHeight">
-            <option :value="720">最高 720p</option>
-            <option :value="1080">最高 1080p</option>
-          </select>
-        </label>
-        <label>
-          录制码率
-          <select v-model.number="settings.recordingBitrateMbps">
-            <option v-for="mbps in [4, 6, 8, 10, 12, 16, 20, 24]" :key="mbps" :value="mbps">
-              {{ mbps }} Mbps
-            </option>
-          </select>
-        </label>
-      </div>
-      <div class="grid">
-        <label>
-          GIF 色彩数
-          <select v-model.number="settings.recordingGifColors">
-            <option :value="64">64 色 · 小文件</option>
-            <option :value="128">128 色 · 平衡</option>
-            <option :value="256">256 色 · 更清晰</option>
-          </select>
-        </label>
-        <label>
-          WebP 画质
-          <select v-model.number="settings.recordingWebpQuality">
-            <option :value="50">50 · 小文件</option>
-            <option :value="65">65</option>
-            <option :value="80">80 · 平衡</option>
-            <option :value="90">90 · 清晰</option>
-            <option :value="95">95 · 高画质</option>
-          </select>
-        </label>
-      </div>
-      <p class="hint">前三项控制录制源视频；GIF 色彩数和 WebP 画质只影响对应格式的导出结果。提高帧率、尺寸或码率会增加录制负载。</p>
-    </section>
-
-    <div class="footer">
-      <button class="primary" :disabled="saving" @click="saveSettings">{{ saving ? '保存中…' : '保存设置' }}</button>
-      <span v-if="message" class="message">{{ message }}</span>
-    </div>
-  </main>
+    <!-- Toast Notification -->
+    <Transition name="sn-toast-fade">
+      <div v-if="toast" class="sn-toast">{{ toast }}</div>
+    </Transition>
+  </div>
 </template>
 
-<style scoped>
-:global(*) { box-sizing: border-box }
-:global(body) { margin: 0; background: transparent; color: var(--text, #e8edf7); font-family: var(--font-ui, "Segoe UI", "Microsoft YaHei", sans-serif) }
-:global(html[data-sideweave_embedded] body) { background: transparent }
-.page { min-height: calc(100vh - 32px); padding: 28px; background: color-mix(in srgb, var(--bg, #121722) calc(var(--detail-panel-opacity, 1) * 100%), transparent); border-radius: 18px }
-.hero { display: flex; justify-content: space-between; gap: 18px; align-items: flex-start }
-.eyebrow { color: var(--accent, #77a9ff); font-size: 10px; letter-spacing: .14em; font-weight: 700 }
-h1 { margin: 6px 0; font-size: 28px; letter-spacing: -.03em }
-.hero p, .hint { margin: 0; color: var(--text-muted, #8d98ad); font-size: 13px; line-height: 1.55 }
-.hotkey-hint { margin: -4px 0 12px 108px }
-.card { margin-top: 16px; padding: 18px; border: 1px solid var(--border, #30394b); border-radius: 14px; background: color-mix(in srgb, var(--surface-subtle, #1d2533) calc(var(--component-opacity, 1) * 66%), transparent) }
-h2 { margin: 0 0 14px; font-size: 13px }
-.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px }
-label { display: grid; grid-template-columns: 96px 1fr; align-items: center; gap: 12px; margin: 10px 0; color: var(--text-muted, #8d98ad); font-size: 12px }
-.dir-row { display: grid; grid-template-columns: 96px 1fr; align-items: center; gap: 12px; margin: 10px 0 }
-.dir-label { color: var(--text-muted, #8d98ad); font-size: 12px }
-.dir-control { display: flex; align-items: center; gap: 8px }
-.dir-input { flex: 1; min-width: 0; cursor: pointer }
-.btn-action { white-space: nowrap; padding: 8px 12px; font-size: 12px }
-.btn-reset { white-space: nowrap; padding: 8px 10px; font-size: 12px; color: var(--text-muted, #8d98ad); border-color: transparent; background: transparent }
-.btn-reset:hover { color: var(--danger, #ff6b6b) }
-input:not([type=checkbox]) { min-width: 0; width: 100%; padding: 8px 10px; color: var(--text, #e8edf7); background: color-mix(in srgb, var(--surface, #121722) calc(var(--component-opacity, 1) * 100%), transparent); border: 1px solid var(--border, #30394b); border-radius: 8px; outline: none }
-select { min-width: 0; width: 100%; padding: 8px 10px; color: var(--text, #e8edf7); background: color-mix(in srgb, var(--surface, #121722) calc(var(--component-opacity, 1) * 100%), transparent); border: 1px solid var(--border, #30394b); border-radius: 8px; outline: none }
-input[type=color] { height: 34px; padding: 3px }
-input:focus, select:focus { border-color: var(--accent, #77a9ff) }
-.check { display: flex; grid-template-columns: none; gap: 8px }
-.check input { accent-color: var(--accent, #77a9ff) }
-button { border: 1px solid var(--border, #30394b); border-radius: 10px; padding: 9px 14px; color: var(--text, #e8edf7); background: color-mix(in srgb, var(--surface-subtle, #1d2533) calc(var(--component-opacity, 1) * 100%), transparent); cursor: pointer; font-size: 12px }
-button:hover:not(:disabled) { border-color: var(--accent, #77a9ff) }
-button:disabled { opacity: .45; cursor: not-allowed }
-.primary { color: var(--text-on-accent, #08101e); background: color-mix(in srgb, var(--accent, #77a9ff) calc(var(--component-opacity, 1) * 100%), transparent); border-color: transparent; font-weight: 700 }
-.save-top { white-space: nowrap }
-.footer { display: flex; align-items: center; gap: 12px; margin-top: 18px }
-.message { color: var(--success, #8de0b2); font-size: 12px }
-.credential-status { margin: 0 0 10px; color: var(--warning, #ffbc72); font-size: 12px }
-.credential-status.ready { color: var(--success, #8de0b2) }
-.saved-credentials { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 10px 0 14px; color: var(--text-muted, #8d98ad); font-size: 12px }
-.translation-endpoint { display: grid; grid-template-columns: 96px 1fr; align-items: center; gap: 12px; margin: 12px 0; font-size: 12px }
-.translation-endpoint span { color: var(--text-muted, #8d98ad) }
-.translation-endpoint code { overflow-wrap: anywhere }
-code { color: var(--accent, #b8d1ff) }
-@media (max-width: 620px) { .grid { grid-template-columns: 1fr } .dir-row { grid-template-columns: 1fr } .save-top { display: none } }
+<style>
+* {
+  box-sizing: border-box;
+}
+html,
+body,
+#app {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  font-family: Inter, 'Segoe UI Variable', 'Segoe UI', 'Microsoft YaHei UI', system-ui, sans-serif;
+}
+
+.sn-shell {
+  --sn-bg: #141416;
+  --sn-card: #1e1e20;
+  --sn-subtle: #252528;
+  --sn-hover: #2e2e32;
+  --sn-text: #f4f4f6;
+  --sn-muted: #9a9aa3;
+  --sn-border: #2e2e33;
+  --sn-accent: #34c759;
+  --sn-accent-hover: #2eb850;
+
+  display: flex;
+  width: 100%;
+  height: 100%;
+  background: var(--sn-bg);
+  color: var(--sn-text);
+  padding: 10px;
+  gap: 10px;
+  position: relative;
+}
+
+.sn-shell[data-sn-theme='light'] {
+  --sn-bg: #f2f3f5;
+  --sn-card: #ffffff;
+  --sn-subtle: #f7f7f9;
+  --sn-hover: #eceef1;
+  --sn-text: #18181b;
+  --sn-muted: #71717a;
+  --sn-border: #e4e4e7;
+  --sn-accent: #22b855;
+  --sn-accent-hover: #1da64b;
+}
+
+.sn-sidebar {
+  width: 212px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 8px 6px 6px;
+}
+
+.sn-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 6px;
+  user-select: none;
+}
+
+.sn-logo {
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  background: linear-gradient(135deg, #34c759, #15a349);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 4px 12px rgba(52, 199, 89, 0.32);
+  flex-shrink: 0;
+}
+
+.sn-brand-name {
+  font-size: 14.5px;
+  font-weight: 700;
+  color: var(--sn-text);
+  line-height: 1.2;
+}
+
+.sn-brand-ver {
+  font-size: 10.5px;
+  color: var(--sn-muted);
+  margin-top: 2px;
+}
+
+.sn-quick-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  padding: 0 2px;
+}
+
+.sn-quick-btn {
+  padding: 7px 6px;
+  border-radius: 9px;
+  border: 1px solid var(--sn-border);
+  background: var(--sn-card);
+  color: var(--sn-text);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.14s ease;
+}
+
+.sn-quick-btn:hover {
+  border-color: var(--sn-accent);
+  color: var(--sn-accent);
+  background: var(--sn-hover);
+}
+
+.sn-quick-btn.primary {
+  background: var(--sn-accent);
+  border-color: var(--sn-accent);
+  color: #fff;
+  font-weight: 600;
+}
+
+.sn-quick-btn.primary:hover {
+  background: var(--sn-accent-hover);
+  color: #fff;
+}
+
+.sn-quick-btn.full {
+  grid-column: 1 / -1;
+  font-size: 11.5px;
+}
+
+.sn-nav {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.sn-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border-radius: 10px;
+  border: none;
+  background: transparent;
+  color: var(--sn-muted);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.14s ease;
+  text-align: left;
+}
+
+.sn-nav-item:hover {
+  background: var(--sn-hover);
+  color: var(--sn-text);
+}
+
+.sn-nav-item.active {
+  background: var(--sn-card);
+  color: var(--sn-text);
+  font-weight: 600;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.14);
+}
+
+.sn-nav-item.active .sn-nav-icon {
+  color: var(--sn-accent);
+}
+
+.sn-nav-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.sn-sidebar-foot {
+  padding-top: 4px;
+}
+
+.sn-save-bar {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 9px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--sn-border);
+  background: var(--sn-card);
+  color: var(--sn-muted);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.sn-save-bar.dirty {
+  background: var(--sn-accent);
+  border-color: var(--sn-accent);
+  color: #fff;
+}
+
+.sn-save-bar.dirty:hover {
+  background: var(--sn-accent-hover);
+}
+
+.sn-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--sn-accent);
+}
+
+.sn-dot.active {
+  background: #fff;
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.35);
+}
+
+.sn-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  border-radius: 16px;
+  border: 1px solid var(--sn-border);
+  background: var(--sn-card);
+  overflow: hidden;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.12);
+}
+
+.sn-topbar {
+  height: 40px;
+  padding: 0 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--sn-border);
+  flex-shrink: 0;
+}
+
+.sn-topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sn-dirty-pill {
+  font-size: 11px;
+  font-weight: 600;
+  color: #f59e0b;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(245, 158, 11, 0.14);
+}
+
+.sn-win-close {
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  border: none;
+  background: transparent;
+  color: var(--sn-muted);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.sn-win-close:hover {
+  background: #ef4444;
+  color: #fff;
+}
+
+.sn-scroll {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px 24px 28px;
+}
+
+.sn-scroll.canvas-host {
+  padding: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Shared SnowAir Panel Design System */
+.sn-panel {
+  max-width: 820px;
+  margin: 0 auto;
+}
+
+.sn-section-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.sn-title {
+  margin: 0;
+  font-size: 19px;
+  font-weight: 700;
+  color: var(--sn-text);
+  letter-spacing: -0.01em;
+}
+
+.sn-subtitle {
+  margin: 4px 0 0;
+  font-size: 12.5px;
+  color: var(--sn-muted);
+}
+
+.sn-group-label {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--sn-muted);
+  margin: 10px 2px 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.sn-list-card {
+  border-radius: 12px;
+  border: 1px solid var(--sn-border);
+  background: var(--sn-subtle);
+  overflow: hidden;
+}
+
+.sn-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 13px 16px;
+  border-bottom: 1px solid var(--sn-border);
+}
+
+.sn-row:last-child {
+  border-bottom: none;
+}
+
+.sn-row.col {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.sn-row-info {
+  min-width: 0;
+}
+
+.sn-row-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--sn-text);
+}
+
+.sn-row-desc {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--sn-muted);
+}
+
+.sn-badge {
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--sn-accent) 16%, transparent);
+  color: var(--sn-accent);
+}
+
+.sn-switch {
+  width: 42px;
+  height: 24px;
+  border-radius: 999px;
+  border: none;
+  background: var(--sn-border);
+  position: relative;
+  cursor: pointer;
+  transition: background 0.18s ease;
+  flex-shrink: 0;
+  padding: 0;
+}
+
+.sn-switch.on {
+  background: var(--sn-accent);
+}
+
+.sn-switch-thumb {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.28);
+  transition: transform 0.18s ease;
+}
+
+.sn-switch.on .sn-switch-thumb {
+  transform: translateX(18px);
+}
+
+.sn-seg {
+  display: inline-flex;
+  padding: 3px;
+  border-radius: 9px;
+  border: 1px solid var(--sn-border);
+  background: var(--sn-card);
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.sn-seg-btn {
+  padding: 5px 11px;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: var(--sn-muted);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.14s ease;
+  white-space: nowrap;
+}
+
+.sn-seg-btn.active {
+  background: var(--sn-accent);
+  color: #fff;
+  font-weight: 600;
+}
+
+.sn-primary-btn {
+  padding: 7px 14px;
+  border-radius: 8px;
+  border: none;
+  background: var(--sn-accent);
+  color: #fff;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.14s ease;
+  white-space: nowrap;
+}
+
+.sn-primary-btn:hover {
+  background: var(--sn-accent-hover);
+}
+
+.sn-primary-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.sn-primary-btn.sm {
+  padding: 5px 11px;
+  font-size: 12px;
+}
+
+.sn-ghost-btn {
+  padding: 6px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--sn-border);
+  background: var(--sn-card);
+  color: var(--sn-text);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.sn-ghost-btn:hover {
+  border-color: var(--sn-accent);
+  color: var(--sn-accent);
+}
+
+.sn-input,
+.sn-select {
+  height: 32px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--sn-border);
+  background: var(--sn-card);
+  color: var(--sn-text);
+  font-size: 12.5px;
+  outline: none;
+}
+
+.sn-input {
+  width: 100%;
+}
+
+.sn-input:focus,
+.sn-select:focus {
+  border-color: var(--sn-accent);
+}
+
+.sn-slider {
+  width: 150px;
+  accent-color: var(--sn-accent);
+  cursor: pointer;
+}
+
+.sn-toast {
+  position: fixed;
+  bottom: 18px;
+  right: 22px;
+  padding: 9px 16px;
+  border-radius: 10px;
+  background: #18181b;
+  color: #fafafa;
+  border: 1px solid rgba(52, 199, 89, 0.5);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  font-size: 12.5px;
+  font-weight: 500;
+  z-index: 9999;
+}
+
+.sn-toast-fade-enter-active,
+.sn-toast-fade-leave-active {
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.sn-toast-fade-enter-from,
+.sn-toast-fade-leave-to {
+  opacity: 0;
+  transform: translateY(6px);
+}
 </style>

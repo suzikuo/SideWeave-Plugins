@@ -12,28 +12,30 @@ use windows_sys::Win32::Graphics::Gdi::{
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
+    ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetWindowRect,
-    SetForegroundWindow, SetLayeredWindowAttributes, SetTimer, ShowWindow, LWA_ALPHA, LWA_COLORKEY,
-    SW_HIDE, SW_SHOWNOACTIVATE, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONUP,
-    WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCHITTEST, WM_PAINT, WM_RBUTTONUP, WS_EX_LAYERED,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetCursorPos, GetWindowRect,
+    SetForegroundWindow, SetLayeredWindowAttributes, SetTimer, SetWindowPos, ShowWindow, LWA_ALPHA,
+    LWA_COLORKEY, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE, WM_DESTROY,
+    WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_NCHITTEST, WM_PAINT, WM_RBUTTONUP, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 use crate::capture::ScreenCapture;
-use crate::model::ScreenRect;
+use crate::model::{ScreenPoint, ScreenRect};
 use crate::scroll::{CapturePhase, FrameResult, MatchAxis, ScrollingCapture};
 use crate::scroll_input::{ScrollInputDelta, ScrollInputListener};
+use crate::theme::ThemePalette;
 use crate::toolbar::{
     button_origin as toolbar_button_origin, hit_test as toolbar_hit_test, ToolbarAction,
-    ToolbarMenu, TOOLBAR_BUTTON_HEIGHT, TOOLBAR_BUTTON_WIDTH, TOOLBAR_ITEMS,
+    ToolbarMenu, TOOLBAR_BUTTON_HEIGHT, TOOLBAR_BUTTON_WIDTH,
 };
 
 use super::draw::draw_rect_border;
 use super::editor::open_editor;
-use super::input::{open_toolbar_menu, VK_ESCAPE_CODE, VK_RETURN_CODE};
+use super::input::{open_toolbar_menu, VK_ESCAPE_CODE, VK_RETURN_CODE, VK_SPACE_CODE};
 use super::output::{copy_capture, finish, finish_with_dialog, pin_last};
 use super::paint::draw_rgba_preview;
 use super::toolbar_paint::{
@@ -418,6 +420,12 @@ pub(super) fn stop_scroll_input(state: &mut UiState) {
 }
 
 pub(super) fn scroll_tick(state: &mut UiState) {
+    if state.capture.as_ref().is_some_and(|c| c.scroll_paused) {
+        if !state.overlay.is_null() {
+            unsafe { SetTimer(state.overlay, TIMER_SCROLL, SCROLL_OBSERVE_INTERVAL, None) };
+        }
+        return;
+    }
     let Some(selection) = state.capture.as_ref().and_then(|capture| capture.selection) else {
         return;
     };
@@ -574,7 +582,41 @@ pub(super) fn scroll_control_wnd_proc(
                 0
             }
             WM_ERASEBKGND => 1,
+            WM_LBUTTONDOWN => {
+                let point = ((lparam as i16) as i32, ((lparam >> 16) as i16) as i32);
+                let action = toolbar_hit_test((0, 0), point, scroll_toolbar_layout())
+                    .and_then(scroll_toolbar_action);
+                if action == Some(ToolbarAction::MoveToolbar) {
+                    let mut cursor = windows_sys::Win32::Foundation::POINT { x: 0, y: 0 };
+                    let mut rect: RECT = zeroed();
+                    if GetCursorPos(&mut cursor) != 0 && GetWindowRect(hwnd, &mut rect) != 0 {
+                        state.scroll_toolbar_drag = Some((
+                            ScreenPoint { x: cursor.x, y: cursor.y },
+                            ScreenPoint { x: rect.left, y: rect.top },
+                        ));
+                        SetCapture(hwnd);
+                    }
+                }
+                0
+            }
             WM_MOUSEMOVE => {
+                if let Some((start, origin)) = state.scroll_toolbar_drag {
+                    let mut cursor = windows_sys::Win32::Foundation::POINT { x: 0, y: 0 };
+                    if GetCursorPos(&mut cursor) != 0 {
+                        let nx = origin.x + cursor.x - start.x;
+                        let ny = origin.y + cursor.y - start.y;
+                        SetWindowPos(
+                            hwnd,
+                            null_mut(),
+                            nx,
+                            ny,
+                            0,
+                            0,
+                            SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOSIZE,
+                        );
+                    }
+                    return 0;
+                }
                 if !state.scroll_toolbar_tracking_mouse {
                     let mut tracking = TRACKMOUSEEVENT {
                         cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
@@ -618,12 +660,17 @@ pub(super) fn scroll_control_wnd_proc(
                 0
             }
             WM_LBUTTONUP => {
+                if state.scroll_toolbar_drag.take().is_some() {
+                    ReleaseCapture();
+                    return 0;
+                }
                 let point = ((lparam as i16) as i32, ((lparam >> 16) as i16) as i32);
                 let action = state.capture.as_ref().and_then(|_| {
                     toolbar_hit_test((0, 0), point, scroll_toolbar_layout())
                         .and_then(scroll_toolbar_action)
                 });
                 match action {
+                    Some(ToolbarAction::ScrollPauseToggle) => toggle_scroll_pause(state),
                     Some(ToolbarAction::Pin) => {
                         finish(state);
                         pin_last(state);
@@ -640,6 +687,10 @@ pub(super) fn scroll_control_wnd_proc(
             }
             WM_RBUTTONUP => {
                 cancel(state);
+                0
+            }
+            WM_KEYDOWN if wparam as u32 == VK_SPACE_CODE => {
+                toggle_scroll_pause(state);
                 0
             }
             WM_KEYDOWN if wparam as u32 == VK_ESCAPE_CODE => {
@@ -676,15 +727,33 @@ unsafe fn invalidate_scroll_toolbar_button(hwnd: HWND, index: usize) {
     InvalidateRect(hwnd, &rect, 0);
 }
 
-fn scroll_toolbar_tooltip_label(index: usize) -> Option<&'static str> {
-    let action = scroll_toolbar_action(index)?;
-    if action == ToolbarAction::Copy {
-        return Some("\u{590d}\u{5236}");
+pub(super) fn toggle_scroll_pause(state: &mut UiState) {
+    let paused = if let Some(capture) = state.capture.as_mut() {
+        capture.scroll_paused = !capture.scroll_paused;
+        capture.scroll_paused
+    } else {
+        return;
+    };
+    show_scroll_tip(
+        state,
+        if paused {
+            "长截图已暂停（按 Space 继续）".into()
+        } else {
+            "长截图已继续，请滚动页面".into()
+        },
+    );
+    unsafe {
+        if !state.scroll_control.is_null() {
+            InvalidateRect(state.scroll_control, null(), 0);
+        }
+        if !state.scroll_preview.is_null() {
+            InvalidateRect(state.scroll_preview, null(), 0);
+        }
     }
-    TOOLBAR_ITEMS
-        .iter()
-        .find(|item| item.action == action)
-        .map(|item| item.label)
+}
+
+fn scroll_toolbar_tooltip_label(index: usize) -> Option<&'static str> {
+    Some(scroll_toolbar_action(index)?.label())
 }
 
 unsafe fn update_scroll_toolbar_tooltip(state: &mut UiState, index: Option<usize>) {
@@ -713,11 +782,14 @@ unsafe fn update_scroll_toolbar_tooltip(state: &mut UiState, index: Option<usize
         return;
     };
 
-    let width = if label.chars().count() > 5 { 96 } else { 68 };
-    let height = 24;
+    let s = layout.scale();
+    let width = ((label.chars().count() as f32 * 13.0 + 24.0) * s)
+        .round()
+        .clamp(68.0 * s, 200.0 * s) as i32;
+    let height = (28.0 * s).round() as i32;
     let min_left = screen.left + 4;
     let max_left = (screen.right - width - 4).max(min_left);
-    let center_x = button_x + crate::toolbar::TOOLBAR_BUTTON_WIDTH / 2;
+    let center_x = button_x + layout.button_w / 2;
     let left = (center_x - width / 2).clamp(min_left, max_left);
     let below = toolbar_rect.bottom + 6;
     let min_top = screen.top + 4;
@@ -845,7 +917,7 @@ pub(super) unsafe fn paint_scroll_border(hwnd: HWND) {
         1,
         client.right - client.left - 2,
         client.bottom - client.top - 2,
-        0x00f76f16,
+        0x0059_C734,
         2,
     );
     EndPaint(hwnd, &paint_struct);
@@ -885,7 +957,8 @@ unsafe fn paint_scroll_toolbar_to_dc(
     client: &RECT,
     state: &UiState,
 ) {
-    let background = CreateSolidBrush(0x00ffffff);
+    let theme = state.current_theme();
+    let background = CreateSolidBrush(ThemePalette::colorref(theme.bg));
     FillRect(dc, client, background);
     DeleteObject(background as HGDIOBJ);
 
@@ -896,18 +969,14 @@ unsafe fn paint_scroll_toolbar_to_dc(
             0,
             0,
             layout,
+            &SCROLL_TOOLBAR_ACTIONS,
             capture.tool,
             capture.toolbar_hover,
             false,
-            scroll_toolbar_action,
-            SCROLL_TOOLBAR_ACTIONS.len(),
-            capture.annotation_color,
-            capture.stroke_width,
-            capture.brush_size,
-            capture.text_size,
-            capture.stroke_style,
             false,
+            capture.scroll_paused,
             false,
+            &theme,
         );
     }
 }
@@ -920,14 +989,44 @@ pub(super) unsafe fn scroll_preview_wnd_proc(
     state: &mut UiState,
 ) -> LRESULT {
     match message {
+        WM_ERASEBKGND => 1,
         WM_PAINT => {
             paint_scroll_preview(hwnd, state);
+            0
+        }
+        WM_LBUTTONDOWN => {
+            let y = ((lparam >> 16) as i16) as i32;
+            state.scroll_preview_drag = Some((y, state.scroll_preview_offset));
+            SetCapture(hwnd);
+            0
+        }
+        WM_MOUSEMOVE => {
+            if let Some((start_y, start_offset)) = state.scroll_preview_drag {
+                let y = ((lparam >> 16) as i16) as i32;
+                let dy = start_y - y;
+                state.scroll_preview_offset = (start_offset + dy * 3).max(0);
+                InvalidateRect(hwnd, null(), 0);
+            }
+            0
+        }
+        WM_LBUTTONUP => {
+            if state.scroll_preview_drag.take().is_some() {
+                ReleaseCapture();
+            }
+            0
+        }
+        WM_MOUSEWHEEL => {
+            let delta = ((wparam >> 16) as i16) as i32;
+            state.scroll_preview_offset = (state.scroll_preview_offset - delta).max(0);
+            InvalidateRect(hwnd, null(), 0);
             0
         }
         WM_DESTROY => {
             if state.scroll_preview == hwnd {
                 state.scroll_preview = null_mut();
             }
+            state.scroll_preview_drag = None;
+            state.scroll_preview_offset = 0;
             0
         }
         _ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
@@ -1028,11 +1127,11 @@ pub(super) unsafe fn paint_scroll_preview(hwnd: HWND, state: &UiState) {
     let width = (client.right - client.left).max(1);
     let height = (client.bottom - client.top).max(1);
 
-    let background = CreateSolidBrush(0x0018202b);
+    let background = CreateSolidBrush(0x001E_1E1F);
     FillRect(dc, &client, background);
     DeleteObject(background as HGDIOBJ);
 
-    let accent = CreateSolidBrush(0x00f76f16);
+    let accent = CreateSolidBrush(0x0059_C734);
     let accent_rect = RECT {
         left: 0,
         top: 0,
@@ -1128,26 +1227,60 @@ pub(super) unsafe fn paint_scroll_preview(hwnd: HWND, state: &UiState) {
         assembled.filter(|preview| preview.0 > 0 && preview.1 > 0 && !preview.2.is_empty());
 
     if let Some((assembled_width, assembled_height, pixels)) = assembled_preview {
-        let scale = (image_width as f64 / *assembled_width as f64)
-            .min(image_height as f64 / *assembled_height as f64);
-        let target_width = ((*assembled_width as f64 * scale).round() as i32)
-            .max(1)
-            .min(image_width);
-        let target_height = ((*assembled_height as f64 * scale).round() as i32)
-            .max(1)
-            .min(image_height);
-        let target_x = image_left + (image_width - target_width) / 2;
-        let target_y = image_top + (image_height - target_height) / 2;
-        draw_rgba_preview(
-            dc,
-            pixels,
-            *assembled_width as i32,
-            *assembled_height as i32,
-            target_x,
-            target_y,
-            target_width,
-            target_height,
-        );
+        // Support draggable vertical slice scrolling when the stitched image is tall (SnowAir Image 5!)
+        let aw = *assembled_width as i32;
+        let ah = *assembled_height as i32;
+        let fit_scale = (image_width as f64 / aw.max(1) as f64).min(1.0);
+        let scaled_full_h = (ah as f64 * fit_scale).round() as i32;
+        if scaled_full_h > image_height && aw > 0 {
+            let view_src_h = ((image_height as f64 / fit_scale).round() as i32).clamp(1, ah);
+            let max_src_y = (ah - view_src_h).max(0);
+            let src_y = if state.scroll_preview_offset == 0 {
+                max_src_y // Follow bottom live by default
+            } else {
+                (max_src_y - state.scroll_preview_offset).clamp(0, max_src_y)
+            };
+            let slice_start = (src_y as usize) * (*assembled_width) * 4;
+            let slice_end = ((src_y + view_src_h) as usize) * (*assembled_width) * 4;
+            let target_w = ((aw as f64 * fit_scale).round() as i32).clamp(1, image_width);
+            let target_x = image_left + (image_width - target_w) / 2;
+            if slice_end <= pixels.len() {
+                draw_rgba_preview(
+                    dc,
+                    &pixels[slice_start..slice_end],
+                    aw,
+                    view_src_h,
+                    target_x,
+                    image_top,
+                    target_w,
+                    image_height,
+                );
+                // SnowAir green viewport indicator box
+                draw_rect_border(dc, target_x, image_top, target_w, image_height, 0x0059_C734, 2);
+            }
+        } else {
+            let scale = (image_width as f64 / *assembled_width as f64)
+                .min(image_height as f64 / *assembled_height as f64);
+            let target_width = ((*assembled_width as f64 * scale).round() as i32)
+                .max(1)
+                .min(image_width);
+            let target_height = ((*assembled_height as f64 * scale).round() as i32)
+                .max(1)
+                .min(image_height);
+            let target_x = image_left + (image_width - target_width) / 2;
+            let target_y = image_top + (image_height - target_height) / 2;
+            draw_rgba_preview(
+                dc,
+                pixels,
+                aw,
+                ah,
+                target_x,
+                target_y,
+                target_width,
+                target_height,
+            );
+            draw_rect_border(dc, target_x, target_y, target_width, target_height, 0x0059_C734, 2);
+        }
     } else {
         let waiting = wide("滚动页面开始拼接");
         let mut waiting_rect = RECT {

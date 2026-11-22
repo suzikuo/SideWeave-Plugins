@@ -2113,10 +2113,11 @@ dependencies = [
 
 [[package]]
 name = "sideweave_plugin-screenshot-core"
-version = "0.3.14"
+version = "0.4.0"
 dependencies = [
  "arboard",
  "base64 0.22.1",
+ "chrono",
  "color_quant",
  "encoding_rs",
  "gif",
@@ -2124,6 +2125,7 @@ dependencies = [
  "hex",
  "hmac",
  "image",
+ "md-5",
  "quircs",
  "reqwest",
  "rxing",

@@ -1,6 +1,8 @@
-use crate::model::{Annotation, ScreenPoint, ScreenRect, StrokeStyle};
+use crate::model::{Annotation, OcrRegionBox, ScreenPoint, ScreenRect, Settings, StrokeStyle};
 use crate::scroll::{MatchAxis, ScrollingCapture};
-use crate::toolbar::{SecondaryBarItem, Tool, ToolbarMenu};
+use crate::toolbar::{
+    build_main_actions, SecondaryBarItem, Tool, ToolbarAction, ToolbarMenu,
+};
 
 #[derive(Clone, Copy)]
 pub(super) struct ResizeEdges {
@@ -17,11 +19,15 @@ pub(super) struct CaptureSession {
     pub(super) drag: Option<ScreenPoint>,
     pub(super) selection_move: Option<(ScreenPoint, ScreenRect)>,
     pub(super) selection_resize: Option<(ScreenPoint, ScreenRect, ResizeEdges)>,
+    pub(super) radius_dragging: bool,
+    pub(super) aspect_locked: bool,
+    pub(super) corner_radius: u32,
+    pub(super) drop_shadow: bool,
+    pub(super) toolbar_actions: Vec<ToolbarAction>,
+    pub(super) ui_scale: f32,
     pub(super) toolbar_origin: Option<ScreenPoint>,
     pub(super) toolbar_drag: Option<(ScreenPoint, ScreenPoint)>,
     pub(super) toolbar_hover: Option<usize>,
-    pub(super) tool_palette_open: bool,
-    pub(super) tool_palette_hover: Option<usize>,
     pub(super) secondary_hover: Option<SecondaryBarItem>,
     pub(super) menu: Option<ToolbarMenu>,
     pub(super) menu_hover: Option<usize>,
@@ -32,19 +38,28 @@ pub(super) struct CaptureSession {
     pub(super) brush_size: u32,
     pub(super) text_size: u32,
     pub(super) stroke_style: StrokeStyle,
+    pub(super) shape_filled: bool,
+    pub(super) shape_rounded: bool,
+    pub(super) watermark_text: String,
     pub(super) annotations: Vec<Annotation>,
     pub(super) redo_annotations: Vec<Annotation>,
     pub(super) editing_text: Option<usize>,
     pub(super) number_next: u32,
     pub(super) scroll: Option<ScrollingCapture>,
     pub(super) scroll_axis: Option<MatchAxis>,
+    pub(super) scroll_paused: bool,
+    /// In-place OCR bounding boxes displayed over the selection (relative to selection origin).
+    pub(super) ocr_blocks: Vec<OcrRegionBox>,
+    pub(super) ocr_selected_block: Option<usize>,
+    /// In-place translated RGBA image (matches selection width*height*4) when user clicks Translate!
+    pub(super) translated_image: Option<(usize, usize, Vec<u8>)>,
+    pub(super) show_translated_overlay: bool,
 }
 
 impl CaptureSession {
-    pub(super) fn new(
+    pub(super) fn new_with_settings(
         screen_rect: ScreenRect,
-        annotation_color: [u8; 4],
-        text_size: u32,
+        settings: &Settings,
         scrolling: bool,
     ) -> Self {
         Self {
@@ -54,50 +69,61 @@ impl CaptureSession {
             drag: None,
             selection_move: None,
             selection_resize: None,
+            radius_dragging: false,
+            aspect_locked: false,
+            corner_radius: settings.default_corner_radius,
+            drop_shadow: settings.default_shadow,
+            toolbar_actions: build_main_actions(settings),
+            ui_scale: crate::theme::ui_scale_for_settings(settings),
             toolbar_origin: None,
             toolbar_drag: None,
             toolbar_hover: None,
-            tool_palette_open: false,
-            tool_palette_hover: None,
             secondary_hover: None,
             menu: None,
             menu_hover: None,
             current_pos: None,
             tool: Tool::Select,
-            annotation_color,
-            stroke_width: 4,
-            brush_size: 24,
-            text_size,
+            annotation_color: settings.annotation_rgba(),
+            stroke_width: settings.stroke_width,
+            brush_size: settings.brush_size,
+            text_size: settings.text_size,
             stroke_style: StrokeStyle::Solid,
+            shape_filled: false,
+            shape_rounded: false,
+            watermark_text: settings.watermark_text.clone(),
             annotations: Vec::new(),
             redo_annotations: Vec::new(),
             editing_text: None,
             number_next: 1,
             scroll: scrolling.then(ScrollingCapture::pending),
             scroll_axis: None,
+            scroll_paused: false,
+            ocr_blocks: Vec::new(),
+            ocr_selected_block: None,
+            translated_image: None,
+            show_translated_overlay: false,
         }
     }
 
-    #[cfg(test)]
-    pub(super) fn reset_selection(&mut self) {
-        self.selection = None;
-        self.hover = None;
-        self.drag = None;
-        self.selection_move = None;
-        self.selection_resize = None;
-        self.toolbar_origin = None;
-        self.toolbar_drag = None;
-        self.toolbar_hover = None;
-        self.tool_palette_open = false;
-        self.tool_palette_hover = None;
-        self.secondary_hover = None;
-        self.current_pos = None;
-        self.annotations.clear();
-        self.redo_annotations.clear();
-        self.editing_text = None;
-        self.number_next = 1;
-        self.tool = Tool::Select;
-        self.scroll_axis = None;
+    pub(super) fn new(
+        screen_rect: ScreenRect,
+        annotation_color: [u8; 4],
+        text_size: u32,
+        scrolling: bool,
+    ) -> Self {
+        let mut s = Settings::default();
+        s.text_size = text_size;
+        let mut session = Self::new_with_settings(screen_rect, &s, scrolling);
+        session.annotation_color = annotation_color;
+        session
+    }
+
+    pub(super) fn toolbar_action(&self, index: usize) -> Option<ToolbarAction> {
+        self.toolbar_actions.get(index).copied()
+    }
+
+    pub(super) fn toolbar_button_count(&self) -> usize {
+        self.toolbar_actions.len()
     }
 
     pub(super) fn open_menu(&mut self, menu: ToolbarMenu) {
@@ -109,17 +135,30 @@ impl CaptureSession {
         self.menu = None;
         self.menu_hover = None;
     }
+
     pub(super) fn select_tool(&mut self, tool: Tool) -> bool {
         if self.selection.is_none() {
             return false;
         }
         self.tool = tool;
         self.editing_text = None;
-        self.tool_palette_open = false;
-        self.tool_palette_hover = None;
         self.toolbar_hover = None;
         self.secondary_hover = None;
         true
+    }
+
+    pub(super) fn erase_at(&mut self, point: ScreenPoint) -> bool {
+        if let Some(pos) = self
+            .annotations
+            .iter()
+            .rposition(|ann| ann.hit_test(point, 10))
+        {
+            let removed = self.annotations.remove(pos);
+            self.redo_annotations.push(removed);
+            true
+        } else {
+            false
+        }
     }
 
     pub(super) fn undo(&mut self) -> bool {
@@ -191,32 +230,10 @@ mod tests {
                 right: 100,
                 bottom: 100,
             },
-            [255, 58, 72, 255],
+            [239, 68, 68, 255],
             18,
             false,
         )
-    }
-
-    #[test]
-    fn reset_clears_annotations_and_restores_selection_tool() {
-        let mut capture = session();
-        capture.selection = Some(ScreenRect {
-            left: 1,
-            top: 1,
-            right: 10,
-            bottom: 10,
-        });
-        capture.tool = Tool::Rectangle;
-        capture.annotations.push(Annotation::Number(
-            ScreenPoint { x: 2, y: 2 },
-            1,
-            capture.annotation_color,
-        ));
-        capture.reset_selection();
-        assert!(capture.selection.is_none());
-        assert!(capture.annotations.is_empty());
-        assert_eq!(capture.tool, Tool::Select);
-        assert_eq!(capture.number_next, 1);
     }
 
     #[test]
@@ -231,5 +248,17 @@ mod tests {
         assert!(capture.undo());
         assert_eq!(capture.number_next, 1);
         assert!(!capture.undo());
+    }
+
+    #[test]
+    fn eraser_removes_hit_annotation() {
+        let mut capture = session();
+        capture.annotations.push(Annotation::Number(
+            ScreenPoint { x: 20, y: 20 },
+            1,
+            capture.annotation_color,
+        ));
+        assert!(capture.erase_at(ScreenPoint { x: 22, y: 21 }));
+        assert!(capture.annotations.is_empty());
     }
 }

@@ -4,8 +4,8 @@
   "id": "screenshot",
   "name": "快捷截图",
   "icon": "ui/icon.svg",
-  "version": "0.3.14",
-  "description": "桌面截图与区域录制：滚动长截图、标注、OCR 中文翻译、贴图、动画 WebP 与 GIF 导出",
+  "version": "0.4.0",
+  "description": "SnowAir 风格全能桌面截图套件：区域截图与丰富标注、可自定义双色工具栏、滚动长截图、区域录屏实时标注、离线 OCR 与多引擎图片翻译、智能贴图、演示白板及拼图/PDF·PPT 合并",
   "author": "SideWeave",
   "type": "native",
   "publisher": "sideweave",
@@ -25,9 +25,10 @@
     "entry": "ui/index.html",
     "kind": "vue",
     "assetRoot": "ui",
-    "initialWidth": 760,
-    "initialHeight": 1020,
-    "minWidth": 620,
-    "minHeight": 760
+    "chrome": "plugin",
+    "initialWidth": 980,
+    "initialHeight": 680,
+    "minWidth": 760,
+    "minHeight": 560
   }
 }

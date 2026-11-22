@@ -1,33 +1,43 @@
 use super::draw::{
-    draw_annotations_gdi, draw_banner, draw_preview, draw_rect_border, draw_selection_handles_gdi,
-    draw_size_badge,
+    draw_annotations_gdi, draw_banner, draw_info_capsule_gdi, draw_ocr_blocks_overlay,
+    draw_preview, draw_rect_border, draw_selection_handles_gdi,
 };
 use super::input::{
-    secondary_bar_layout_for, tool_palette_layout_for, tool_palette_origin,
-    toolbar_menu_layout_for, toolbar_origin,
+    info_capsule_for, secondary_bar_layout_for, toolbar_layout_for, toolbar_menu_layout_for,
+    toolbar_origin,
 };
 use super::toolbar_paint::{
-    draw_secondary_bar_gdi, draw_secondary_bar_tooltip, draw_tool_palette_tooltip,
-    draw_toolbar_gdi, draw_toolbar_menu_gdi, draw_toolbar_tooltip, toolbar_layout,
+    argb, create_ui_font, draw_recording_setup_gdi, draw_round_rect_gdip, draw_secondary_bar_gdi,
+    draw_secondary_bar_tooltip, draw_soft_shadow_gdip, draw_toolbar_gdi, draw_toolbar_menu_gdi,
+    draw_toolbar_tooltip, ensure_gdiplus,
 };
-use super::{wide, UiState, DEFAULT_GUI_FONT};
+use super::{wide, UiState};
 use crate::capture::ScreenCapture;
 use crate::model::ScreenRect;
+use crate::theme::ThemePalette;
 
 use std::ffi::c_void;
 use std::mem::{size_of, zeroed};
 use std::ptr::{copy_nonoverlapping, null_mut};
-use windows_sys::Win32::Foundation::{HWND, POINT, RECT};
+use windows_sys::Win32::Foundation::{HWND, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateDIBSection,
-    CreatePen, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, Ellipse, EndPaint,
-    FillRect, GetDC, GetStockObject, Polygon, ReleaseDC, RoundRect,
-    SelectObject, SetBkMode, SetTextColor, StretchDIBits, BITMAPINFO, BITMAPINFOHEADER,
-    BI_RGB, DIB_RGB_COLORS, HDC, HGDIOBJ, PAINTSTRUCT, SRCCOPY,
+    CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, EndPaint, FillRect, GetDC, ReleaseDC,
+    SelectObject, SetBkMode, SetTextColor, StretchDIBits, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+    DIB_RGB_COLORS, HDC, HGDIOBJ, PAINTSTRUCT, SRCCOPY,
+};
+use windows_sys::Win32::Graphics::GdiPlus::{
+    FillModeAlternate, GdipCreateFromHDC, GdipCreatePath, GdipCreatePen1, GdipCreateSolidFill,
+    GdipDeleteBrush, GdipDeleteGraphics, GdipDeletePath, GdipDeletePen, GdipDrawEllipse,
+    GdipFillEllipse, GdipFillPath, GdipAddPathLine, GdipClosePathFigure, GdipSetPixelOffsetMode,
+    GdipSetSmoothingMode, GpBrush, GpGraphics, GpPath, GpPen, GpSolidFill, PixelOffsetModeHalf,
+    SmoothingModeAntiAlias8x8, UnitPixel,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect;
 
-const PLAYER_ACCENT_COLOR: u32 = 0x00f7_6f_16;
+/// SnowAir signature green `#34C759` in ARGB
+const PLAYER_ACCENT_ARGB: u32 = 0xFF_34C759;
+const PLAYER_ACCENT_HOVER_ARGB: u32 = 0xFF_2DB84F;
 
 pub(super) struct GdiSurface {
     pub(super) dc: HDC,
@@ -149,6 +159,9 @@ pub(super) fn paint(hwnd: HWND, state: &mut UiState) {
         state.paint_pending = false;
         let mut paint_struct: PAINTSTRUCT = zeroed();
         let dc = BeginPaint(hwnd, &mut paint_struct);
+        let theme = state.current_theme();
+        let sel_color = ThemePalette::colorref(theme.selection);
+
         if let (Some(screen), Some(capture)) = (state.screen.as_ref(), state.capture.as_ref()) {
             let active_rect = capture.selection.or_else(|| {
                 let start = capture.drag?;
@@ -233,15 +246,44 @@ pub(super) fn paint(hwnd: HWND, state: &mut UiState) {
             if let Some(rect) = active_rect {
                 let rx = rect.left - screen.x;
                 let ry = rect.top - screen.y;
+
+                // In-place translated image overlay (SnowAir Image 8)
+                if capture.show_translated_overlay {
+                    if let Some((tw, th, tpixels)) = capture.translated_image.as_ref() {
+                        draw_rgba_preview(
+                            render_dc,
+                            tpixels,
+                            *tw as i32,
+                            *th as i32,
+                            rx,
+                            ry,
+                            rect.width() as i32,
+                            rect.height() as i32,
+                        );
+                    }
+                } else if !capture.ocr_blocks.is_empty() {
+                    // In-place OCR selectable bounding boxes (SnowAir Image 7)
+                    draw_ocr_blocks_overlay(
+                        render_dc,
+                        rect,
+                        &capture.ocr_blocks,
+                        capture.ocr_selected_block,
+                        screen.x,
+                        screen.y,
+                    );
+                }
+
+                // SnowAir crisp green selection border
                 draw_rect_border(
                     render_dc,
                     rx,
                     ry,
                     rect.width() as i32,
                     rect.height() as i32,
-                    0x00f76f16,
+                    sel_color,
                     2,
                 );
+
                 if capture.selection.is_some() && !state.recording_overlay {
                     draw_selection_handles_gdi(
                         render_dc,
@@ -249,86 +291,52 @@ pub(super) fn paint(hwnd: HWND, state: &mut UiState) {
                         ry,
                         rect.width() as i32,
                         rect.height() as i32,
+                        &theme,
                     );
-                    draw_size_badge(render_dc, rx, ry, rect.width() as i32, rect.height() as i32);
-                    draw_banner(render_dc, 18, 18, "Enter 完成 · Esc 重选");
+                    if let Some(capsule) = info_capsule_for(capture) {
+                        draw_info_capsule_gdi(
+                            render_dc,
+                            capsule,
+                            rect,
+                            capture.aspect_locked,
+                            capture.corner_radius,
+                            capture.drop_shadow,
+                            &theme,
+                            screen.x,
+                            screen.y,
+                        );
+                    }
                 }
+
                 if capture.selection.is_some() && !state.recording_overlay {
                     draw_annotations_gdi(render_dc, capture, screen, screen.x, screen.y);
                     if let (Some(start), Some(current)) = (capture.drag, capture.current_pos) {
-                        draw_preview(
-                            render_dc,
-                            screen,
-                            capture.tool,
-                            start,
-                            current,
-                            screen.x,
-                            screen.y,
-                            capture.stroke_width,
-                            capture.stroke_style,
-                            capture.brush_size,
-                        );
+                        draw_preview(render_dc, screen, capture, start, current, screen.x, screen.y);
                     }
                     let (toolbar_x, toolbar_y) = toolbar_origin(capture);
-                    let toolbar_layout = toolbar_layout(capture.screen_rect);
+                    let tb_layout = toolbar_layout_for(capture);
                     let can_undo = !capture.annotations.is_empty();
                     let can_redo = !capture.redo_annotations.is_empty();
                     let recording_setup_open =
                         capture.menu == Some(crate::toolbar::ToolbarMenu::RecordingFps);
+
                     if !recording_setup_open {
                         draw_toolbar_gdi(
                             render_dc,
                             toolbar_x - screen.x,
                             toolbar_y - screen.y,
-                            toolbar_layout,
+                            tb_layout,
+                            &capture.toolbar_actions,
                             capture.tool,
                             capture.toolbar_hover,
-                            capture.tool_palette_open,
-                            crate::toolbar::toolbar_action,
-                            crate::toolbar::TOOLBAR_BUTTON_COUNT,
-                            capture.annotation_color,
-                            capture.stroke_width,
-                            capture.brush_size,
-                            capture.text_size,
-                            capture.stroke_style,
                             can_undo,
                             can_redo,
+                            false,
+                            false,
+                            &theme,
                         );
                     }
-                    if !recording_setup_open && capture.tool_palette_open {
-                        if let Some((palette_x, palette_y)) = tool_palette_origin(capture) {
-                            let palette_layout = tool_palette_layout_for(capture);
-                            draw_toolbar_gdi(
-                                render_dc,
-                                palette_x - screen.x,
-                                palette_y - screen.y,
-                                palette_layout,
-                                capture.tool,
-                                capture.tool_palette_hover,
-                                false,
-                                crate::toolbar::tool_palette_action,
-                                crate::toolbar::TOOL_PALETTE_ACTIONS.len(),
-                                capture.annotation_color,
-                                capture.stroke_width,
-                                capture.brush_size,
-                                capture.text_size,
-                                capture.stroke_style,
-                                can_undo,
-                                can_redo,
-                            );
-                            if let Some(index) = capture.tool_palette_hover {
-                                draw_tool_palette_tooltip(
-                                    render_dc,
-                                    palette_x - screen.x,
-                                    palette_y - screen.y,
-                                    palette_layout,
-                                    screen.width,
-                                    screen.height,
-                                    index,
-                                );
-                            }
-                        }
-                    }
+
                     if !recording_setup_open {
                         if let Some(mut sec_layout) = secondary_bar_layout_for(capture) {
                             sec_layout.left -= screen.x;
@@ -342,6 +350,10 @@ pub(super) fn paint(hwnd: HWND, state: &mut UiState) {
                                 capture.stroke_width,
                                 capture.brush_size,
                                 capture.text_size,
+                                capture.stroke_style,
+                                capture.shape_filled,
+                                capture.shape_rounded,
+                                &theme,
                             );
                             if let Some(sec_hover) = capture.secondary_hover {
                                 draw_secondary_bar_tooltip(
@@ -351,13 +363,16 @@ pub(super) fn paint(hwnd: HWND, state: &mut UiState) {
                                     screen.height,
                                     sec_hover,
                                     capture.tool,
+                                    &theme,
                                 );
                             }
                         }
                     }
-                    if let Some(menu) = capture.menu.filter(|menu| {
-                        *menu != crate::toolbar::ToolbarMenu::RecordingFps
-                    }) {
+
+                    if let Some(menu) = capture
+                        .menu
+                        .filter(|menu| *menu != crate::toolbar::ToolbarMenu::RecordingFps)
+                    {
                         let mut menu_layout = toolbar_menu_layout_for(capture, menu);
                         menu_layout.left -= screen.x;
                         menu_layout.top -= screen.y;
@@ -365,22 +380,18 @@ pub(super) fn paint(hwnd: HWND, state: &mut UiState) {
                             render_dc,
                             menu_layout,
                             menu,
-                            capture.tool,
                             capture.scroll_axis,
                             capture.menu_hover,
-                            capture.annotation_color,
-                            capture.stroke_width,
-                            capture.brush_size,
-                            capture.text_size,
-                            capture.stroke_style,
+                            &theme,
                         );
                     }
+
                     if recording_setup_open {
                         let setup_layout = crate::toolbar::recording_setup_layout(
                             capture.selection.unwrap(),
                             capture.screen_rect,
                         );
-                        super::toolbar_paint::draw_recording_setup_gdi(
+                        draw_recording_setup_gdi(
                             render_dc,
                             crate::toolbar::RecordingSetupLayout {
                                 left: setup_layout.left - screen.x,
@@ -388,19 +399,25 @@ pub(super) fn paint(hwnd: HWND, state: &mut UiState) {
                                 ..setup_layout
                             },
                             state.recording_show_cursor,
+                            &theme,
                         );
                     }
-                    if !recording_setup_open && !capture.tool_palette_open {
+
+                    if !recording_setup_open {
                         if let Some(index) = capture.toolbar_hover {
-                            draw_toolbar_tooltip(
-                                render_dc,
-                                toolbar_x - screen.x,
-                                toolbar_y - screen.y,
-                                toolbar_layout,
-                                screen.width,
-                                screen.height,
-                                index,
-                            );
+                            if let Some(act) = capture.toolbar_action(index) {
+                                draw_toolbar_tooltip(
+                                    render_dc,
+                                    toolbar_x - screen.x,
+                                    toolbar_y - screen.y,
+                                    tb_layout,
+                                    screen.width,
+                                    screen.height,
+                                    act.label(),
+                                    index,
+                                    &theme,
+                                );
+                            }
                         }
                     }
                 }
@@ -411,22 +428,12 @@ pub(super) fn paint(hwnd: HWND, state: &mut UiState) {
                     hover.top - screen.y,
                     hover.width() as i32,
                     hover.height() as i32,
-                    0x00f76f16,
+                    sel_color,
                     2,
                 );
-                draw_banner(
-                    render_dc,
-                    18,
-                    18,
-                    "点击选窗 · 拖拽框选",
-                );
+                draw_banner(render_dc, 18, 18, "点击选窗 · 拖拽框选 · Esc 取消", &theme);
             } else {
-                draw_banner(
-                    render_dc,
-                    18,
-                    18,
-                    "拖拽框选 · Esc 取消",
-                );
+                draw_banner(render_dc, 18, 18, "拖拽框选区域 · Esc 取消", &theme);
             }
 
             if let Some(render) = render {
@@ -454,10 +461,8 @@ pub(super) fn paint_editor(hwnd: HWND, state: &mut UiState) {
         let dc = BeginPaint(hwnd, &mut paint_struct);
         let mut client: RECT = zeroed();
         GetClientRect(hwnd, &mut client);
+        let theme = state.current_theme();
 
-        // Mouse moves and annotation previews invalidate the editor often.
-        // Reuse cached GDI surfaces so each update only redraws annotations
-        // over the cached screenshot, then present the frame with one blit.
         let canvas_dc = state
             .editor
             .as_ref()
@@ -473,11 +478,12 @@ pub(super) fn paint_editor(hwnd: HWND, state: &mut UiState) {
             .editor
             .as_ref()
             .is_some_and(|editor| editor.recording_preview);
-        let background = CreateSolidBrush(if recording_preview {
-            0x001d1d1f
+        let bg_color = if recording_preview || theme.is_dark {
+            0x001B_1B1D
         } else {
-            0x00f4f5f7
-        });
+            0x00F3_F3F3
+        };
+        let background = CreateSolidBrush(bg_color);
         FillRect(paint_dc, &client, background);
         DeleteObject(background as HGDIOBJ);
 
@@ -530,41 +536,42 @@ pub(super) fn paint_editor(hwnd: HWND, state: &mut UiState) {
                     screen.height,
                 );
             }
-            draw_rect_border(
-                paint_dc,
-                editor.display_rect.left,
-                editor.display_rect.top,
-                editor.display_rect.width() as i32,
-                editor.display_rect.height() as i32,
-                if editor.recording_preview {
-                    0x003d4148
-                } else {
-                    0x00d0d5dd
-                },
-                1,
-            );
             if !editor.recording_preview {
+                draw_rect_border(
+                    paint_dc,
+                    editor.display_rect.left,
+                    editor.display_rect.top,
+                    editor.display_rect.width() as i32,
+                    editor.display_rect.height() as i32,
+                    ThemePalette::colorref(theme.border),
+                    1,
+                );
+            }
+            if !editor.recording_preview {
+                if capture.show_translated_overlay {
+                    if let Some((tw, th, tpixels)) = capture.translated_image.as_ref() {
+                        draw_rgba_preview(
+                            paint_dc,
+                            tpixels,
+                            *tw as i32,
+                            *th as i32,
+                            editor.display_rect.left,
+                            editor.display_rect.top,
+                            editor.display_rect.width() as i32,
+                            editor.display_rect.height() as i32,
+                        );
+                    }
+                }
                 draw_annotations_gdi(paint_dc, capture, screen, screen.x, screen.y);
                 if let (Some(start), Some(current)) = (capture.drag, capture.current_pos) {
-                    draw_preview(
-                        paint_dc,
-                        screen,
-                        capture.tool,
-                        start,
-                        current,
-                        screen.x,
-                        screen.y,
-                        capture.stroke_width,
-                        capture.stroke_style,
-                        capture.brush_size,
-                    );
+                    draw_preview(paint_dc, screen, capture, start, current, screen.x, screen.y);
                 }
             }
 
             let (toolbar_x, toolbar_y) = toolbar_origin(capture);
-            let layout = toolbar_layout(capture.screen_rect);
+            let layout = toolbar_layout_for(capture);
             if editor.recording_preview {
-                draw_recording_player(paint_dc, screen.width, screen.height, editor, state);
+                draw_recording_player(paint_dc, screen.width, screen.height, editor, state, &theme);
             } else {
                 let can_undo = !capture.annotations.is_empty();
                 let can_redo = !capture.redo_annotations.is_empty();
@@ -573,53 +580,15 @@ pub(super) fn paint_editor(hwnd: HWND, state: &mut UiState) {
                     toolbar_x,
                     toolbar_y,
                     layout,
+                    &capture.toolbar_actions,
                     capture.tool,
                     capture.toolbar_hover,
-                    capture.tool_palette_open,
-                    crate::toolbar::toolbar_action,
-                    crate::toolbar::TOOLBAR_BUTTON_COUNT,
-                    capture.annotation_color,
-                    capture.stroke_width,
-                    capture.brush_size,
-                    capture.text_size,
-                    capture.stroke_style,
                     can_undo,
                     can_redo,
+                    false,
+                    false,
+                    &theme,
                 );
-                if capture.tool_palette_open {
-                    if let Some((palette_x, palette_y)) = tool_palette_origin(capture) {
-                        let palette_layout = tool_palette_layout_for(capture);
-                        draw_toolbar_gdi(
-                            paint_dc,
-                            palette_x,
-                            palette_y,
-                            palette_layout,
-                            capture.tool,
-                            capture.tool_palette_hover,
-                            false,
-                            crate::toolbar::tool_palette_action,
-                            crate::toolbar::TOOL_PALETTE_ACTIONS.len(),
-                            capture.annotation_color,
-                            capture.stroke_width,
-                            capture.brush_size,
-                            capture.text_size,
-                            capture.stroke_style,
-                            can_undo,
-                            can_redo,
-                        );
-                        if let Some(index) = capture.tool_palette_hover {
-                            draw_tool_palette_tooltip(
-                                paint_dc,
-                                palette_x,
-                                palette_y,
-                                palette_layout,
-                                screen.width,
-                                screen.height,
-                                index,
-                            );
-                        }
-                    }
-                }
                 if let Some(sec_layout) = secondary_bar_layout_for(capture) {
                     draw_secondary_bar_gdi(
                         paint_dc,
@@ -630,6 +599,10 @@ pub(super) fn paint_editor(hwnd: HWND, state: &mut UiState) {
                         capture.stroke_width,
                         capture.brush_size,
                         capture.text_size,
+                        capture.stroke_style,
+                        capture.shape_filled,
+                        capture.shape_rounded,
+                        &theme,
                     );
                     if let Some(sec_hover) = capture.secondary_hover {
                         draw_secondary_bar_tooltip(
@@ -639,6 +612,7 @@ pub(super) fn paint_editor(hwnd: HWND, state: &mut UiState) {
                             screen.height,
                             sec_hover,
                             capture.tool,
+                            &theme,
                         );
                     }
                 }
@@ -649,19 +623,14 @@ pub(super) fn paint_editor(hwnd: HWND, state: &mut UiState) {
                     paint_dc,
                     menu_layout,
                     menu,
-                    capture.tool,
                     capture.scroll_axis,
                     capture.menu_hover,
-                    capture.annotation_color,
-                    capture.stroke_width,
-                    capture.brush_size,
-                    capture.text_size,
-                    capture.stroke_style,
+                    &theme,
                 );
             }
             if !editor.recording_preview {
-                if !capture.tool_palette_open {
-                    if let Some(index) = capture.toolbar_hover {
+                if let Some(index) = capture.toolbar_hover {
+                    if let Some(act) = capture.toolbar_action(index) {
                         draw_toolbar_tooltip(
                             paint_dc,
                             toolbar_x,
@@ -669,7 +638,9 @@ pub(super) fn paint_editor(hwnd: HWND, state: &mut UiState) {
                             layout,
                             screen.width,
                             screen.height,
+                            act.label(),
                             index,
+                            &theme,
                         );
                     }
                 }
@@ -705,136 +676,603 @@ unsafe fn draw_recording_player(
     height: i32,
     editor: &super::editor::EditorCanvas,
     state: &UiState,
+    theme: &ThemePalette,
 ) {
+    use super::editor::{compute_player_metrics, PlayerHit};
+
     let status = state.recording.snapshot();
-    draw_recording_player_header(dc, width, editor, &status);
+    let is_exporting = status.phase == "exporting";
+    let show_open_folder = !is_exporting && status.last_path.is_some();
+    let m = compute_player_metrics(width, height, status.fps.max(1), show_open_folder);
+    let s = m.scale;
+    let hover = editor.player_hover;
 
-    let footer_height = super::editor::PLAYER_FOOTER_HEIGHT;
-    let footer_top = height - footer_height;
-    let timeline_y = footer_top - super::editor::PLAYER_TIMELINE_GAP;
-    let (play_rect, export_rect, copy_rect) =
-        super::editor::recording_player_button_rects(width, height);
-    let left = super::editor::PLAYER_SIDE_PADDING;
-    let right = (width - super::editor::PLAYER_SIDE_PADDING).max(left + 1);
-    let timeline_frame_count = status.timeline_frame_count();
-    let progress = if timeline_frame_count <= 1 {
-        0.0
-    } else {
-        editor.frame_index as f64
-            / (timeline_frame_count.saturating_sub(1)) as f64
-    }
-    .clamp(0.0, 1.0);
-    let knob_x = left + ((right - left) as f64 * progress).round() as i32;
+    // SnowAir Studio dual-theme surfaces
+    let panel_bg_colorref: u32 = if theme.is_dark { 0x0021_1D1D } else { 0x00FF_FFFF };
+    let divider_colorref: u32 = if theme.is_dark { 0x0034_2E2E } else { 0x00E8_E3E0 };
+    let text_primary: u32 = if theme.is_dark { 0x00FA_F7F5 } else { 0x0024_1F1C };
+    let text_muted: u32 = if theme.is_dark { 0x00A6_9E98 } else { 0x007A_706A };
+    let accent_text: u32 = if theme.is_dark { 0x006A_DA4C } else { 0x003E_9916 };
+    let danger_text: u32 = if theme.is_dark { 0x006B_6BFF } else { 0x003B_3BD9 };
 
-    let track = CreateSolidBrush(0x00d2d8df);
-    let played = CreateSolidBrush(PLAYER_ACCENT_COLOR);
-    let old_brush = SelectObject(dc, track as HGDIOBJ);
-    let old_pen = SelectObject(
-        dc,
-        GetStockObject(windows_sys::Win32::Graphics::Gdi::NULL_PEN as i32),
-    );
-    RoundRect(dc, left, timeline_y - 3, right, timeline_y + 3, 6, 6);
-    SelectObject(dc, played as HGDIOBJ);
-    RoundRect(
-        dc,
-        left,
-        timeline_y - 3,
-        knob_x.max(left + 6),
-        timeline_y + 3,
-        6,
-        6,
-    );
-    SelectObject(dc, old_pen);
-    SelectObject(dc, old_brush);
-    DeleteObject(track as HGDIOBJ);
-    DeleteObject(played as HGDIOBJ);
+    let footer_top = height - m.footer_height;
 
-    let knob_brush = CreateSolidBrush(PLAYER_ACCENT_COLOR);
-    let knob_pen = CreatePen(0, 2, 0x00ffffff);
-    let old_brush = SelectObject(dc, knob_brush as HGDIOBJ);
-    let old_pen = SelectObject(dc, knob_pen as HGDIOBJ);
-    Ellipse(dc, knob_x - 7, timeline_y - 7, knob_x + 7, timeline_y + 7);
-    SelectObject(dc, old_brush);
-    SelectObject(dc, old_pen);
-    DeleteObject(knob_brush as HGDIOBJ);
-    DeleteObject(knob_pen as HGDIOBJ);
-
-    let footer = CreateSolidBrush(0x00ffffff);
-    let footer_rect = RECT {
+    // 1. Solid header & footer panel fills + 1px crisp hairlines
+    let panel_br = CreateSolidBrush(panel_bg_colorref);
+    let header_rc = RECT {
+        left: 0,
+        top: 0,
+        right: width,
+        bottom: m.header_height,
+    };
+    let footer_rc = RECT {
         left: 0,
         top: footer_top,
         right: width,
         bottom: height,
     };
-    FillRect(dc, &footer_rect, footer);
-    DeleteObject(footer as HGDIOBJ);
-    let divider = CreateSolidBrush(0x00e4e7ec);
-    let divider_rect = RECT {
+    FillRect(dc, &header_rc, panel_br);
+    FillRect(dc, &footer_rc, panel_br);
+    DeleteObject(panel_br as HGDIOBJ);
+
+    let div_br = CreateSolidBrush(divider_colorref);
+    let hdr_div = RECT {
+        left: 0,
+        top: m.header_height - 1,
+        right: width,
+        bottom: m.header_height,
+    };
+    let ftr_div = RECT {
         left: 0,
         top: footer_top,
         right: width,
         bottom: footer_top + 1,
     };
-    FillRect(dc, &divider_rect, divider);
-    DeleteObject(divider as HGDIOBJ);
+    FillRect(dc, &hdr_div, div_br);
+    FillRect(dc, &ftr_div, div_br);
+    DeleteObject(div_br as HGDIOBJ);
 
-    let play_brush = CreateSolidBrush(0x00ffffff);
-    let play_pen = CreatePen(0, 1, 0x00dfe4eb);
-    let old_brush = SelectObject(dc, play_brush as HGDIOBJ);
-    let old_pen = SelectObject(dc, play_pen as HGDIOBJ);
-    RoundRect(
-        dc,
-        play_rect.0,
-        play_rect.1,
-        play_rect.2,
-        play_rect.3,
-        10,
-        10,
-    );
-    SelectObject(dc, old_brush);
-    SelectObject(dc, old_pen);
-    DeleteObject(play_brush as HGDIOBJ);
-    DeleteObject(play_pen as HGDIOBJ);
-    let play_center = (play_rect.0 + play_rect.2) / 2;
-    let play_icon_color = CreateSolidBrush(PLAYER_ACCENT_COLOR);
-    if editor.playing {
-        let pause = play_icon_color;
-        let first = RECT {
-            left: play_center - 7,
-            top: play_rect.1 + 12,
-            right: play_center - 2,
-            bottom: play_rect.3 - 12,
+    // 2. GDI+ anti-aliased layer: viewport frame, center play badge, header segmented pills,
+    //    timeline scrubber, play/pause button, action pills & progress bar.
+    ensure_gdiplus();
+    let mut g: *mut GpGraphics = null_mut();
+    if GdipCreateFromHDC(dc, &mut g) == 0 && !g.is_null() {
+        GdipSetSmoothingMode(g, SmoothingModeAntiAlias8x8);
+        GdipSetPixelOffsetMode(g, PixelOffsetModeHalf);
+
+        // 2a. Video preview cinema border & subtle paused play badge
+        let vr = editor.display_rect;
+        let vw = vr.width() as f32;
+        let vh = vr.height() as f32;
+        let frame_border = if theme.is_dark {
+            0x30_FFFFFF
+        } else {
+            0x28_000000
         };
-        let second = RECT {
-            left: play_center + 2,
-            top: play_rect.1 + 12,
-            right: play_center + 7,
-            bottom: play_rect.3 - 12,
+        draw_round_rect_gdip(
+            g,
+            vr.left as f32 - 0.5,
+            vr.top as f32 - 0.5,
+            vw + 1.0,
+            vh + 1.0,
+            2.0 * s,
+            None,
+            Some((frame_border, (1.0 * s).max(1.0))),
+        );
+
+        if !editor.playing && !is_exporting && vw > 96.0 * s && vh > 96.0 * s {
+            let cx = vr.left as f32 + vw * 0.5;
+            let cy = vr.top as f32 + vh * 0.5;
+            let video_hovered = hover == Some(PlayerHit::Video);
+            let badge_r = if video_hovered { 29.0 * s } else { 26.0 * s };
+            let badge_bg = if video_hovered { 0xC8_141418 } else { 0x9C_141418 };
+            let mut br: *mut GpSolidFill = null_mut();
+            if GdipCreateSolidFill(badge_bg, &mut br) == 0 && !br.is_null() {
+                GdipFillEllipse(
+                    g,
+                    br as *mut GpBrush,
+                    cx - badge_r,
+                    cy - badge_r,
+                    badge_r * 2.0,
+                    badge_r * 2.0,
+                );
+                GdipDeleteBrush(br as *mut GpBrush);
+            }
+            let mut pen: *mut GpPen = null_mut();
+            if GdipCreatePen1(
+                if video_hovered { 0x90_FFFFFF } else { 0x55_FFFFFF },
+                (1.5 * s).max(1.0),
+                UnitPixel,
+                &mut pen,
+            ) == 0
+                && !pen.is_null()
+            {
+                GdipDrawEllipse(
+                    g,
+                    pen,
+                    cx - badge_r,
+                    cy - badge_r,
+                    badge_r * 2.0,
+                    badge_r * 2.0,
+                );
+                GdipDeletePen(pen);
+            }
+            draw_gdip_play_triangle(g, cx + 2.0 * s, cy, 10.5 * s, 0xFF_FFFFFF);
+        }
+
+        // 2b. Header status pulse dot
+        let dot_cx = m.side_pad as f32 + 6.0 * s;
+        let dot_cy = m.header_height as f32 * 0.5;
+        let (dot_core, dot_halo) = if is_exporting {
+            (0xFF_F59E0B, 0x38_F59E0B)
+        } else if editor.playing {
+            (PLAYER_ACCENT_ARGB, 0x45_34C759)
+        } else {
+            (PLAYER_ACCENT_ARGB, 0x26_34C759)
         };
-        FillRect(dc, &first, pause);
-        FillRect(dc, &second, pause);
-    } else {
-        let points = [
-            POINT {
-                x: play_center - 5,
-                y: play_rect.1 + 11,
-            },
-            POINT {
-                x: play_center - 5,
-                y: play_rect.3 - 11,
-            },
-            POINT {
-                x: play_center + 8,
-                y: (play_rect.1 + play_rect.3) / 2,
-            },
-        ];
-        let old = SelectObject(dc, play_icon_color as HGDIOBJ);
-        Polygon(dc, points.as_ptr(), points.len() as i32);
-        SelectObject(dc, old);
+        let mut halo_br: *mut GpSolidFill = null_mut();
+        if GdipCreateSolidFill(dot_halo, &mut halo_br) == 0 && !halo_br.is_null() {
+            let hr = 9.0 * s;
+            GdipFillEllipse(g, halo_br as *mut GpBrush, dot_cx - hr, dot_cy - hr, hr * 2.0, hr * 2.0);
+            GdipDeleteBrush(halo_br as *mut GpBrush);
+        }
+        let mut core_br: *mut GpSolidFill = null_mut();
+        if GdipCreateSolidFill(dot_core, &mut core_br) == 0 && !core_br.is_null() {
+            let cr = 4.6 * s;
+            GdipFillEllipse(g, core_br as *mut GpBrush, dot_cx - cr, dot_cy - cr, cr * 2.0, cr * 2.0);
+            GdipDeleteBrush(core_br as *mut GpBrush);
+        }
+
+        // 2c. Header inline segmented presets (Resolution + FPS)
+        let tray_bg = if theme.is_dark { 0xFF_141418 } else { 0xFF_EFEFF4 };
+        let tray_border = if theme.is_dark { 0xFF_2D2D34 } else { 0xFF_DCDFE6 };
+        let seg_active_bg = if theme.is_dark { 0xFF_2B2E35 } else { 0xFF_FFFFFF };
+        let seg_active_border = argb(theme.accent, Some(if theme.is_dark { 0x99 } else { 0x80 }));
+        let seg_hover_bg = if theme.is_dark { 0xFF_222228 } else { 0xFF_E4E7EE };
+
+        // Quality group tray
+        let qg = m.quality_group_rect;
+        draw_round_rect_gdip(
+            g,
+            qg.0 as f32,
+            qg.1 as f32,
+            (qg.2 - qg.0) as f32,
+            (qg.3 - qg.1) as f32,
+            9.0 * s,
+            Some(tray_bg),
+            Some((tray_border, (1.0 * s).max(1.0))),
+        );
+        for (idx, &rect) in m.quality_rects.iter().enumerate() {
+            let active = editor.export_quality_preset == idx as u8;
+            let hovered = !is_exporting && hover == Some(PlayerHit::Quality(idx as u8));
+            if active {
+                if !theme.is_dark {
+                    draw_soft_shadow_gdip(
+                        g,
+                        rect.0 as f32,
+                        rect.1 as f32,
+                        (rect.2 - rect.0) as f32,
+                        (rect.3 - rect.1) as f32,
+                        7.0 * s,
+                        s * 0.45,
+                        false,
+                    );
+                }
+                draw_round_rect_gdip(
+                    g,
+                    rect.0 as f32,
+                    rect.1 as f32,
+                    (rect.2 - rect.0) as f32,
+                    (rect.3 - rect.1) as f32,
+                    7.0 * s,
+                    Some(seg_active_bg),
+                    Some((seg_active_border, (1.0 * s).max(1.0))),
+                );
+            } else if hovered {
+                draw_round_rect_gdip(
+                    g,
+                    rect.0 as f32,
+                    rect.1 as f32,
+                    (rect.2 - rect.0) as f32,
+                    (rect.3 - rect.1) as f32,
+                    7.0 * s,
+                    Some(seg_hover_bg),
+                    None,
+                );
+            }
+        }
+
+        // FPS group tray
+        let fg = m.fps_group_rect;
+        draw_round_rect_gdip(
+            g,
+            fg.0 as f32,
+            fg.1 as f32,
+            (fg.2 - fg.0) as f32,
+            (fg.3 - fg.1) as f32,
+            9.0 * s,
+            Some(tray_bg),
+            Some((tray_border, (1.0 * s).max(1.0))),
+        );
+        for (idx, (&rect, &fps_val)) in m.fps_rects.iter().zip(m.fps_values.iter()).enumerate() {
+            let active = editor.export_fps_preset == fps_val;
+            let hovered = !is_exporting && hover == Some(PlayerHit::Fps(idx));
+            if active {
+                if !theme.is_dark {
+                    draw_soft_shadow_gdip(
+                        g,
+                        rect.0 as f32,
+                        rect.1 as f32,
+                        (rect.2 - rect.0) as f32,
+                        (rect.3 - rect.1) as f32,
+                        7.0 * s,
+                        s * 0.45,
+                        false,
+                    );
+                }
+                draw_round_rect_gdip(
+                    g,
+                    rect.0 as f32,
+                    rect.1 as f32,
+                    (rect.2 - rect.0) as f32,
+                    (rect.3 - rect.1) as f32,
+                    7.0 * s,
+                    Some(seg_active_bg),
+                    Some((seg_active_border, (1.0 * s).max(1.0))),
+                );
+            } else if hovered {
+                draw_round_rect_gdip(
+                    g,
+                    rect.0 as f32,
+                    rect.1 as f32,
+                    (rect.2 - rect.0) as f32,
+                    (rect.3 - rect.1) as f32,
+                    7.0 * s,
+                    Some(seg_hover_bg),
+                    None,
+                );
+            }
+        }
+
+        // 2d. Interactive Scrubber Timeline Strip
+        let timeline_frame_count = status.timeline_frame_count();
+        let progress = if timeline_frame_count <= 1 {
+            0.0
+        } else {
+            editor.frame_index as f64 / (timeline_frame_count.saturating_sub(1)) as f64
+        }
+        .clamp(0.0, 1.0);
+        let tl_left = m.timeline_left as f32;
+        let tl_right = m.timeline_right.max(m.timeline_left + 1) as f32;
+        let tl_y = m.timeline_y as f32;
+        let tl_h = (6.0 * s).max(4.0);
+        let knob_x = tl_left + (tl_right - tl_left) * progress as f32;
+        let tl_track_bg = if theme.is_dark { 0xFF_2D2D34 } else { 0xFF_D2D6DE };
+
+        draw_round_rect_gdip(
+            g,
+            tl_left,
+            tl_y - tl_h * 0.5,
+            tl_right - tl_left,
+            tl_h,
+            tl_h * 0.5,
+            Some(tl_track_bg),
+            None,
+        );
+        let played_w = (knob_x - tl_left).max(tl_h);
+        draw_round_rect_gdip(
+            g,
+            tl_left,
+            tl_y - tl_h * 0.5,
+            played_w.min(tl_right - tl_left),
+            tl_h,
+            tl_h * 0.5,
+            Some(PLAYER_ACCENT_ARGB),
+            None,
+        );
+
+        let tl_active = editor.seeking || hover == Some(PlayerHit::Timeline);
+        if tl_active {
+            let mut glow: *mut GpSolidFill = null_mut();
+            if GdipCreateSolidFill(0x40_34C759, &mut glow) == 0 && !glow.is_null() {
+                let gr = 12.5 * s;
+                GdipFillEllipse(g, glow as *mut GpBrush, knob_x - gr, tl_y - gr, gr * 2.0, gr * 2.0);
+                GdipDeleteBrush(glow as *mut GpBrush);
+            }
+        }
+        let knob_r = if tl_active { 7.5 * s } else { 6.5 * s };
+        let mut knob_fill: *mut GpSolidFill = null_mut();
+        if GdipCreateSolidFill(0xFF_FFFFFF, &mut knob_fill) == 0 && !knob_fill.is_null() {
+            GdipFillEllipse(
+                g,
+                knob_fill as *mut GpBrush,
+                knob_x - knob_r,
+                tl_y - knob_r,
+                knob_r * 2.0,
+                knob_r * 2.0,
+            );
+            GdipDeleteBrush(knob_fill as *mut GpBrush);
+        }
+        let mut knob_ring: *mut GpPen = null_mut();
+        if GdipCreatePen1(PLAYER_ACCENT_ARGB, (2.4 * s).max(2.0), UnitPixel, &mut knob_ring) == 0
+            && !knob_ring.is_null()
+        {
+            GdipDrawEllipse(
+                g,
+                knob_ring,
+                knob_x - knob_r,
+                tl_y - knob_r,
+                knob_r * 2.0,
+                knob_r * 2.0,
+            );
+            GdipDeletePen(knob_ring);
+        }
+
+        // 2e. Footer controls
+        if is_exporting {
+            // Smooth GDI+ progress bar on left
+            let bar_left = m.side_pad as f32;
+            let bar_right = (m.cancel_export_rect.0 - (20.0 * s).round() as i32).max(m.side_pad + 40) as f32;
+            let bar_h = (8.0 * s).max(6.0);
+            let bar_top = footer_top as f32 + (46.0 * s);
+            draw_round_rect_gdip(
+                g,
+                bar_left,
+                bar_top,
+                bar_right - bar_left,
+                bar_h,
+                bar_h * 0.5,
+                Some(tl_track_bg),
+                None,
+            );
+            let fill_w = (bar_right - bar_left) * (f32::from(status.progress_percent.min(100)) / 100.0);
+            if fill_w > 1.0 {
+                draw_round_rect_gdip(
+                    g,
+                    bar_left,
+                    bar_top,
+                    fill_w.max(bar_h).min(bar_right - bar_left),
+                    bar_h,
+                    bar_h * 0.5,
+                    Some(PLAYER_ACCENT_ARGB),
+                    None,
+                );
+            }
+
+            // Cancel Export pill on right
+            let cancel_hovered = hover == Some(PlayerHit::CancelExport);
+            let c_bg = if cancel_hovered {
+                if theme.is_dark { 0x45_EF4444 } else { 0x26_EF4444 }
+            } else if theme.is_dark {
+                0x24_EF4444
+            } else {
+                0x14_EF4444
+            };
+            let c_border = if cancel_hovered { 0xCC_EF4444 } else { 0x80_EF4444 };
+            draw_gdip_pill(g, m.cancel_export_rect, 9.0 * s, c_bg, c_border, s);
+        } else {
+            // Play / Pause button
+            let play_hovered = hover == Some(PlayerHit::Play);
+            let sec_bg = if theme.is_dark { 0xFF_2A2A31 } else { 0xFF_F3F4F7 };
+            let sec_hover_bg = if theme.is_dark { 0xFF_35353E } else { 0xFF_E7E9EF };
+            let sec_border = if theme.is_dark { 0xFF_3D3D47 } else { 0xFF_D7DBE3 };
+
+            draw_gdip_pill(
+                g,
+                m.play_rect,
+                10.0 * s,
+                if play_hovered { sec_hover_bg } else { sec_bg },
+                if play_hovered { argb(theme.accent, Some(0x99)) } else { sec_border },
+                s,
+            );
+            let pcx = (m.play_rect.0 + m.play_rect.2) as f32 * 0.5;
+            let pcy = (m.play_rect.1 + m.play_rect.3) as f32 * 0.5;
+            if editor.playing {
+                let bw = 3.6 * s;
+                let bh = 13.0 * s;
+                let gap = 2.6 * s;
+                draw_round_rect_gdip(
+                    g,
+                    pcx - gap - bw,
+                    pcy - bh * 0.5,
+                    bw,
+                    bh,
+                    1.5 * s,
+                    Some(PLAYER_ACCENT_ARGB),
+                    None,
+                );
+                draw_round_rect_gdip(
+                    g,
+                    pcx + gap,
+                    pcy - bh * 0.5,
+                    bw,
+                    bh,
+                    1.5 * s,
+                    Some(PLAYER_ACCENT_ARGB),
+                    None,
+                );
+            } else {
+                draw_gdip_play_triangle(g, pcx + 1.5 * s, pcy, 7.2 * s, PLAYER_ACCENT_ARGB);
+            }
+
+            // Optional "打开位置" subtle pill
+            if let Some(folder_rect) = m.open_folder_rect {
+                let f_hov = hover == Some(PlayerHit::OpenFolder);
+                let f_bg = if f_hov {
+                    argb(theme.accent, Some(if theme.is_dark { 0x3A } else { 0x28 }))
+                } else {
+                    argb(theme.accent, Some(if theme.is_dark { 0x20 } else { 0x16 }))
+                };
+                draw_gdip_pill(
+                    g,
+                    folder_rect,
+                    7.0 * s,
+                    f_bg,
+                    argb(theme.accent, Some(0x70)),
+                    s,
+                );
+            }
+
+            // Direct 1-click export pills: [ 复制帧 ] [ 导出 WebP ] [ 导出 GIF ] [ 导出 MP4 ]
+            let copy_hov = hover == Some(PlayerHit::CopyFrame);
+            draw_gdip_pill(
+                g,
+                m.copy_rect,
+                9.0 * s,
+                if copy_hov { sec_hover_bg } else { sec_bg },
+                sec_border,
+                s,
+            );
+
+            let webp_hov = hover == Some(PlayerHit::ExportWebp);
+            draw_gdip_pill(
+                g,
+                m.webp_rect,
+                9.0 * s,
+                if webp_hov { sec_hover_bg } else { sec_bg },
+                if webp_hov { argb(theme.accent, Some(0x90)) } else { sec_border },
+                s,
+            );
+
+            let gif_hov = hover == Some(PlayerHit::ExportGif);
+            draw_gdip_pill(
+                g,
+                m.gif_rect,
+                9.0 * s,
+                if gif_hov { sec_hover_bg } else { sec_bg },
+                if gif_hov { argb(theme.accent, Some(0x90)) } else { sec_border },
+                s,
+            );
+
+            let mp4_hov = hover == Some(PlayerHit::ExportMp4);
+            draw_gdip_pill(
+                g,
+                m.mp4_rect,
+                9.0 * s,
+                if mp4_hov { PLAYER_ACCENT_HOVER_ARGB } else { PLAYER_ACCENT_ARGB },
+                if mp4_hov { PLAYER_ACCENT_HOVER_ARGB } else { PLAYER_ACCENT_ARGB },
+                s,
+            );
+        }
+
+        GdipDeleteGraphics(g);
     }
-    DeleteObject(play_icon_color as HGDIOBJ);
 
-    if status.phase != "exporting" {
+    // 3. Crisp ClearType Microsoft YaHei UI text layer
+    let font_title = create_ui_font(15.0, s, true);
+    let font_sub = create_ui_font(11.5, s, false);
+    let font_btn = create_ui_font(13.0, s, true);
+    let font_seg = create_ui_font(12.0, s, true);
+    let font_seg_muted = create_ui_font(12.0, s, false);
+
+    // Header title & metadata
+    let text_left = m.side_pad + (22.0 * s).round() as i32;
+    let text_right = (m.quality_group_rect.0 - (14.0 * s).round() as i32).max(text_left + 80);
+    draw_studio_text(
+        dc,
+        font_title,
+        text_left,
+        (9.0 * s).round() as i32,
+        text_right,
+        (33.0 * s).round() as i32,
+        "录制预览与导出",
+        text_primary,
+        0,
+    );
+    let metadata = format!(
+        "{}×{}  ·  {}  ·  {} FPS  ·  {} 帧",
+        editor.source_width,
+        editor.source_height,
+        format_player_time(status.elapsed_ms),
+        status.fps.max(1),
+        status.frame_count
+    );
+    draw_studio_text(
+        dc,
+        font_sub,
+        text_left,
+        (34.0 * s).round() as i32,
+        text_right,
+        (54.0 * s).round() as i32,
+        &metadata,
+        text_muted,
+        0,
+    );
+
+    // Header segmented labels
+    let q_labels = ["540p", "720p 荐", "1080p"];
+    for (idx, (&rect, &label)) in m.quality_rects.iter().zip(q_labels.iter()).enumerate() {
+        let active = editor.export_quality_preset == idx as u8;
+        draw_studio_text(
+            dc,
+            if active { font_seg } else { font_seg_muted },
+            rect.0,
+            rect.1,
+            rect.2,
+            rect.3,
+            label,
+            if active { accent_text } else { text_muted },
+            1,
+        );
+    }
+    for (&rect, &fps_val) in m.fps_rects.iter().zip(m.fps_values.iter()) {
+        let active = editor.export_fps_preset == fps_val;
+        let label = format!("{fps_val}fps");
+        draw_studio_text(
+            dc,
+            if active { font_seg } else { font_seg_muted },
+            rect.0,
+            rect.1,
+            rect.2,
+            rect.3,
+            &label,
+            if active { accent_text } else { text_muted },
+            1,
+        );
+    }
+
+    // Footer text
+    if is_exporting {
+        let bar_left = m.side_pad;
+        let bar_right = (m.cancel_export_rect.0 - (20.0 * s).round() as i32).max(bar_left + 40);
+        let pct_w = (54.0 * s).round() as i32;
+        let msg = status.message.as_deref().unwrap_or("正在导出…");
+        draw_studio_text(
+            dc,
+            font_btn,
+            bar_left,
+            footer_top + (15.0 * s).round() as i32,
+            bar_right - pct_w,
+            footer_top + (38.0 * s).round() as i32,
+            msg,
+            text_primary,
+            0,
+        );
+        let pct = format!("{}%", status.progress_percent);
+        draw_studio_text(
+            dc,
+            font_btn,
+            bar_right - pct_w,
+            footer_top + (15.0 * s).round() as i32,
+            bar_right,
+            footer_top + (38.0 * s).round() as i32,
+            &pct,
+            accent_text,
+            2,
+        );
+        draw_studio_text(
+            dc,
+            font_btn,
+            m.cancel_export_rect.0,
+            m.cancel_export_rect.1,
+            m.cancel_export_rect.2,
+            m.cancel_export_rect.3,
+            "取消导出",
+            danger_text,
+            1,
+        );
+    } else {
+        let timeline_frame_count = status.timeline_frame_count();
         let fps = status.fps.max(1) as u64;
         let current_ms = editor.frame_index as u64 * 1000 / fps;
         let duration_ms = status
@@ -845,210 +1283,221 @@ unsafe fn draw_recording_player(
             format_player_time(current_ms),
             format_player_time(duration_ms)
         );
-        let export_notice = status.message.as_deref().filter(|message| {
-            message.starts_with("导出失败：") || message.starts_with("导出完成：")
-        });
-        let timestamp_color = match export_notice {
-            Some(message) if message.starts_with("导出失败：") => 0x003b3bcf,
-            Some(_) => 0x00428a31,
-            None => 0x00635b50,
-        };
-        draw_player_text(
+        let msg = status.message.as_deref();
+        let top_y = footer_top + (15.0 * s).round() as i32;
+        let mid_y = footer_top + (38.0 * s).round() as i32;
+        let bot_y = footer_top + (59.0 * s).round() as i32;
+
+        if let Some(m_str) = msg.filter(|v| v.starts_with("导出完成：")) {
+            let file_name = std::path::Path::new(m_str.trim_start_matches("导出完成："))
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(m_str);
+            draw_studio_text(
+                dc,
+                font_btn,
+                m.status_left,
+                top_y,
+                m.status_right,
+                mid_y,
+                "✓ 导出完成",
+                accent_text,
+                0,
+            );
+            draw_studio_text(
+                dc,
+                font_sub,
+                m.status_left,
+                mid_y,
+                m.status_right,
+                bot_y,
+                file_name,
+                text_muted,
+                0,
+            );
+        } else if let Some(m_str) = msg.filter(|v| v.starts_with("导出失败：")) {
+            draw_studio_text(
+                dc,
+                font_btn,
+                m.status_left,
+                top_y,
+                m.status_right,
+                mid_y,
+                "导出失败",
+                danger_text,
+                0,
+            );
+            draw_studio_text(
+                dc,
+                font_sub,
+                m.status_left,
+                mid_y,
+                m.status_right,
+                bot_y,
+                m_str.trim_start_matches("导出失败："),
+                danger_text,
+                0,
+            );
+        } else {
+            draw_studio_text(
+                dc,
+                font_btn,
+                m.status_left,
+                top_y,
+                m.status_right,
+                mid_y,
+                &timestamp,
+                text_primary,
+                0,
+            );
+            let sub_hint = if msg == Some("已取消导出") {
+                "已取消导出 · 可重新调整参数导出"
+            } else {
+                "空格播放/暂停 · 动图参数仅作用于 GIF/WebP"
+            };
+            draw_studio_text(
+                dc,
+                font_sub,
+                m.status_left,
+                mid_y,
+                m.status_right,
+                bot_y,
+                sub_hint,
+                text_muted,
+                0,
+            );
+        }
+
+        if let Some(folder_rect) = m.open_folder_rect {
+            draw_studio_text(
+                dc,
+                font_seg,
+                folder_rect.0,
+                folder_rect.1,
+                folder_rect.2,
+                folder_rect.3,
+                "打开位置",
+                accent_text,
+                1,
+            );
+        }
+
+        draw_studio_text(
             dc,
-            play_rect.2 + 16,
-            footer_top + 12,
-            export_rect.0 - 14,
-            height - 8,
-            export_notice.unwrap_or(&timestamp),
-            timestamp_color,
-            0,
+            font_btn,
+            m.copy_rect.0,
+            m.copy_rect.1,
+            m.copy_rect.2,
+            m.copy_rect.3,
+            "复制帧",
+            text_primary,
+            1,
+        );
+        draw_studio_text(
+            dc,
+            font_btn,
+            m.webp_rect.0,
+            m.webp_rect.1,
+            m.webp_rect.2,
+            m.webp_rect.3,
+            "导出 WebP",
+            text_primary,
+            1,
+        );
+        draw_studio_text(
+            dc,
+            font_btn,
+            m.gif_rect.0,
+            m.gif_rect.1,
+            m.gif_rect.2,
+            m.gif_rect.3,
+            "导出 GIF",
+            text_primary,
+            1,
+        );
+        draw_studio_text(
+            dc,
+            font_btn,
+            m.mp4_rect.0,
+            m.mp4_rect.1,
+            m.mp4_rect.2,
+            m.mp4_rect.3,
+            "导出 MP4",
+            0x00FF_FFFF,
+            1,
         );
     }
 
-    if status.phase == "exporting" {
-        let progress_label = format!(
-            "{} {}%",
-            status.message.as_deref().unwrap_or("正在导出…"),
-            status.progress_percent
-        );
-        draw_player_text(
-            dc,
-            play_rect.2 + 16,
-            footer_top + 6,
-            export_rect.0 - 14,
-            footer_top + 31,
-            &progress_label,
-            0x00635b50,
-            0,
-        );
-        draw_player_progress_bar(
-            dc,
-            play_rect.2 + 16,
-            footer_top + 39,
-            export_rect.0 - 14,
-            footer_top + 47,
-            status.progress_percent,
-        );
-        draw_player_button(dc, export_rect, "正在导出", false);
-    } else {
-        draw_player_button(dc, export_rect, "选择格式导出", true);
-    }
-    draw_player_button(dc, copy_rect, "复制当前帧", false);
+    DeleteObject(font_title as HGDIOBJ);
+    DeleteObject(font_sub as HGDIOBJ);
+    DeleteObject(font_btn as HGDIOBJ);
+    DeleteObject(font_seg as HGDIOBJ);
+    DeleteObject(font_seg_muted as HGDIOBJ);
 }
 
-unsafe fn draw_recording_player_header(
-    dc: HDC,
-    width: i32,
-    editor: &super::editor::EditorCanvas,
-    status: &crate::recorder::RecordingStatus,
+unsafe fn draw_gdip_pill(
+    g: *mut GpGraphics,
+    rect: (i32, i32, i32, i32),
+    radius: f32,
+    fill_argb: u32,
+    border_argb: u32,
+    scale: f32,
 ) {
-    let header_height = super::editor::RECORDING_PREVIEW_HEADER_HEIGHT;
-    let header = CreateSolidBrush(0x00272b31);
-    let header_rect = RECT {
-        left: 0,
-        top: 0,
-        right: width,
-        bottom: header_height,
-    };
-    FillRect(dc, &header_rect, header);
-    DeleteObject(header as HGDIOBJ);
-
-    let accent = CreateSolidBrush(PLAYER_ACCENT_COLOR);
-    let old_accent = SelectObject(dc, accent as HGDIOBJ);
-    Ellipse(dc, 24, 22, 36, 34);
-    SelectObject(dc, old_accent);
-    DeleteObject(accent as HGDIOBJ);
-    let header_accent = CreateSolidBrush(PLAYER_ACCENT_COLOR);
-    let accent_rect = RECT {
-        left: 0,
-        top: header_height - 2,
-        right: width,
-        bottom: header_height,
-    };
-    FillRect(dc, &accent_rect, header_accent);
-    DeleteObject(header_accent as HGDIOBJ);
-
-    let metadata = format!(
-        "{}  ·  {} FPS  ·  {} 帧",
-        format_player_time(status.elapsed_ms),
-        status.fps.max(1),
-        status.frame_count
-    );
-    draw_player_text(dc, 48, 8, width - 160, 34, "录制预览", 0x00f5f7fa, 0);
-    draw_player_text(dc, 48, 34, width - 160, 56, &metadata, 0x00b8c0ca, 0);
-
-    let badge = RECT {
-        left: width - 132,
-        top: 17,
-        right: width - 24,
-        bottom: 47,
-    };
-    let badge_brush = CreateSolidBrush(0x00343a42);
-    let badge_pen = CreatePen(0, 1, 0x00464e58);
-    let old_brush = SelectObject(dc, badge_brush as HGDIOBJ);
-    let old_pen = SelectObject(dc, badge_pen as HGDIOBJ);
-    RoundRect(
-        dc,
-        badge.left,
-        badge.top,
-        badge.right,
-        badge.bottom,
-        12,
-        12,
-    );
-    SelectObject(dc, old_brush);
-    SelectObject(dc, old_pen);
-    DeleteObject(badge_brush as HGDIOBJ);
-    DeleteObject(badge_pen as HGDIOBJ);
-    draw_player_text(
-        dc,
-        badge.left + 6,
-        badge.top,
-        badge.right - 6,
-        badge.bottom,
-        if editor.playing { "正在播放" } else { "预览就绪" },
-        0x00e2e7ed,
-        1,
+    draw_round_rect_gdip(
+        g,
+        rect.0 as f32,
+        rect.1 as f32,
+        (rect.2 - rect.0) as f32,
+        (rect.3 - rect.1) as f32,
+        radius,
+        Some(fill_argb),
+        Some((border_argb, (1.0 * scale).max(1.0))),
     );
 }
 
-unsafe fn draw_player_progress_bar(
-    dc: HDC,
-    left: i32,
-    top: i32,
-    right: i32,
-    bottom: i32,
-    percent: u8,
+unsafe fn draw_gdip_play_triangle(
+    g: *mut GpGraphics,
+    cx: f32,
+    cy: f32,
+    radius: f32,
+    color_argb: u32,
 ) {
-    if right <= left || bottom <= top {
+    let mut path: *mut GpPath = null_mut();
+    if GdipCreatePath(FillModeAlternate, &mut path) != 0 || path.is_null() {
         return;
     }
-    let track_brush = CreateSolidBrush(0x00e4e7ec);
-    let old_brush = SelectObject(dc, track_brush as HGDIOBJ);
-    let old_pen = SelectObject(
-        dc,
-        GetStockObject(windows_sys::Win32::Graphics::Gdi::NULL_PEN as i32),
-    );
-    RoundRect(dc, left, top, right, bottom, bottom - top, bottom - top);
-    SelectObject(dc, old_pen);
-    SelectObject(dc, old_brush);
-    DeleteObject(track_brush as HGDIOBJ);
-
-    let filled_right = left + ((right - left) * i32::from(percent.min(100)) / 100);
-    if filled_right <= left {
-        return;
+    let x1 = cx - radius * 0.72;
+    let y1 = cy - radius * 0.92;
+    let x2 = cx - radius * 0.72;
+    let y2 = cy + radius * 0.92;
+    let x3 = cx + radius * 0.96;
+    let y3 = cy;
+    GdipAddPathLine(path, x1, y1, x2, y2);
+    GdipAddPathLine(path, x2, y2, x3, y3);
+    GdipClosePathFigure(path);
+    let mut br: *mut GpSolidFill = null_mut();
+    if GdipCreateSolidFill(color_argb, &mut br) == 0 && !br.is_null() {
+        GdipFillPath(g, br as *mut GpBrush, path);
+        GdipDeleteBrush(br as *mut GpBrush);
     }
-    let progress_brush = CreateSolidBrush(PLAYER_ACCENT_COLOR);
-    let old_brush = SelectObject(dc, progress_brush as HGDIOBJ);
-    let old_pen = SelectObject(
-        dc,
-        GetStockObject(windows_sys::Win32::Graphics::Gdi::NULL_PEN as i32),
-    );
-    RoundRect(
-        dc,
-        left,
-        top,
-        filled_right,
-        bottom,
-        bottom - top,
-        bottom - top,
-    );
-    SelectObject(dc, old_pen);
-    SelectObject(dc, old_brush);
-    DeleteObject(progress_brush as HGDIOBJ);
+    GdipDeletePath(path);
 }
 
-unsafe fn draw_player_button(dc: HDC, rect: (i32, i32, i32, i32), label: &str, primary: bool) {
-    let fill_color = if primary { PLAYER_ACCENT_COLOR } else { 0x00ffffff };
-    let border_color = if primary {
-        PLAYER_ACCENT_COLOR
-    } else {
-        0x00dfe4ea
-    };
-    let text_color = if primary { 0x00ffffff } else { 0x00343a45 };
-    let brush = CreateSolidBrush(fill_color);
-    let pen = CreatePen(0, 1, border_color);
-    let old_brush = SelectObject(dc, brush as HGDIOBJ);
-    let old_pen = SelectObject(dc, pen as HGDIOBJ);
-    RoundRect(dc, rect.0, rect.1, rect.2, rect.3, 10, 10);
-    SelectObject(dc, old_brush);
-    SelectObject(dc, old_pen);
-    DeleteObject(brush as HGDIOBJ);
-    DeleteObject(pen as HGDIOBJ);
-    draw_player_text(dc, rect.0 + 4, rect.1, rect.2 - 4, rect.3, label, text_color, 1);
-}
-
-unsafe fn draw_player_text(
+unsafe fn draw_studio_text(
     dc: HDC,
+    font: windows_sys::Win32::Graphics::Gdi::HFONT,
     left: i32,
     top: i32,
     right: i32,
     bottom: i32,
     value: &str,
     color: u32,
-    centered: i32,
+    align: i32, // 0 = left, 1 = center, 2 = right
 ) {
-    let old_font = SelectObject(dc, GetStockObject(DEFAULT_GUI_FONT));
+    if right <= left || bottom <= top {
+        return;
+    }
+    let old_font = SelectObject(dc, font as HGDIOBJ);
     SetBkMode(dc, 1);
     SetTextColor(dc, color);
     let text = wide(value);
@@ -1058,12 +1507,18 @@ unsafe fn draw_player_text(
         right,
         bottom,
     };
+    // DT_VCENTER (0x04) | DT_SINGLELINE (0x20) | DT_END_ELLIPSIS (0x8000) | DT_NOPREFIX (0x0800)
+    let align_flag = match align {
+        1 => 0x0000_0001, // DT_CENTER
+        2 => 0x0000_0002, // DT_RIGHT
+        _ => 0x0000_0000, // DT_LEFT
+    };
     DrawTextW(
         dc,
         text.as_ptr(),
         -1,
         &mut rect,
-        0x00000004 | 0x00000020 | if centered == 1 { 0x00000001 } else { 0 },
+        0x0000_0004 | 0x0000_0020 | 0x0000_0800 | 0x0000_8000 | align_flag,
     );
     SelectObject(dc, old_font);
 }
