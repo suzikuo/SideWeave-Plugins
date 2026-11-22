@@ -1,0 +1,19 @@
+{
+  "migrated_version": "3.0.0",
+  "finalized": false,
+  "appliedAt": "2026-11-22T13:54:02.935Z",
+  "log": [
+    {
+      "action": "skipped:missing",
+      "from": "D:\\MyProjects\\SideWeave-Plugins\\.unipi\\config\\compactor.json"
+    },
+    {
+      "action": "skipped:missing",
+      "from": "D:\\MyProjects\\SideWeave-Plugins\\.unipi\\fusion-preset.json"
+    },
+    {
+      "action": "skipped:missing",
+      "from": "D:\\MyProjects\\SideWeave-Plugins\\.unipi\\config\\background-tasks.json"
+    }
+  ]
+}
