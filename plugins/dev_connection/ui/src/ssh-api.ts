@@ -16,6 +16,13 @@ export interface SshProfile {
 
 export interface SshProfileInput extends SshProfile {}
 
+export type SshTerminalPreference = 'auto' | 'pebrel' | 'windows_terminal' | 'cmd'
+
+export interface SshTerminalSettings {
+  terminal: SshTerminalPreference
+  pebrel_path: string
+}
+
 export interface SshKeyInfo {
   name: string
   path: string
@@ -26,6 +33,10 @@ export interface SshKeyInfo {
 export const sshList = () => pluginCall<SshProfile[]>('ssh.list')
 export const sshSave = (profile: SshProfileInput) => pluginCall<SshProfile>('ssh.save', { profile })
 export const sshDelete = (id: string) => pluginCall<void>('ssh.delete', { id })
+export const sshGetTerminalSettings = () => pluginCall<SshTerminalSettings>('ssh.get_terminal_settings')
+export const sshSaveTerminalSettings = (settings: SshTerminalSettings) =>
+  pluginCall<SshTerminalSettings>('ssh.save_terminal_settings', { settings })
+export const sshPickPebrelPath = () => pluginCall<string | null>('ssh.pick_pebrel_path')
 export const sshOpenTerminal = (id: string) => pluginCall<void>('ssh.open_terminal', { id })
 export const sshTest = (id: string) => pluginCall<number>('ssh.test', { id })
 export const sshImportKey = () => pluginCall<SshKeyInfo | null>('ssh.import_key')

@@ -12,10 +12,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+mod terminal;
+
+use terminal::TerminalSettings;
+
 const PLUGIN_ID: &str = "ssh_manager";
 
 const STATE_KEY: &str = "dev_connection_ssh_state";
 const KEYS_KEY: &str = "dev_connection_ssh_keys";
+const TERMINAL_KEY: &str = "dev_connection_ssh_terminal";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const OPENSSH_KEEPALIVE_OPTIONS: [&str; 6] = [
     "-o",
@@ -170,17 +175,34 @@ fn find_profile(context: &PluginContext, id: &str) -> Result<SshProfile, String>
         .ok_or_else(|| "会话不存在".into())
 }
 
-fn find_wt() -> Option<PathBuf> {
-    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-        let path = PathBuf::from(local).join("Microsoft").join("WindowsApps").join("wt.exe");
-        if path.is_file() { return Some(path); }
+fn load_terminal_settings(context: &PluginContext) -> Result<TerminalSettings, String> {
+    let value = context
+        .storage()
+        .get(context.plugin_id(), TERMINAL_KEY)
+        .map_err(|error| error.message)?;
+    match value {
+        Some(value) => serde_json::from_str(&value)
+            .map_err(|error| format!("读取 SSH 终端设置失败：{error}")),
+        None => Ok(TerminalSettings::default()),
     }
-    which("wt.exe")
 }
 
-fn which(name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).map(|directory| directory.join(name)).find(|candidate| candidate.is_file())
+fn save_terminal_settings(
+    context: &PluginContext,
+    mut settings: TerminalSettings,
+) -> Result<TerminalSettings, String> {
+    settings.pebrel_path = settings.pebrel_path.trim().to_owned();
+    if !settings.pebrel_path.is_empty()
+        && !terminal::is_executable_path(std::path::Path::new(&settings.pebrel_path))
+    {
+        return Err("请选择 Pebrel 的 .exe 文件，或留空使用自动查找".into());
+    }
+    let value = serde_json::to_string(&settings).map_err(|error| error.to_string())?;
+    context
+        .storage()
+        .set(context.plugin_id(), TERMINAL_KEY, &value)
+        .map_err(|error| error.message)?;
+    Ok(settings)
 }
 
 fn resolve_key_path(context: &PluginContext, key_path: &str) -> Option<PathBuf> {
@@ -230,15 +252,8 @@ fn open_terminal(context: &PluginContext, profile: &SshProfile) -> Result<(), St
             .to_string_lossy()
             .into_owned();
     }
-    let args = ssh_args(&resolved);
-    if let Some(wt) = find_wt() {
-        let mut terminal_args = vec!["new-tab".into(), "--title".into(), profile.name.clone()];
-        terminal_args.extend(args);
-        return context.system().spawn_with_cwd(&wt.to_string_lossy(), &terminal_args, None).map_err(|error| error.message);
-    }
-    let mut cmd_args = vec!["/K".into()];
-    cmd_args.extend(args);
-    context.system().spawn_with_cwd("cmd.exe", &cmd_args, None).map_err(|error| error.message)
+    let settings = load_terminal_settings(context)?;
+    terminal::open(context, &settings, &profile.name, &ssh_args(&resolved))
 }
 
 fn test_connect(profile: &SshProfile) -> Result<u128, String> {
@@ -377,6 +392,16 @@ impl SshPlugin {
             Some("list") => Ok(serde_json::to_value(load(context).profiles).map_err(|error| error.to_string())?),
             Some("save") => Ok(serde_json::to_value(save_profile(context, parse(&request.payload, "profile")?)?).map_err(|error| error.to_string())?),
             Some("delete") => { let id = string_field(&request.payload, "id")?; let mut file = load(context); let before = file.profiles.len(); file.profiles.retain(|profile| profile.id != id); if before == file.profiles.len() { return Err("会话不存在".into()); } save(context, &file)?; Ok(Value::Null) }
+            Some("get_terminal_settings") => {
+                serde_json::to_value(load_terminal_settings(context)?).map_err(|error| error.to_string())
+            }
+            Some("save_terminal_settings") => {
+                let settings = save_terminal_settings(context, parse(&request.payload, "settings")?)?;
+                serde_json::to_value(settings).map_err(|error| error.to_string())
+            }
+            Some("pick_pebrel_path") => context.system().pick_file(&["exe".into()])
+                .map(|path| path.map(Value::String).unwrap_or(Value::Null))
+                .map_err(|error| error.message),
             Some("open_terminal") => { let profile = find_profile(context, &string_field(&request.payload, "id")?)?; open_terminal(context, &profile)?; Ok(Value::Null) }
             Some("test") => { let profile = find_profile(context, &string_field(&request.payload, "id")?)?; Ok(json!(test_connect(&profile)?)) }
             Some("import_key") => Ok(serde_json::to_value(import_key(context)?).map_err(|error| error.to_string())?),

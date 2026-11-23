@@ -98,6 +98,46 @@ impl Drop for NativePlugin {
     }
 }
 
+#[cfg(windows)]
+#[test]
+fn native_ssh_preview_uses_the_saved_terminal_preference() {
+    let mut plugin = NativePlugin::new(json!({}));
+    let default = plugin.request("call", Some("ssh.get_terminal_settings"), json!({}));
+    assert_eq!(default["result"], json!({"terminal": "auto", "pebrel_path": ""}));
+
+    let rejected = plugin.request(
+        "call",
+        Some("ssh.save_terminal_settings"),
+        json!({"settings": {"terminal": "pebrel", "pebrel_path": "pebrel.exe"}}),
+    );
+    assert_eq!(rejected["ok"], false);
+
+    let missing_pebrel = std::env::temp_dir()
+        .join(uuid::Uuid::new_v4().to_string())
+        .join("pebrel.exe");
+    let settings = json!({"terminal": "pebrel", "pebrel_path": missing_pebrel});
+    let saved = plugin.request(
+        "call",
+        Some("ssh.save_terminal_settings"),
+        json!({"settings": settings}),
+    );
+    assert_eq!(saved["result"], settings);
+    let loaded = plugin.request("call", Some("ssh.get_terminal_settings"), json!({}));
+    assert_eq!(loaded["result"], settings);
+
+    let profile = plugin.request("call", Some("ssh.save"), json!({"profile": {
+        "name": "Test SSH", "host": "127.0.0.1", "port": 22, "user": "test",
+        "auth": "password", "in_preview": true
+    }}));
+    assert_eq!(profile["ok"], true);
+    let preview = plugin.request("call", Some("get_preview"), Value::Null);
+    let connection = &preview["result"]["items"][0];
+    assert_eq!(connection["method"], "ssh.open_terminal");
+    let failed = plugin.request("call", connection["method"].as_str(), connection["payload"].clone());
+    assert_eq!(failed["ok"], false);
+    assert!(failed["error"]["message"].as_str().unwrap().contains("找不到配置的 Pebrel"));
+}
+
 #[test]
 fn native_port_forward_reports_conflicts_and_relays_after_retry() {
     let target = TcpListener::bind(("127.0.0.1", 0)).unwrap();

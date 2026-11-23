@@ -11,16 +11,19 @@ import {
   parseTags,
   sshDelete,
   sshDeleteKey,
+  sshGetTerminalSettings,
   sshImportKey,
   sshList,
   sshListKeys,
   sshOpenTerminal,
   sshPickKeyPath,
+  sshPickPebrelPath,
   sshResolveKey,
   sshSave,
+  sshSaveTerminalSettings,
   sshTest
 } from './ssh-api'
-import type { SshKeyInfo, SshProfile, SshProfileInput } from './ssh-api'
+import type { SshKeyInfo, SshProfile, SshProfileInput, SshTerminalSettings } from './ssh-api'
 
 const profiles = ref<SshProfile[]>([])
 const search = ref('')
@@ -39,6 +42,11 @@ const showDialog = ref(false)
 const editingId = ref<string | null>(null)
 const form = ref(defaultForm())
 const showErrors = ref(false)
+const terminalSettings = ref<SshTerminalSettings | null>(null)
+const loadingTerminalSettings = ref(false)
+const savingTerminalSettings = ref(false)
+const pickingPebrel = ref(false)
+const connectingIds = ref(new Set<string>())
 
 // ---------- 托管密钥（导入即备份，历史可追溯） ----------
 
@@ -211,11 +219,58 @@ function testClass(id: string): string {
 
 // ---------- 会话操作 ----------
 
+async function openTerminalSettings() {
+  if (loadingTerminalSettings.value) return
+  loadingTerminalSettings.value = true
+  try {
+    terminalSettings.value = await sshGetTerminalSettings()
+  } catch (e) {
+    showToast(errorMessage(e), 'error')
+  } finally {
+    loadingTerminalSettings.value = false
+  }
+}
+
+function closeTerminalSettings() {
+  if (!savingTerminalSettings.value && !pickingPebrel.value) terminalSettings.value = null
+}
+
+async function pickPebrel() {
+  if (!terminalSettings.value || pickingPebrel.value || savingTerminalSettings.value) return
+  pickingPebrel.value = true
+  try {
+    const path = await sshPickPebrelPath()
+    if (path && terminalSettings.value) terminalSettings.value.pebrel_path = path
+  } catch (e) {
+    showToast(errorMessage(e), 'error')
+  } finally {
+    pickingPebrel.value = false
+  }
+}
+
+async function saveTerminalSettings() {
+  if (!terminalSettings.value || savingTerminalSettings.value || pickingPebrel.value) return
+  savingTerminalSettings.value = true
+  try {
+    await sshSaveTerminalSettings(terminalSettings.value)
+    terminalSettings.value = null
+    showToast('终端设置已保存', 'success')
+  } catch (e) {
+    showToast(errorMessage(e), 'error')
+  } finally {
+    savingTerminalSettings.value = false
+  }
+}
+
 async function connect(p: SshProfile) {
+  if (connectingIds.value.has(p.id)) return
+  connectingIds.value.add(p.id)
   try {
     await sshOpenTerminal(p.id)
   } catch (e) {
     showToast(errorMessage(e), 'error')
+  } finally {
+    connectingIds.value.delete(p.id)
   }
 }
 
@@ -341,6 +396,15 @@ watch(showDialog, (open) => {
         <Icon name="search" :size="14" />
         <input v-model="search" type="text" placeholder="搜索名称、主机或用户" />
       </div>
+      <Button
+        variant="outline"
+        size="sm"
+        class="btn"
+        :disabled="loadingTerminalSettings"
+        @click="openTerminalSettings"
+      >
+        <Icon name="terminal" :size="14" /> 终端设置
+      </Button>
     </div>
 
     <div class="list">
@@ -371,8 +435,14 @@ watch(showDialog, (open) => {
             <div class="meta">{{ p.user }}@{{ p.host }}:{{ p.port }}</div>
           </div>
 
-          <div class="actions">
-            <Button variant="default" size="sm" class="btn primary connect" @click="connect(p)">连接</Button>
+          <div class="actions" @dblclick.stop>
+            <Button
+              variant="default"
+              size="sm"
+              class="btn primary connect"
+              :disabled="connectingIds.has(p.id)"
+              @click="connect(p)"
+            >{{ connectingIds.has(p.id) ? '打开中…' : '连接' }}</Button>
             <Button variant="outline" size="sm"
               class="btn test"
               :class="testClass(p.id)"
@@ -421,6 +491,62 @@ watch(showDialog, (open) => {
     </div>
 
     <Teleport to="body">
+      <div v-if="terminalSettings" class="mask" @click.self="closeTerminalSettings">
+        <form class="dialog" aria-labelledby="ssh-terminal-settings-title" @submit.prevent="saveTerminalSettings">
+          <h2 id="ssh-terminal-settings-title">SSH 终端设置</h2>
+          <label class="field">
+            <span>打开终端</span>
+            <select v-model="terminalSettings.terminal" :disabled="savingTerminalSettings">
+              <option value="auto">自动</option>
+              <option value="pebrel">Pebrel</option>
+              <option value="windows_terminal">Windows Terminal</option>
+              <option value="cmd">CMD</option>
+            </select>
+            <span v-if="terminalSettings.terminal === 'auto'" class="hint">
+              依次尝试 Pebrel、Windows Terminal 和 CMD。
+            </span>
+          </label>
+          <div v-if="terminalSettings.terminal === 'auto' || terminalSettings.terminal === 'pebrel'" class="field">
+            <label for="ssh-pebrel-path">Pebrel 程序路径</label>
+            <div class="key-row">
+              <input
+                id="ssh-pebrel-path"
+                v-model="terminalSettings.pebrel_path"
+                type="text"
+                placeholder="留空自动查找"
+                spellcheck="false"
+                :disabled="savingTerminalSettings"
+              />
+              <Button
+                variant="outline"
+                size="sm"
+                type="button"
+                class="btn"
+                :disabled="pickingPebrel || savingTerminalSettings"
+                @click="pickPebrel"
+              >选择程序</Button>
+            </div>
+            <span class="hint">连接前请打开 Pebrel。</span>
+          </div>
+          <footer class="dialog-foot">
+            <Button
+              variant="outline"
+              size="sm"
+              type="button"
+              class="btn"
+              :disabled="savingTerminalSettings || pickingPebrel"
+              @click="closeTerminalSettings"
+            >取消</Button>
+            <Button
+              variant="default"
+              size="sm"
+              type="submit"
+              class="btn primary"
+              :disabled="savingTerminalSettings || pickingPebrel"
+            >保存</Button>
+          </footer>
+        </form>
+      </div>
       <div v-if="showDialog" class="mask" @click.self="showDialog = false">
         <div class="dialog">
           <h2>{{ editingId ? '编辑会话' : '新增会话' }}</h2>
@@ -847,14 +973,17 @@ watch(showDialog, (open) => {
   font-size: 12px;
   color: var(--text-muted);
 }
-.field input {
+.field input,
+.field select {
   padding: 7px 10px;
   border-radius: 9px;
   border: 1px solid var(--border);
   background: var(--surface-subtle);
+  color: var(--text);
   outline: none;
 }
-.field input:focus {
+.field input:focus,
+.field select:focus {
   border-color: var(--primary);
 }
 .field input.invalid {
