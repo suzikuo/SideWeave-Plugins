@@ -129,7 +129,7 @@ impl CloudflareTunnelPlugin {
                     let port = config_manager::extract_port(&service.service);
                     let full_host =
                         config_manager::full_hostname(&service.hostname, &tunnel.domain);
-                    let online = checker::is_local_port_listening(port);
+                    let online = checker::local_origin_online(&service.service);
                     service_views.push(ServiceView {
                         id: service.id.clone(),
                         name: service.name.clone(),
@@ -140,6 +140,7 @@ impl CloudflareTunnelPlugin {
                         local_online: online,
                         enabled: service.enabled,
                         disable_chunked_encoding: service.disable_chunked_encoding,
+                        no_tls_verify: service.no_tls_verify,
                         in_preview: service.in_preview,
                     });
                 }
@@ -239,6 +240,7 @@ impl CloudflareTunnelPlugin {
                     if sub.is_empty() {
                         return Err("服务 Hostname 不能为空".to_string());
                     }
+                    let no_tls_verify = s.no_tls_verify && norm_service.starts_with("https://");
                     sanitized.push(ServiceRule {
                         id: if s.id.trim().is_empty() {
                             uuid::Uuid::new_v4().to_string()
@@ -254,6 +256,7 @@ impl CloudflareTunnelPlugin {
                         service: norm_service,
                         enabled: s.enabled,
                         disable_chunked_encoding: s.disable_chunked_encoding,
+                        no_tls_verify,
                         in_preview: s.in_preview,
                     });
                 }

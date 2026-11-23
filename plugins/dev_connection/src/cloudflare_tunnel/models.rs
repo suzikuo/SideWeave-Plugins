@@ -15,6 +15,8 @@ pub struct ServiceRule {
     #[serde(default)]
     pub disable_chunked_encoding: bool,
     #[serde(default)]
+    pub no_tls_verify: bool,
+    #[serde(default)]
     pub in_preview: bool,
 }
 
@@ -63,9 +65,10 @@ pub struct ServiceView {
     pub full_url: String,
     pub service: String,
     pub port: u16,
-    pub local_online: bool,
+    pub local_online: Option<bool>,
     pub enabled: bool,
     pub disable_chunked_encoding: bool,
+    pub no_tls_verify: bool,
     pub in_preview: bool,
 }
 

@@ -146,6 +146,7 @@ const serviceForm = ref({
   service: '',
   enabled: true,
   disable_chunked_encoding: false,
+  no_tls_verify: false,
   in_preview: false
 })
 
@@ -154,9 +155,10 @@ function openAddService() {
   serviceForm.value = {
     name: '',
     hostname: '',
-    service: '127.0.0.1:',
+    service: '',
     enabled: true,
     disable_chunked_encoding: false,
+    no_tls_verify: false,
     in_preview: false
   }
   showServiceDialog.value = true
@@ -170,6 +172,7 @@ function openEditService(s: ServiceRule) {
     service: s.service,
     enabled: s.enabled,
     disable_chunked_encoding: s.disable_chunked_encoding ?? false,
+    no_tls_verify: s.no_tls_verify ?? false,
     in_preview: s.in_preview ?? false
   }
   showServiceDialog.value = true
@@ -186,7 +189,7 @@ async function submitService() {
     return
   }
   if (!service) {
-    showToast('请输入本地端口或地址', 'error')
+    showToast('请输入端口号或 HTTP/HTTPS 源站地址', 'error')
     return
   }
 
@@ -201,6 +204,7 @@ async function submitService() {
         service,
         enabled: serviceForm.value.enabled,
         disable_chunked_encoding: serviceForm.value.disable_chunked_encoding,
+        no_tls_verify: /^https:\/\//i.test(service) && serviceForm.value.no_tls_verify,
         in_preview: serviceForm.value.in_preview
       }
     }
@@ -212,6 +216,7 @@ async function submitService() {
       service,
       enabled: true,
       disable_chunked_encoding: serviceForm.value.disable_chunked_encoding,
+      no_tls_verify: /^https:\/\//i.test(service) && serviceForm.value.no_tls_verify,
       in_preview: serviceForm.value.in_preview
     })
   }
@@ -562,7 +567,7 @@ onUnmounted(() => {
         <div class="services-box">
           <div class="services-bar">
             <div class="sb-title">
-              <span>本地服务</span>
+              <span>服务路由</span>
               <span class="chip count">
                 {{ detail.services.filter(s => s.enabled).length }} / {{ detail.services.length }}
               </span>
@@ -575,7 +580,7 @@ onUnmounted(() => {
           <!-- 空提示 -->
           <div v-if="detail.services.length === 0" class="empty">
             <div class="empty-txt">暂无服务路由</div>
-            <div class="empty-sub">点击右上角“添加服务”，即可将本机端口暴露为子域名。</div>
+            <div class="empty-sub">添加本机端口或远程 HTTP/HTTPS 源站，即可通过子域名访问。</div>
           </div>
 
           <!-- 服务卡片列表 -->
@@ -586,15 +591,15 @@ onUnmounted(() => {
               class="card"
               :class="{ off: !s.enabled }"
             >
-              <!-- 状态呼吸灯：绿色=本地在线且启用，灰色=停用或未启动 -->
+              <!-- 远程源站不使用本机端口探测结果。 -->
               <span
                 class="dot-status"
                 :class="{
-                  online: s.enabled && s.local_online,
-                  paused: !s.enabled,
-                  offline: s.enabled && !s.local_online
+                  online: s.enabled && s.local_online === true,
+                  paused: !s.enabled || s.local_online === null,
+                  offline: s.enabled && s.local_online === false
                 }"
-                :title="!s.enabled ? '已暂停路由' : (s.local_online ? '正常运行中' : '本地端口未启动')"
+                :title="!s.enabled ? '已暂停路由' : (s.local_online === null ? '远程源站，由本机 cloudflared 连接，未探测可用性' : (s.local_online ? '本地端口可连接' : '本地端口未启动'))"
               />
 
               <div class="info">
@@ -603,7 +608,9 @@ onUnmounted(() => {
                   <span class="subdomain-tag mono">{{ s.hostname }}</span>
                   <span class="port-tag mono">→ {{ s.service }}</span>
                   <span v-if="s.disable_chunked_encoding" class="chip count">关闭分块编码</span>
+                  <span v-if="s.no_tls_verify" class="chip offline">证书未校验</span>
                   <span v-if="!s.enabled" class="chip paused">已暂停</span>
+                  <span v-else-if="s.local_online === null" class="chip count">远程源站</span>
                   <span v-else-if="!s.local_online" class="chip offline">本地未启动</span>
                 </div>
                 <div class="row2">
@@ -680,7 +687,7 @@ onUnmounted(() => {
       <div v-if="showServiceDialog" class="mask" @click.self="showServiceDialog = false">
         <div class="dialog">
           <div class="dialog-head">
-            <h3>{{ editingServiceId ? '编辑服务' : '添加本地服务' }}</h3>
+            <h3>{{ editingServiceId ? '编辑服务' : '添加服务' }}</h3>
             <Button variant="outline" size="sm" class="icon-btn" @click="showServiceDialog = false">
               <Icon name="x" :size="14" />
             </Button>
@@ -704,8 +711,15 @@ onUnmounted(() => {
             </label>
 
             <label class="field">
-              <span class="label">本地地址 / 端口 *</span>
-              <input v-model="serviceForm.service" type="text" class="mono" placeholder="6694 或 127.0.0.1:6694" />
+              <span class="label">源站地址 / 本地端口 *</span>
+              <input v-model="serviceForm.service" type="text" class="mono" placeholder="6694 或 https://api.example.com:8443" />
+              <span class="field-tip">支持 HTTP/HTTPS，只填写协议、主机和端口。访问路径和参数随请求转发。</span>
+              <span class="field-tip">云服务由本机连接，请确保本机出口 IP 已在源站白名单中；HTTPS 默认校验证书。</span>
+            </label>
+
+            <label v-if="/^https:\/\//i.test(serviceForm.service.trim())" class="route-option">
+              <input v-model="serviceForm.no_tls_verify" type="checkbox" />
+              <span><strong>跳过源站证书校验</strong><small>用于自签或过期证书。连接仍加密，但不验证源站身份；仅对当前服务生效。</small></span>
             </label>
 
             <label class="route-option">

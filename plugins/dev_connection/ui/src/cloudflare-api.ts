@@ -2,8 +2,8 @@
 
 export type TunnelState = 'stopped' | 'starting' | 'running' | 'error'
 
-export interface ServiceRule { id: string; name: string; hostname: string; service: string; enabled: boolean; disable_chunked_encoding?: boolean; in_preview: boolean }
-export interface ServiceView extends ServiceRule { full_url: string; port: number; local_online: boolean }
+export interface ServiceRule { id: string; name: string; hostname: string; service: string; enabled: boolean; disable_chunked_encoding?: boolean; no_tls_verify?: boolean; in_preview: boolean }
+export interface ServiceView extends ServiceRule { full_url: string; port: number; local_online: boolean | null }
 
 export interface TunnelRecord {
   id: string; name: string; tunnel_id: string; domain: string; created_at: string
